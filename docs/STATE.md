@@ -2,7 +2,13 @@
 
 > Дата фиксации: 2026-06-08. Читать ПЕРВЫМ при старте новой сессии.
 > Авто-память (`MEMORY.md` и связанные файлы) загружается автоматически; этот файл — полный снимок.
-> Связанное: `README.md`, `PLAN.md`, `docs/INCREMENTAL_TEST_PLAN.md`.
+> Связанное: `README.md`, `PLAN.md`, `docs/INCREMENTAL_TEST_PLAN.md`, `docs/DEPLOYMENT.md`,
+> `docs/DEPLOY_RUNBOOK.md`, `docs/MCP_USAGE.md`.
+
+> **Git:** репозиторий `https://github.com/Ailirag/onec-vecgraph` (private), ветка `main`.
+> Флоу: `git add -A; git commit -m "…"; git push`. `.gitignore` исключает `.env`, `.venv/`, `data/`,
+> `snapshots/`, `scripts/*.out.json` — секреты и тяжёлые артефакты не коммитим. Коммитить/пушить ТОЛЬКО
+> по явной просьбе пользователя. Из PowerShell push работает (egress к github:443 открыт, helper=GCM).
 
 ## 1. Что это
 
