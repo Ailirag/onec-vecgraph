@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+
+# uv
+.uv-cache/
+
+# tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# secrets / local config
+.env
+
+# runtime data (Neo4j bind mounts + HF model cache live on disk D under the project)
+data/
+
+# downloaded embedding models
+models/
+
+# ad-hoc verification outputs
+scripts/*.out.json
+
+# configVersion snapshots (test artifacts)
+snapshots/

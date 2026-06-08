@@ -1,0 +1,16 @@
+# Keep the build context (and image) lean.
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+data/            # Neo4j bind-mounts and local caches
+snapshots/
+scripts/
+tests/
+docs/
+.env
+.env.*
+!.env.example
+*.out.json

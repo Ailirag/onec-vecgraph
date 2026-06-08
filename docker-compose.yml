@@ -1,0 +1,78 @@
+name: onec-vecgraph
+
+services:
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: onec_vecgraph_neo4j
+    ports:
+      - "127.0.0.1:7474:7474"   # HTTP browser
+      - "127.0.0.1:7687:7687"   # Bolt
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:-onec_vecgraph_dev}"
+      # Used only by the healthcheck below (harmless custom var).
+      HC_PASSWORD: "${NEO4J_PASSWORD:-onec_vecgraph_dev}"
+      NEO4J_server_memory_heap_initial__size: "4G"
+      NEO4J_server_memory_heap_max__size: "8G"
+      NEO4J_server_memory_pagecache_size: "4G"
+      # Per-transaction memory ceilings (raise the 70%-of-heap default for big writes).
+      NEO4J_dbms_memory_transaction_total_max: "6G"
+      NEO4J_db_memory_transaction_max: "4G"
+    volumes:
+      # Bind mounts keep all Neo4j data on disk D (under the project).
+      - ./data/neo4j/data:/data
+      - ./data/neo4j/logs:/logs
+      - ./data/neo4j/import:/var/lib/neo4j/import
+      - ./data/neo4j/plugins:/plugins
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${HC_PASSWORD}\" 'RETURN 1' >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    restart: unless-stopped
+
+  # MCP server. CPU image by default; for GPU build with
+  #   --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+  # and uncomment the `deploy.resources` block + set EMBEDDING_DEVICE=cuda.
+  app:
+    build:
+      context: .
+      args:
+        EXTRAS: "${EXTRAS:-local-embeddings}"   # or 'cloud-embeddings' for a torch-free image
+        TORCH_INDEX_URL: "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+    container_name: onec_vecgraph_app
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"   # MCP Streamable HTTP at /mcp
+    environment:
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8000"
+      NEO4J_URI: "bolt://neo4j:7687"
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-onec_vecgraph_dev}"
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-local}"   # local | openai | voyage
+      EMBEDDING_DEVICE: "${EMBEDDING_DEVICE:-cpu}"          # local: cpu | cuda | auto
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
+      # Cloud providers (used when EMBEDDING_PROVIDER=openai|voyage; build with EXTRAS=cloud-embeddings):
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+      VOYAGE_API_KEY: "${VOYAGE_API_KEY:-}"
+      EMBEDDING_DIMENSIONS: "${EMBEDDING_DIMENSIONS:-}"
+      HF_HOME: "/models"
+      REQUIRE_TENANT: "true"
+      # Bearer-token auth (recommended for networked access). Enable + provide a token map:
+      #   AUTH_ENABLED=true  AUTH_TOKENS="tok_abc=acme,tok_xyz=globex:ext_crm"
+      AUTH_ENABLED: "${AUTH_ENABLED:-false}"
+      AUTH_TOKENS: "${AUTH_TOKENS:-}"
+    volumes:
+      - ./data/hf-cache:/models   # persist the downloaded embedding model (~1.2 GB)
+    restart: unless-stopped
+    # GPU (uncomment for the cu128 image + a host with NVIDIA Container Toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
