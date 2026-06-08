@@ -3,7 +3,7 @@
 > Дата фиксации: 2026-06-08. Читать ПЕРВЫМ при старте новой сессии.
 > Авто-память (`MEMORY.md` и связанные файлы) загружается автоматически; этот файл — полный снимок.
 > Связанное: `README.md`, `PLAN.md`, `docs/INCREMENTAL_TEST_PLAN.md`, `docs/DEPLOYMENT.md`,
-> `docs/DEPLOY_RUNBOOK.md`, `docs/MCP_USAGE.md`.
+> `docs/DEPLOY_RUNBOOK.md`, `docs/MCP_USAGE.md`, `docs/ITS_PARSER_REQUIREMENTS.md` (контракт парсера ИТС).
 
 > **Git:** репозиторий `https://github.com/Ailirag/onec-vecgraph` (private), ветка `main`.
 > Флоу: `git add -A; git commit -m "…"; git push`. `.gitignore` исключает `.env`, `.venv/`, `data/`,
@@ -229,8 +229,33 @@ find_callers, find_callees, call_path, **find_handlers** (обработчики
 11. **Docker-образ в сессии не собран** (pip-сеть). GPU-в-контейнере требует NVIDIA Container Toolkit +
     cu128 build-arg + раскомментировать `deploy.resources`. Первый запрос качает модель (~1.2 ГБ) в том.
 
-## 11. Ожидающая задача
+## 11. Ожидающие задачи / backlog
 
+### 11.1. Мульти-источник векторизации (config + ИТС + git-артефакты) — СОГЛАСОВАН, НЕ НАЧАТ
+Расширить сервис (НЕ отдельный MCP) реестром источников: документация/артефакты живут в едином графе
+и связываются с объектами конфигурации (`MENTIONS`/`RELATES_TO`) → GraphRAG «требование/ИТС ↔ код».
+Заложено в `PLAN.md §13` (метка `Artifact`/`RELATES_TO`).
+
+**Согласованные решения:**
+- **Все источники — подключаемые git-репозитории** (config-выгрузка, артефакты проекта, и вывод
+  внешнего парсера ИТС). Сервис сам клонит/пуллит → в образ добавить `git` + extra `ingest=[gitpython,pyyaml]`.
+- **Манифест источников — YAML** per-tenant (путь в `.env`), напр. `{type, repo, branch, globs}`.
+- **ИТС — проектный** (per-tenant), не общий (шум/лицензия). Опц. срез по подсистемам проекта.
+- **Одна модель эмбеддингов на tenant** для всех источников (сквозной RRF в одном векторном пространстве).
+- Парсинг ИТС — **внешний инструмент**, контракт промежуточного формата: `docs/ITS_PARSER_REQUIREMENTS.md`.
+
+**Этапы (детально согласованы):**
+1. Измерение `source` (`config`/`its`/`artifact`) сквозь чанк/стор/поиск/MCP/CLI (фундамент, фильтр как `chunk_kinds`).
+2. Обобщение владельца чанка + метки `Document`/`Artifact`, рёбра `MENTIONS`/`RELATES_TO` (schema/store/counts/delete).
+3. Реестр источников + контракт адаптера (`sources/`: `Source` ABC, `DocUnit`, registry, YAML-манифест);
+   текущая векторизация конфигурации → `ConfigSource`; инкремент обобщить на `version_hash`; CLI `ingest`.
+4. Адаптер `git_artifacts` (clone/pull, globs, секционный чанкинг по заголовкам, версия = git blob sha).
+5. Адаптер `its` (читает вывод внешнего парсера из git-репо по контракту; `related_fqns`→`MENTIONS`).
+6. Линковка: `MENTIONS` (упоминания fqn/имён, high precision) + `RELATES_TO` (семантика top-k, confidence).
+7. MCP/доки: фильтр `source`/`corpus` + `expand` доки↔объекты; инструменты `find_related_docs`/`get_document`;
+   обновить `MCP_USAGE.md`/`DEPLOYMENT.md`/`DEPLOY_RUNBOOK.md`/`STATE.md`.
+
+### 11.2. Раунд 2 инкремент-тестов
 `docs/INCREMENTAL_TEST_PLAN.md` — РАУНД 1 (13 кейсов) ВЫПОЛНЕН и проверен (см. п.9, T-CODE-OBJ ✓,
 инкремент идемпотентен после фиксов). РАУНД 2 (added/deleted/rename — кейсы 15–17) НЕ проводился.
 
