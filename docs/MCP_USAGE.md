@@ -67,6 +67,7 @@ onec-vecgraph serve --transport stdio
 | Граф метаданных + `:Detail` | `index` | list_metadata, get_object, get_object_properties, get_dependencies, impact_analysis, find_type_usages |
 | Векторы/чанки | `vectorize` (+`--code`) | semantic_search, hybrid_search |
 | Граф вызовов BSL | `callgraph` | find_callers, find_callees, call_path, find_handlers, и `entry_points`/`calls_by_kind` в metrics |
+| Doc-корпуса (ИТС / артефакты) | `ingest` | search с `source=['its'\|'artifact']`, find_related_docs, get_document |
 
 **Пустой результат поиска или графа вызовов обычно означает «слой не построен для этого tenant», а не
 «ничего не найдено».** Сначала проверьте `metrics` (есть ли routines/chunks).
@@ -86,8 +87,11 @@ AccountingRegister, CalculationRegister, ChartOfCharacteristicTypes, ChartOfAcco
 Report, DataProcessor, Constant, Subsystem, Role, EventSubscription, BusinessProcess, Task,
 ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный список — через `metrics`).
 
+**Корпуса (`source`)**: `config` (сама конфигурация 1С), `its` (документация ИТС), `artifact`
+(проектные документы из git). Каждый хит поиска несёт поле `corpus`.
+
 **Виды чанков (`chunk_kinds`)**: `object`, `attribute`, `tabular_attribute`, `enum_value`,
-`predefined`, `form`, `code`, `subsystem`, `role`.
+`predefined`, `form`, `code`, `subsystem`, `role`, `its`, `artifact`.
 
 **Категории точек входа (`entry_point`)**: `проведение`, `запись`, `удаление`, `заполнение`,
 `проверка_заполнения`, `нумерация`, `выбор`, `событие_формы`.
@@ -97,7 +101,7 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 
 ---
 
-## 4. Карта инструментов по потребности (16)
+## 4. Карта инструментов по потребности (18)
 
 ### Здоровье / контекст
 - **`ping`** — живость сервера (имя/версия).
@@ -105,13 +109,14 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 - **`whoami`** — какой tenant/config разрезолвился для запроса (проверка заголовков).
 
 ### Поиск (нужна векторизация)
-- **`hybrid_search(query, top_k=10, kinds?, chunk_kinds?, subsystem?, expand?)`** — мульти-вектор +
+- **`hybrid_search(query, top_k=10, source?, kinds?, chunk_kinds?, subsystem?, expand?)`** — мульти-вектор +
   полнотекст + RRF. **Дефолт для поиска.** Идентификаторы расщепляются на под-слова (`Продажи`↔`ПродажиТоваров`).
 - **`semantic_search(...)`** — только векторный (та же сигнатура).
-- Фильтры: `kinds` (виды объектов), `chunk_kinds` (виды чанков), `subsystem` (имя/fqn — объекты подсистемы и
-  её потомков). `expand=True` → к каждому хиту добавляется `context` (окрестность графа).
-- Хиты по коду несут `routine_fqn`/`routine` (адрес рутины — можно сразу подать в `find_callers`/`find_callees`).
-- Результат: `{query, mode, results:[{fqn, kind, synonym, via, matched, rrf_score, routine_fqn?, routine?, context?}]}`.
+- Фильтры: `source` (корпус: `config`/`its`/`artifact`), `kinds` (виды объектов), `chunk_kinds` (виды чанков),
+  `subsystem` (имя/fqn — объекты подсистемы и её потомков). `expand=True` → к хиту добавляется `context`.
+- Хиты по коду несут `routine_fqn`/`routine` (адрес рутины — можно сразу подать в `find_callers`/`find_callees`);
+  каждый хит несёт `corpus`.
+- Результат: `{query, mode, results:[{fqn, kind, synonym, via, corpus, matched, rrf_score, routine_fqn?, routine?, context?}]}`.
 
 ### Структура объекта (граф метаданных)
 - **`list_metadata(kind?, name_contains?, limit=200)`** — список объектов (точный фильтр, не семантика).
@@ -125,6 +130,13 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
   CONTAINS/OWNED_BY/SUBSCRIBES/HAS_RIGHT_ON/**WRITES_TO**/…
 - **`impact_analysis(query)`** — кто пострадает при изменении (входящие зависимости).
 - **`find_type_usages(query)`** — где объект используется как тип реквизита/измерения/ресурса.
+
+### Документация по объекту (нужен ingest корпусов ИТС/артефактов)
+- **`find_related_docs(query)`** — доки (ИТС/артефакты), связанные с объектом через `MENTIONS`
+  (явные/сканированные fqn) или `RELATES_TO` (семантика, с `confidence`). «Какие стандарты/доки покрывают объект».
+- **`get_document(fqn)`** — документ по fqn-владельца (`its:<id>` / `artifact:<path>#<n>`, напр. из `fqn` хита поиска):
+  метаданные, полный текст (чанки склеены), связанные объекты.
+- Поиск по докам: `hybrid_search(query, source=["its"]|["artifact"])`; `expand=True` добавит `context.links`.
 
 ### Поведение / код (нужен граф вызовов)
 - **`find_handlers(query)`** — точки входа объекта: обработчики событий форм (event→рутина) + стандартные

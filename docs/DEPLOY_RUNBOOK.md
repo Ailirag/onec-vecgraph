@@ -48,6 +48,9 @@ REQUIRE_TENANT=true
 AUTH_ENABLED=true
 AUTH_TOKENS=tok_erp=erp,tok_ut=ut   # токен=tenant  или  токен=tenant:config
 ```
+Сгенерировать стойкий клиентский токен: `python -c "import secrets; print('tok_'+secrets.token_urlsafe(32))"`.
+Выпуск всех ключей/доступов (bearer-токены, OpenAI/Voyage, git deploy key для источников, HF_TOKEN) и
+их хранение — [DEPLOYMENT.md §10](DEPLOYMENT.md).
 
 > **Критичное правило:** `EMBEDDING_PROVIDER`+`EMBEDDING_MODEL` при индексации и при работе сервиса
 > должны совпадать — размерность векторного индекса фиксируется при `vectorize`.
@@ -107,6 +110,15 @@ docker compose run --rm app onec-vecgraph vectorize --tenant-id erp --code
   сервить на CPU/cloud.
 
 Повторите 3.1–3.3 для остальных (`/dumps/UT --tenant-id ut`, …).
+
+### 3.4. Корпуса документации (опц.): ИТС + проектные артефакты
+Если есть ИТС/проектные доки — описать их в манифесте (`sources.example.yaml`) и заингестить:
+```powershell
+docker compose run --rm -v C:\path\sources.yaml:/m.yaml:ro app `
+  onec-vecgraph ingest /m.yaml --tenant-id erp [--only its|git_artifacts] [--reset] [--link-semantic]
+```
+git-репо источников требуют доступа (deploy key / PAT) — см. [DEPLOYMENT.md §10.4](DEPLOYMENT.md).
+Детали — [DEPLOYMENT.md §5.2](DEPLOYMENT.md).
 
 ---
 

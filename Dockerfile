@@ -28,17 +28,21 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-RUN pip install --upgrade pip
+# `git` is needed to clone artifact/ITS source repos during ingest.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --upgrade pip
 
 # Install dependencies against project metadata first (better layer caching), then the source.
 COPY pyproject.toml README.md ./
 COPY src ./src
 # For local embeddings, install torch from the selected index FIRST so the package's torch>=2.7
 # dep is already satisfied (pip won't pull the default PyPI build over it). Cloud builds skip torch.
+# `ingest` extra (pyyaml) is always included so manifests work in any image variant.
 RUN if echo "${EXTRAS}" | grep -q local-embeddings; then \
         pip install "torch>=2.7" --index-url "${TORCH_INDEX_URL}"; \
     fi && \
-    pip install ".[${EXTRAS}]"
+    pip install ".[${EXTRAS},ingest]"
 
 # HF model cache lives on a mounted volume (first query downloads ~1.2 GB for Qwen3-Embedding-0.6B).
 RUN mkdir -p /models && useradd -m -u 10001 app && chown -R app:app /app /models

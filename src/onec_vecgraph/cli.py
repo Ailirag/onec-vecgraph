@@ -201,16 +201,18 @@ def search(
     kind: list[str] = typer.Option(None, help="Filter by object kind (repeatable): Catalog, Document, Subsystem..."),
     chunk_kind: list[str] = typer.Option(None, help="Filter by chunk kind (repeatable): object, code, attribute, form..."),
     subsystem: str = typer.Option(None, help="Restrict to a subsystem (name/fqn) and its descendants."),
+    source: list[str] = typer.Option(None, help="Filter by corpus (repeatable): config, its, artifact."),
     expand: bool = typer.Option(False, help="Attach a compact graph neighborhood (GraphRAG) to each hit."),
 ) -> None:
-    """Search configuration metadata (semantic or hybrid), with optional filters."""
+    """Search indexed corpora (semantic or hybrid), with optional filters."""
     from . import queries
     from .embeddings.runtime import provider, reranker
     from .storage import Neo4jStore
 
     settings = get_settings()
     embedder = provider(settings)
-    f = dict(kinds=kind or None, chunk_kinds=chunk_kind or None, subsystem=subsystem, expand=expand)
+    f = dict(kinds=kind or None, chunk_kinds=chunk_kind or None, subsystem=subsystem,
+             source=source or None, expand=expand)
     with Neo4jStore.from_settings(settings) as store:
         if mode == "semantic":
             rprint(queries.semantic_search(store, tenant_id, query, embedder, top_k, **f))
@@ -231,6 +233,22 @@ def metrics(
 
     with Neo4jStore.from_settings(get_settings()) as store:
         rprint(queries.metrics(store, tenant_id, subsystem))
+
+
+@app.command()
+def ingest(
+    manifest: str = typer.Argument(..., help="Path to a sources manifest (YAML/JSON)."),
+    tenant_id: str = typer.Option(None, help="Tenant id (overrides manifest 'tenant')."),
+    only: str = typer.Option(None, help="Ingest only this source type: config_dump | its | git_artifacts."),
+    reset: bool = typer.Option(False, help="Rebuild corpora from scratch (default: incremental by version_hash)."),
+    link_semantic: bool = typer.Option(False, help="Also create RELATES_TO edges via nearest config objects."),
+) -> None:
+    """Ingest configured sources (ITS / project artifacts / config) for a tenant, per a manifest."""
+    from .ingest import ingest_manifest
+
+    rprint(ingest_manifest(manifest, get_settings(), tenant_id=tenant_id, only_type=only,
+                           reset=reset, link_semantic=link_semantic))
+    _flush_exit()
 
 
 @app.command()

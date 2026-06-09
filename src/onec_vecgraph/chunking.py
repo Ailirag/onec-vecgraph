@@ -125,6 +125,7 @@ class Chunk:
     config_id: str
     config_version: str | None = None  # owner object's configVersion at embed time
     entry_point: str | None = None  # behavior-trigger category for code chunks (see classify_entry_point)
+    source: str = "config"  # corpus: config | its | artifact (multi-source vectorization)
 
     def props(self) -> dict[str, Any]:
         return {
@@ -139,6 +140,7 @@ class Chunk:
             # CamelCase queries match (see search_tokens()).
             "text_tokens": search_tokens(self.text_ident, self.name),
             "entry_point": self.entry_point,
+            "source": self.source,
             "config_id": self.config_id,
             "config_version": self.config_version,
         }
@@ -399,3 +401,34 @@ def role_chunk(row: dict[str, Any]) -> Chunk:
         config_id=row.get("config_id", ""),
         config_version=row.get("config_version"),
     )
+
+
+def doc_chunks(title: str, text: str, *, source: str, owner_fqn: str, config_id: str = "",
+               section_path: list[str] | None = None) -> list["Chunk"]:
+    """Chunk an external document section (ITS / artifact) into one or more :Chunk under a doc owner.
+    Breadcrumb prefix = title ▸ section_path; large sections split by the same budget as code.
+    chunk_kind == source (its | artifact)."""
+    section_path = section_path or []
+    head = " ▸ ".join([title, *section_path]) if section_path else title
+    segments = _split_code(text, _CODE_BUDGET_NONWS)
+    multi = len(segments) > 1
+    ident = f"{title} {' '.join(section_path)}".strip()
+    out: list[Chunk] = []
+    for i, seg in enumerate(segments):
+        suffix = f"#chunk/{i}" if multi else "#chunk"
+        part = f" (часть {i + 1}/{len(segments)})" if multi else ""
+        out.append(
+            Chunk(
+                fqn=f"{owner_fqn}{suffix}",
+                owner_fqn=owner_fqn,
+                chunk_kind=source,
+                name=title,
+                synonym=title,
+                text=f"{head}{part}\n{seg}",
+                text_ident=ident,
+                config_id=config_id,
+                config_version=None,
+                source=source,
+            )
+        )
+    return out

@@ -50,6 +50,15 @@ def test_code_chunks_splits_large_routine_without_truncation() -> None:
     assert all(f.split("#code")[0] == "Document.РеализацияТоваров.Module.ObjectModule::Большая" for f in fqns)
 
 
+def test_chunk_source_defaults_to_config_and_is_in_props() -> None:
+    c = chunking.object_chunk({"kind": "Catalog", "name": "X", "synonym": "Икс", "fqn": "Catalog.X"})
+    assert c.source == "config"
+    assert c.props()["source"] == "config"
+    c2 = chunking.subsystem_chunk({"fqn": "Subsystem.S", "name": "S", "synonym": "S", "members": []})
+    c2.source = "its"
+    assert c2.props()["source"] == "its"
+
+
 def test_subsystem_chunk_lists_composition() -> None:
     row = {"fqn": "Subsystem.Продажи", "name": "Продажи", "synonym": "Продажи", "comment": "Учёт продаж",
            "config_id": "base", "config_version": "v1",

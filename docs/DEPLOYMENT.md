@@ -129,6 +129,28 @@ docker compose run --rm app onec-vecgraph vectorize --tenant-id ut  --code
 Тот же сервер затем отдаёт обе: `X-Tenant-Id: erp` → ERP, `X-Tenant-Id: ut` → УТ (или bearer-токены
 `AUTH_TOKENS="tok_erp=erp,tok_ut=ut"`). Состояние индексации по каждому tenant видно через `metrics`.
 
+### 5.2. Несколько источников: конфигурация + ИТС + артефакты (`ingest`)
+
+Помимо самой конфигурации сервер индексирует **корпуса документации**: 1С:ИТS и проектные документы.
+Все источники описываются в **YAML/JSON-манифесте** (см. `sources.example.yaml`) и заливаются одной
+командой; каждый источник — отдельный корпус (`source` = `config`/`its`/`artifact`) в том же tenant.
+
+```bash
+# манифест монтируем внутрь; артефакты/ИТС — git-репо (клон системным git) или локальный path
+docker compose run --rm -v /path/to/sources.yaml:/m.yaml:ro app \
+  onec-vecgraph ingest /m.yaml --tenant-id erp                 # все источники, инкрементально
+docker compose run --rm app onec-vecgraph ingest /m.yaml --tenant-id erp --only its --reset
+docker compose run --rm app onec-vecgraph ingest /m.yaml --tenant-id erp --link-semantic  # +RELATES_TO
+```
+- `git_artifacts`/`its` тянутся из git (`repo`+`branch`) — нужен доступ к репозиторию (ключ/токен в
+  окружении контейнера); для офлайна/теста — `path` к локальной папке.
+- Инкремент по `version_hash`: повторный `ingest` переэмбеддит только изменённые разделы/файлы.
+- **ИТС — проектный** (per-tenant); вывод внешнего парсера ИТС складывается в git-репо по контракту
+  `docs/ITS_PARSER_REQUIREMENTS.md`. Контент ИТS проприетарный — репозиторий приватный.
+- `config_dump` в манифесте делегирует существующему конвейеру (index + callgraph + vectorize).
+- Связи с объектами: `MENTIONS` (упоминания fqn) всегда; `RELATES_TO` (семантика) — по `--link-semantic`.
+- Потребитель ищет по корпусам: `hybrid_search(source=["its"])`, `find_related_docs(object)`, `get_document(fqn)`.
+
 ---
 
 ## 6. Доставка модели эмбеддингов (local)
@@ -182,3 +204,65 @@ docker compose run --rm app onec-vecgraph vectorize --tenant-id ut  --code
 - [ ] Neo4j: пароль из секрета (не дефолтный), бэкап тома, достаточная память.
 - [ ] Данные арендаторов проиндексированы (граф/векторы/callgraph) — иначе инструменты вернут пусто.
 - [ ] Реплики `app` за балансировщиком при нагрузке (stateless — безопасно).
+- [ ] Все секреты — из секрет-хранилища (не в git/образе); см. §10.
+
+---
+
+## 10. Ключи, доступы и секреты (выпуск и хранение)
+
+Сводка всего, что нужно «выписать» при поднятии:
+
+| Секрет | Где используется | Обязателен |
+|---|---|---|
+| `AUTH_TOKENS` (bearer-токены клиентов) | доступ к MCP (tenant из токена) | да, при `AUTH_ENABLED=true` |
+| `NEO4J_PASSWORD` | подключение к Neo4j | да |
+| `OPENAI_API_KEY` / `VOYAGE_API_KEY` | облачные эмбеддинги | если `EMBEDDING_PROVIDER=openai\|voyage` |
+| git deploy key / PAT | клон репо артефактов и ИТС при `ingest` | если источники из git |
+| `HF_TOKEN` | загрузка локальной модели с HuggingFace | нет (снимает rate-limit) |
+
+### 10.1. Bearer-токены клиентов (выпускаем мы сами)
+Это **наши** токены (не от провайдера): произвольная случайная строка, которую сервер сопоставляет с tenant.
+Сгенерировать стойкий токен:
+```bash
+python -c "import secrets; print('tok_' + secrets.token_urlsafe(32))"   # или: openssl rand -hex 32
+```
+Собрать карту `токен=tenant[:config]` (по токену на потребителя/проект — удобно для отзыва):
+```
+AUTH_ENABLED=true
+AUTH_TOKENS="tok_9f3…=erp,tok_a71…=ut,tok_b42…=globex:ext_crm"
+```
+Клиент шлёт `Authorization: Bearer tok_9f3…`; `X-Tenant-Id` игнорируется. **Ротация/отзыв:** изменить
+`AUTH_TOKENS` и перезапустить `app` (`docker compose up -d app`). Хранить как секрет (см. §10.6), не в git.
+
+### 10.2. Облачные API-ключи (если EMBEDDING_PROVIDER=openai|voyage)
+- **OpenAI:** platform.openai.com → *API keys* → *Create*. Желательно ключ уровня проекта с лимитом
+  бюджета. Для шлюза (Azure/прокси) дополнительно `OPENAI_BASE_URL`. → `OPENAI_API_KEY=sk-…`.
+- **Voyage:** dashboard.voyageai.com → *API Keys*. → `VOYAGE_API_KEY=…`.
+- Эти ключи нужны и при **офлайн-векторизации** (она тоже эмбеддит), и серверу (эмбеддинг запроса).
+
+### 10.3. Neo4j
+Задать стойкий `NEO4J_PASSWORD` (compose прокидывает его и в `neo4j`, и в `app`). Дефолт
+`onec_vecgraph_dev` — только для локалки. Поменять пароль уже поднятого Neo4j — пересоздать с новым
+`NEO4J_AUTH` (или `ALTER USER neo4j SET PASSWORD …` в cypher-shell), затем обновить env `app`.
+
+### 10.4. Доступ к git-репозиториям источников (артефакты / ИТС)
+`ingest` клонирует репо системным `git` внутри контейнера → нужен read-only доступ. Варианты:
+- **SSH deploy key (рекомендуется):** создать read-only ключ в настройках репо, примонтировать в
+  контейнер: `-v /secure/id_ed25519:/home/app/.ssh/id_ed25519:ro` (+ `known_hosts`), URL вида
+  `git@host:org/repo.git`.
+- **HTTPS + PAT:** токен только на чтение; URL `https://<user>:<PAT>@host/org/repo.git` (PAT — секрет,
+  не коммитить; лучше через credential-helper/секрет, чем в открытом URL).
+Для офлайна/без сети — выгрузить репо в папку и указать `path` вместо `repo` в манифесте.
+
+### 10.5. HuggingFace token (опционально, local-эмбеддинги)
+Анонимная загрузка модели работает, но с rate-limit-предупреждением. Токен (huggingface.co →
+*Settings* → *Access Tokens*, read) снимает лимит: задать env `HF_TOKEN=hf_…`; модель кешируется в
+томе `HF_HOME` (один раз).
+
+### 10.6. Хранение секретов
+- `.env` — **в `.gitignore`** (уже исключён); в образ не попадает.
+- Docker Compose: подхватывает переменные из окружения/`.env`; для прода — docker/swarm secrets или
+  секрет-хранилище CI (GitLab CI variables, Vault), инъекция в env при деплое.
+- Не печатать секреты в логи; `whoami` показывает только tenant/config, не токен.
+- Ротация: токены клиентов и API-ключи — периодически; при компрометации немедленно убрать из
+  `AUTH_TOKENS`/провайдера и перезапустить.

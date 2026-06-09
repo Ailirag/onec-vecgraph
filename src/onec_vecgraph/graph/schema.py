@@ -5,6 +5,8 @@ from __future__ import annotations
 NODE_LABELS = [
     "Object", "Field", "TabularSection", "EnumValue", "Predefined", "Form", "Module", "Chunk",
     "Routine", "Detail",
+    # Multi-source doc corpora (ITS / project artifacts) — own the doc chunks, link to Objects.
+    "Document", "Artifact",
 ]
 
 

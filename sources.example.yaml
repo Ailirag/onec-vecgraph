@@ -1,0 +1,26 @@
+# Example source manifest for `onec-vecgraph ingest`.
+# One file per tenant (project). Each entry is a corpus; all are scoped to the tenant.
+#   onec-vecgraph ingest sources.example.yaml --tenant-id projectA [--reset] [--link-semantic]
+# Run with --only <type> to ingest a single corpus.
+
+tenant: projectA            # optional; --tenant-id overrides
+
+sources:
+  # The 1C configuration itself (rich typed pipeline: index + callgraph + vectorize).
+  - type: config_dump
+    path: /dumps/ERP_UH     # local path (mount the dump into the container at runtime)
+    code: true              # also vectorize BSL code (cAST)
+    callgraph: true         # also build the BSL call graph
+
+  # Project documentation/artifacts from a git repository (Markdown/AsciiDoc).
+  - type: git_artifacts
+    repo: git@example.com:projectA/docs.git   # or: path: /local/dir for offline
+    branch: main
+    globs: ["**/*.md", "docs/**/*.adoc"]
+
+  # 1C:ITS — the normalized output of the EXTERNAL ITS parser, in a git repo.
+  # Format contract: docs/ITS_PARSER_REQUIREMENTS.md
+  - type: its
+    repo: git@example.com:projectA/its-normalized.git   # or: path: /its/projectA
+    branch: main
+    globs: ["**/*.json"]

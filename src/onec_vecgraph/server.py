@@ -47,6 +47,9 @@ WHICH TOOL (by need):
 • Relationships → get_dependencies / impact_analysis (who breaks if it changes) / find_type_usages.
 • Behavior & code → find_handlers (what runs on posting/writing/validation + form events),
   find_callers / find_callees / call_path (BSL call graph).
+• Documentation → search with source=['its'|'artifact'] (1C ITS / project docs, if ingested);
+  find_related_docs (docs linked to an object) / get_document (full doc by fqn). Search hits carry
+  a 'corpus' field; filter by source to keep config and docs separate.
 
 DATA-DEPTH LAYERS (cheap → exhaustive): search & list (discovery) → get_object (semantic structure)
 → get_object_properties / :Detail (every raw property). The detail layer is deliberately NOT
@@ -147,46 +150,68 @@ def find_type_usages(ctx: Context, query: str) -> dict[str, Any]:
         return queries.find_type_usages(store, _tenant(ctx), query)
 
 
+@mcp.tool()
+def find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
+    """Documentation (ITS / project artifacts) linked to an object (by fqn or name) via MENTIONS
+    (explicit/scanned fqns) or RELATES_TO (semantic, with confidence). Answers 'what standards/docs
+    cover this object'. Returns docs:[{fqn, label, source, title, source_url, rel, confidence}].
+    Requires the corresponding corpus to have been ingested (see the `ingest` pipeline)."""
+    with Neo4jStore.from_settings(settings) as store:
+        return queries.find_related_docs(store, _tenant(ctx), query)
+
+
+@mcp.tool()
+def get_document(ctx: Context, fqn: str) -> dict[str, Any]:
+    """Full document by owner fqn ('its:<id>' / 'artifact:<path>#<n>', e.g. from a search hit's fqn):
+    metadata, full text (chunks rejoined) and the config objects it links to."""
+    with Neo4jStore.from_settings(settings) as store:
+        return queries.get_document(store, _tenant(ctx), fqn)
+
+
 # ── search ────────────────────────────────────────────────────────────
 @mcp.tool()
 def semantic_search(
     ctx: Context, query: str, top_k: int = 10, kinds: list[str] | None = None,
-    chunk_kinds: list[str] | None = None, subsystem: str | None = None, expand: bool = False,
+    chunk_kinds: list[str] | None = None, subsystem: str | None = None,
+    source: list[str] | None = None, expand: bool = False,
 ) -> dict[str, Any]:
-    """Semantic (multi-vector) search over the configuration by meaning.
+    """Semantic (multi-vector) search over the indexed corpora by meaning.
 
-    Optional filters: kinds (object kinds like ['Catalog','Document','Subsystem']),
-    chunk_kinds (['object','attribute','code','form','enum_value','predefined','subsystem','role']),
-    subsystem (name/fqn — restrict to objects contained in that subsystem or its descendants).
-    Code hits are returned at routine granularity (field 'routine_fqn'). expand=True attaches a
-    compact graph neighborhood ('context') to each hit (GraphRAG).
-    Returns: {query, mode, results:[{fqn, kind, synonym, via (chunk kind), matched (chunk text),
-    rrf_score, routine_fqn?/routine? (code), context? (expand)}]}. Requires prior vectorization."""
+    Optional filters: source (corpus: ['config','its','artifact'] — config = the 1C configuration,
+    its = 1C ITS docs, artifact = project docs), kinds (object kinds like
+    ['Catalog','Document','Subsystem']), chunk_kinds (['object','attribute','code','form',
+    'enum_value','predefined','subsystem','role']), subsystem (name/fqn — restrict to that subsystem
+    or its descendants). Code hits return routine granularity ('routine_fqn'); each hit carries
+    'corpus'. expand=True attaches a compact graph neighborhood ('context') to each hit (GraphRAG).
+    Returns: {query, mode, results:[{fqn, kind, synonym, via, corpus, matched, rrf_score,
+    routine_fqn?/routine? (code), context? (expand)}]}. Requires prior vectorization."""
     from .embeddings.runtime import provider
 
     with Neo4jStore.from_settings(settings) as store:
         return queries.semantic_search(
             store, _tenant(ctx), query, provider(settings), top_k,
-            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, expand=expand,
+            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source, expand=expand,
         )
 
 
 @mcp.tool()
 def hybrid_search(
     ctx: Context, query: str, top_k: int = 10, kinds: list[str] | None = None,
-    chunk_kinds: list[str] | None = None, subsystem: str | None = None, expand: bool = False,
+    chunk_kinds: list[str] | None = None, subsystem: str | None = None,
+    source: list[str] | None = None, expand: bool = False,
 ) -> dict[str, Any]:
     """Hybrid search (multi-vector + full-text + RRF). Best for mixed meaning/identifier queries.
 
-    Same optional filters as semantic_search (kinds / chunk_kinds / subsystem / expand). Identifiers
-    are sub-word tokenized, so 'Продажи' matches 'ПродажиТоваров'. Code hits are routine-grained.
+    Same optional filters as semantic_search (source / kinds / chunk_kinds / subsystem / expand).
+    source selects corpora (['config','its','artifact']). Identifiers are sub-word tokenized, so
+    'Продажи' matches 'ПродажиТоваров'. Code hits are routine-grained; each hit carries 'corpus'.
     Same result shape as semantic_search. Requires prior vectorization."""
     from .embeddings.runtime import provider, reranker
 
     with Neo4jStore.from_settings(settings) as store:
         return queries.hybrid_search(
             store, _tenant(ctx), query, provider(settings), top_k, reranker=reranker(settings),
-            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, expand=expand,
+            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source, expand=expand,
         )
 
 

@@ -50,3 +50,10 @@ def test_rrf_fuse_surfaces_routine_address_for_code_units() -> None:
     fused = _rrf_fuse([("semantic", sem)], top_k=5)
     assert fused[0]["routine_fqn"] == "Catalog.X.Module.M::Провести"
     assert fused[0]["routine"] == "Провести"
+
+
+def test_rrf_fuse_surfaces_corpus_from_source() -> None:
+    sem = [{"fqn": "Document.X", "kind": "Document", "via": "its",
+            "chunk_fqn": "its::a#0", "source": "its", "matched": "методика проведения"}]
+    fused = _rrf_fuse([("semantic", sem)], top_k=5)
+    assert fused[0]["corpus"] == "its"

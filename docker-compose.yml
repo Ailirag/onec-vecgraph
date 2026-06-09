@@ -60,6 +60,7 @@ services:
       VOYAGE_API_KEY: "${VOYAGE_API_KEY:-}"
       EMBEDDING_DIMENSIONS: "${EMBEDDING_DIMENSIONS:-}"
       HF_HOME: "/models"
+      HF_TOKEN: "${HF_TOKEN:-}"   # optional: removes HuggingFace model-download rate limit
       REQUIRE_TENANT: "true"
       # Bearer-token auth (recommended for networked access). Enable + provide a token map:
       #   AUTH_ENABLED=true  AUTH_TOKENS="tok_abc=acme,tok_xyz=globex:ext_crm"

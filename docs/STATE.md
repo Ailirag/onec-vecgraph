@@ -125,24 +125,37 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   запрос → на CPU достаточно; тяжёлая индексация/векторизация — офлайн (CLI, GPU-хост). **NB: образ в этой
   сессии не собирался** (нужен интернет для pip: torch/transformers); compose-конфиг валиден (`compose config`).
   Consumer-overview сервер отдаёт клиенту в `instructions` (`server.INSTRUCTIONS`); гайд — `docs/MCP_USAGE.md`.
+- **Мультиисточник векторизации (2026-06-08, РЕАЛИЗОВАН п.1–7)**: измерение `source` (config/its/artifact)
+  сквозь чанк/поиск/MCP/CLI; узлы-владельцы `:Document`/`:Artifact` (обобщён `write_chunks(owner_label=…)`);
+  пакет `sources/` (контракт `Source`/`DocUnit`, реестр, YAML/JSON-манифест, адаптеры `its` и `git_artifacts`,
+  Markdown-сплиттер, линковка); драйвер `ingest.py` (инкремент по `version_hash`; `config_dump`→index+callgraph+
+  vectorize); рёбра `MENTIONS` (явные/сканированные fqn) + `RELATES_TO` (семантика, opt-in `--link-semantic`);
+  инструменты `find_related_docs`/`get_document`; doc-`expand`. Все источники — подключаемые git-репо (клон
+  системным `git`) или локальный `path` (для тестов/офлайна). Проверено e2e на demo (its+artifact: ингест,
+  инкремент идемпотентен, фильтр `source`, MENTIONS/RELATES_TO, поиск по корпусам не протекает в config).
 
 ## 6. Модель графа (Neo4j)
 
 - **Ключ узла**: `(tenant_id, fqn)` MERGE. Constraints + индексы — `graph/schema.py`.
 - **Узлы (labels)**: `Object` (вид в property `kind`), `Field` (role), `TabularSection`, `EnumValue`,
-  `Predefined`, `Form`, `Module`, `Routine`, `Chunk`, `Detail` (полный набор `<Properties>`, не векторизуется).
+  `Predefined`, `Form`, `Module`, `Routine`, `Chunk`, `Detail` (полный набор `<Properties>`, не векторизуется),
+  `Document`/`Artifact` (владельцы doc-чанков корпусов ИТС/артефактов; ключ `(tenant_id, fqn)`, fqn=`<source>:<id>`).
 - **Рёбра**: `CONTAINS` (подсистема→объект), `HAS_ATTRIBUTE/HAS_DIMENSION/HAS_RESOURCE`,
   `HAS_TABULAR_SECTION`, `HAS_ENUM_VALUE`, `HAS_PREDEFINED`, `HAS_FORM`, `HAS_MODULE`,
   `REFERENCES` (Field→Object, по ссылочному типу), `OWNED_BY`, `HAS_SUBSYSTEM`, `SUBSCRIBES`,
   `HANDLED_BY` (подписка→общий модуль), `HAS_RIGHT_ON` (роль→объект, схлопнуто до верхнего уровня),
   `DECLARES` (Module/Form→Routine), `CALLS` (Routine→Routine, confidence/kind; kind=local/common_module/
-  **manager**), `HANDLES` (Form→Routine, event/element), `WRITES_TO` (Документ→Регистр), `HAS_CHUNK` (Object→Chunk),
-  `HAS_DETAIL` (Object→Detail, жёсткое).
-- **chunk_kind**: object, attribute, tabular_attribute, enum_value, predefined, form, code, **subsystem**, **role**.
-  Code-чанки могут дробиться на части (`fqn …::name#code/N`); несут `entry_point`. Routine-узлы несут `entry_point`.
+  **manager**), `HANDLES` (Form→Routine, event/element), `WRITES_TO` (Документ→Регистр),
+  `HAS_CHUNK` (Object|Document|Artifact→Chunk), `HAS_DETAIL` (Object→Detail, жёсткое),
+  `MENTIONS` (Document/Artifact→Object, явные/сканированные fqn), `RELATES_TO` (Document/Artifact→Object,
+  семантика, `confidence`).
+- **chunk_kind**: object, attribute, tabular_attribute, enum_value, predefined, form, code, **subsystem**,
+  **role**, **its**, **artifact**. Code-чанки дробятся (`…::name#code/N`); doc-чанки (`<owner>#chunk[/N]`);
+  несут `entry_point` (code) и **`source`** (config|its|artifact). Routine-узлы несут `entry_point`.
 - **Индексы поиска**: vector `chunk_embedding` (semantic) + `chunk_embedding_ident` (ident), cosine,
   dim из модели; fulltext `chunk_text` по `[text, text_tokens]` (идентификаторы расщеплены на под-слова).
-  Поиск = мульти-вектор × fulltext, слияние RRF (+опц. rerank); фильтры kinds/chunk_kinds/subsystem; опц. expand.
+  Поиск = мульти-вектор × fulltext, слияние RRF (+опц. rerank); фильтры **source**/kinds/chunk_kinds/subsystem;
+  опц. expand. Владелец чанка в поиске — любой (`MATCH (o)-[:HAS_CHUNK]->(c)`), не только Object.
 - Висячие/внешние ссылки → стаб `:Object{stub:true, kind:'Unresolved'|...}`; counts() их исключает.
 
 ## 7. Карта кода (`src/onec_vecgraph/`)
@@ -150,9 +163,9 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 - `config.py` — Settings (pydantic-settings, .env).
 - `tenancy.py` — TenantContext, `resolve(ctx, settings)` (заголовки→tenant, require_tenant).
 - `cli.py` — Typer: version, health, serve, index, ls, show (+`--detail`), deps, usages, vectorize, search
-  (+`--kind/--chunk-kind/--subsystem/--expand`), **handlers**, **metrics**, callgraph, callers,
-  callees, path, snapshot, snapshot-diff. `_flush_exit()`=os._exit (см. гочи).
-- `server.py` — FastMCP, 16 инструментов (см. п.8), stateless_http.
+  (+`--kind/--chunk-kind/--subsystem/--source/--expand`), **handlers**, **metrics**, **ingest**, callgraph,
+  callers, callees, path, snapshot, snapshot-diff. `_flush_exit()`=os._exit (см. гочи).
+- `server.py` — FastMCP, 18 инструментов (см. п.8), stateless_http.
 - `indexer.py` — `index_dump(..., reset, incremental)` (полный/инкремент).
 - `vectorizer.py` — `vectorize(..., reset, incremental, code)`; `_iter_chunks` (+subsystem/role циклы)/`_iter_code_chunks`.
 - `callgrapher.py` — `build_call_graph(...)`; `_parse_modules` (+manager_index)/`_parse_form_modules`/`_resolve`
@@ -162,19 +175,28 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 - `queries.py` — list_metadata, get_object (+`detail`), **get_object_properties**/`_object_details` (из `:Detail`),
   get_dependencies (+WRITES_TO), impact_analysis, find_type_usages, semantic_search/hybrid_search (фильтры+expand;
   `_vector_retrievers` exact/index, `_dedup`/`_unit`/`_rrf_fuse`, `_fts_query`, `_expand`, `_rerank`),
-  find_callers/callees, **find_handlers**, call_path, **metrics**.
+  find_callers/callees, **find_handlers**, call_path, **metrics**, **find_related_docs**/**get_document** (doc-корпуса),
+  `semantic_search`/`hybrid_search` (+`source`-фильтр; `_expand` имеет doc-ветку с `links`).
+- `sources/` — мультиисточник: `base` (`Source` ABC, `DocUnit`, `owner_fqn`, `sha1_text`), `git_repo`
+  (`materialize` — локальный path / `git clone --depth 1` системным git; `iter_files`), `markdown`
+  (`split_markdown_sections`), `its` (`ItsSource`), `git_artifacts` (`GitArtifactsSource`), `linking`
+  (`extract_fqn_mentions`/`link_mentions`), `registry` (`build_source`), `manifest` (`load_manifest` YAML/JSON).
+- `ingest.py` — `ingest_source` (doc-корпус: инкремент по version_hash → owners+chunks+embed+MENTIONS+опц.RELATES_TO),
+  `ingest_manifest` (по манифесту; `config_dump`→index+callgraph+vectorize), `_link_semantic`.
 - `parsing/`: `ns` (namespaces+хелперы), `types` (разбор типов, cfg-ссылки, alias ConstantValue→Constant),
   `model` (dataclasses; +`MetaObject.register_records`/`details`), `objects` (разбор MetaDataObject +
   rights/predefined; +`_flatten_properties`→`obj.details`; +RegisterRecords для Document), `dump` (части/обход/
   enumerate_objects/parse_objects), `dumpinfo` (configVersion), `forms` (extract_form_text, parse_form_handlers).
-- `graph/`: `schema` (constraints/indexes; +`Detail` в NODE_LABELS), `builder` (модель→узлы/рёбра, group MERGE;
-  +узел `Detail`/ребро `HAS_DETAIL`, +`WRITES_TO`).
+- `graph/`: `schema` (constraints/indexes; +`Detail`/`Document`/`Artifact` в NODE_LABELS), `builder`
+  (модель→узлы/рёбра, group MERGE; +узел `Detail`/ребро `HAS_DETAIL`, +`WRITES_TO`).
 - `storage/neo4j_store.py` — драйвер: health, read/write, ensure_schema, write_graph, counts,
   delete_tenant (батч), incremental (object_versions, scoped_delete_object, delete_object_full),
-  vectors (write_chunks 2 вектора+text_tokens, create_vector_index/fulltext[text,text_tokens],
-  stale_chunk_owners, delete_chunks_for, vector_search/fulltext_search/**exact_vector_search**/
-  **filtered_chunk_count** — все с фильтрами kinds/chunk_kinds/subsystem), callgraph (routine_modules,
-  write_routines, write_calls, stale_routine_owners, delete_routines_for, common_module_routine_index,
+  vectors (**write_chunks(owner_label=Object|Document|Artifact)** 2 вектора+text_tokens,
+  create_vector_index/fulltext[text,text_tokens], stale_chunk_owners, delete_chunks_for, vector_search/
+  fulltext_search/**exact_vector_search**/**filtered_chunk_count** — фильтры **source**/kinds/chunk_kinds/subsystem,
+  владелец любой), doc-корпуса (**write_documents**, **doc_versions**, **delete_docs**, **delete_source**,
+  **existing_object_fqns**, **write_mentions**, **write_relates**), callgraph (routine_modules, write_routines,
+  write_calls, stale_routine_owners, delete_routines_for, common_module_routine_index,
   **manager_module_routine_index**, form_modules, write_form_routines, write_handles). `notifications_min_severity="OFF"`.
 - `embeddings/`: base (get_provider), hashing (dev, без ML), local (sentence-transformers, Qwen3, cuda,
   max_seq_length), **cloud** (OpenAI/OpenAI-совместимые + Voyage; `CloudEmbeddingProvider`, L2-норм,
@@ -182,16 +204,17 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   runtime (кэш провайдера/реранкера).
 - `bsl/parser.py` — чистый Python BSL-парсер: процедуры/функции, export, region, **directive**, вызовы.
 
-## 8. MCP-инструменты (16)
+## 8. MCP-инструменты (18)
 
 > Консьюмер-гайд (подключение/заголовки/fqn/словари/карта инструментов/сценарии): `docs/MCP_USAGE.md`.
 > Сервер отдаёт тот же overview клиенту в `instructions` (FastMCP) при `initialize` — `server.INSTRUCTIONS`.
 
 ping, neo4j_health, whoami, list_metadata, get_object (+`detail`), **get_object_properties**
 (полный сырой набор `<Properties>` из `:Detail`), get_dependencies, impact_analysis,
-find_type_usages, semantic_search, hybrid_search, **metrics** (инвентарь/хотспоты),
+find_type_usages, **find_related_docs** (доки по объекту), **get_document** (документ по fqn),
+semantic_search, hybrid_search, **metrics** (инвентарь/хотспоты),
 find_callers, find_callees, call_path, **find_handlers** (обработчики форм+модулей).
-`semantic_search`/`hybrid_search` принимают `kinds`/`chunk_kinds`/`subsystem`/`expand`.
+`semantic_search`/`hybrid_search` принимают `source`/`kinds`/`chunk_kinds`/`subsystem`/`expand`.
 
 ## 9. Ключевые решённые вопросы / находки
 
@@ -231,29 +254,20 @@ find_callers, find_callees, call_path, **find_handlers** (обработчики
 
 ## 11. Ожидающие задачи / backlog
 
-### 11.1. Мульти-источник векторизации (config + ИТС + git-артефакты) — СОГЛАСОВАН, НЕ НАЧАТ
-Расширить сервис (НЕ отдельный MCP) реестром источников: документация/артефакты живут в едином графе
-и связываются с объектами конфигурации (`MENTIONS`/`RELATES_TO`) → GraphRAG «требование/ИТС ↔ код».
-Заложено в `PLAN.md §13` (метка `Artifact`/`RELATES_TO`).
+### 11.1. Мульти-источник векторизации (config + ИТС + git-артефакты) — ✅ РЕАЛИЗОВАН (п.1–7, 2026-06-08)
+Единый граф/индекс/модель; doc-корпуса связаны с объектами (`MENTIONS`/`RELATES_TO`) → GraphRAG.
+Детали кода — §5/§6/§7. Парсинг ИТС — внешний инструмент, контракт `docs/ITS_PARSER_REQUIREMENTS.md`.
+**Использование:** `ingest <manifest.yaml> --tenant-id <t> [--only its|git_artifacts|config_dump] [--reset]
+[--link-semantic]`; или программно `sources.*` + `ingest.ingest_source`. Манифест YAML/JSON: `{tenant, sources:
+[{type, repo|path, branch?, globs?}]}`. `git_artifacts`/`its` — git-репо (`repo`) или локальный `path` (офлайн/тесты).
 
-**Согласованные решения:**
-- **Все источники — подключаемые git-репозитории** (config-выгрузка, артефакты проекта, и вывод
-  внешнего парсера ИТС). Сервис сам клонит/пуллит → в образ добавить `git` + extra `ingest=[gitpython,pyyaml]`.
-- **Манифест источников — YAML** per-tenant (путь в `.env`), напр. `{type, repo, branch, globs}`.
-- **ИТС — проектный** (per-tenant), не общий (шум/лицензия). Опц. срез по подсистемам проекта.
-- **Одна модель эмбеддингов на tenant** для всех источников (сквозной RRF в одном векторном пространстве).
-- Парсинг ИТС — **внешний инструмент**, контракт промежуточного формата: `docs/ITS_PARSER_REQUIREMENTS.md`.
-
-**Этапы (детально согласованы):**
-1. Измерение `source` (`config`/`its`/`artifact`) сквозь чанк/стор/поиск/MCP/CLI (фундамент, фильтр как `chunk_kinds`).
-2. Обобщение владельца чанка + метки `Document`/`Artifact`, рёбра `MENTIONS`/`RELATES_TO` (schema/store/counts/delete).
-3. Реестр источников + контракт адаптера (`sources/`: `Source` ABC, `DocUnit`, registry, YAML-манифест);
-   текущая векторизация конфигурации → `ConfigSource`; инкремент обобщить на `version_hash`; CLI `ingest`.
-4. Адаптер `git_artifacts` (clone/pull, globs, секционный чанкинг по заголовкам, версия = git blob sha).
-5. Адаптер `its` (читает вывод внешнего парсера из git-репо по контракту; `related_fqns`→`MENTIONS`).
-6. Линковка: `MENTIONS` (упоминания fqn/имён, high precision) + `RELATES_TO` (семантика top-k, confidence).
-7. MCP/доки: фильтр `source`/`corpus` + `expand` доки↔объекты; инструменты `find_related_docs`/`get_document`;
-   обновить `MCP_USAGE.md`/`DEPLOYMENT.md`/`DEPLOY_RUNBOOK.md`/`STATE.md`.
+**Открытые TODO по фиче (на будущее):**
+- ERP/реальные корпуса не заливались (нет данных ИТС/репозитория артефактов) — проверено только на синтетике demo.
+- `RELATES_TO` (семантика) — opt-in `--link-semantic`, по одному vector-запросу на документ (на больших корпусах
+  дорого) — при масштабе можно батчить/ограничивать.
+- `_expand` для doc-хитов отдаёт только `links`; не достраивает текст связанных объектов.
+- Срез ИТС по подсистемам проекта (анти-шум) — не реализован (адаптер берёт всё, что отдал парсер).
+- Образ с git/pyyaml в сессии не собирался (pip-сеть); юнит-тесты офлайн + e2e на demo пройдены.
 
 ### 11.2. Раунд 2 инкремент-тестов
 `docs/INCREMENTAL_TEST_PLAN.md` — РАУНД 1 (13 кейсов) ВЫПОЛНЕН и проверен (см. п.9, T-CODE-OBJ ✓,
@@ -266,7 +280,8 @@ $env:Path="D:\tools\uv;$env:Path"; [Console]::OutputEncoding=[Text.Encoding]::UT
 docker compose up -d --wait                                                  # Neo4j
 uv sync                                                                       # базовые зависимости
 uv sync --extra local-embeddings                                             # + torch cu128 (для векторов)
-uv run pytest tests/                                                          # тесты (33; bare `pytest` собирает 0 — см. гочи)
+uv sync --extra ingest                                                       # + pyyaml (манифесты источников)
+uv run pytest tests/                                                          # тесты (46; bare `pytest` собирает 0 — см. гочи)
 uv run onec-vecgraph index "H:\1C\xml\LLM_Subsystem_test" --tenant-id demo --reset
 uv run onec-vecgraph index "<путь>" --tenant-id <t> --incremental
 uv run onec-vecgraph vectorize --tenant-id demo                              # метаданные (+формы/подсистемы/роли)
@@ -277,6 +292,8 @@ uv run onec-vecgraph search "запрос" --tenant-id demo --mode hybrid       
 uv run onec-vecgraph search "Провести" --tenant-id demo --chunk-kind code --expand
 uv run onec-vecgraph handlers Document.Имя --tenant-id demo                  # обработчики форм+модулей
 uv run onec-vecgraph metrics --tenant-id demo [--subsystem Имя]              # инвентарь/хотспоты
+uv run onec-vecgraph ingest sources.yaml --tenant-id demo [--only its|git_artifacts|config_dump] [--reset] [--link-semantic]
+uv run onec-vecgraph search "проведение" --tenant-id demo --source its --source artifact  # поиск по корпусам доков
 uv run onec-vecgraph show Catalog.Имя --tenant-id demo [--detail]            # --detail = + полные <Properties> из :Detail
 uv run onec-vecgraph index "<путь>" --tenant-id <t>                          # БЕЗ флагов = неразрушающий MERGE (добавить :Detail, не стирая векторы)
 uv run onec-vecgraph deps Catalog.Имя --tenant-id demo

@@ -160,7 +160,8 @@ def _iter_chunks(store: Neo4jStore, tenant_id: str, only: list[str] | None = Non
         yield chunking.role_chunk(row)
 
 
-def _embed_and_write(store: Neo4jStore, tenant_id: str, embedder, chunks: list[Chunk]) -> tuple[int, dict]:
+def _embed_and_write(store: Neo4jStore, tenant_id: str, embedder, chunks: list[Chunk],
+                     owner_label: str = "Object") -> tuple[int, dict]:
     by_kind: dict[str, int] = {}
     written = 0
     for start in range(0, len(chunks), _EMBED_BATCH):
@@ -171,7 +172,7 @@ def _embed_and_write(store: Neo4jStore, tenant_id: str, embedder, chunks: list[C
             {"fqn": c.fqn, "owner_fqn": c.owner_fqn, "props": c.props(), "embedding": s, "embedding_ident": i}
             for c, s, i in zip(batch, sem, idt)
         ]
-        written += store.write_chunks(tenant_id, rows)
+        written += store.write_chunks(tenant_id, rows, owner_label=owner_label)
         for c in batch:
             by_kind[c.chunk_kind] = by_kind.get(c.chunk_kind, 0) + 1
         _free_gpu()

@@ -12,6 +12,9 @@ from ..graph.schema import schema_statements
 
 _BATCH = 1000
 
+# Chunk owners — fixed allowlist so the label can be safely injected into Cypher (no param for labels).
+_OWNER_LABELS = {"Object", "Document", "Artifact"}
+
 
 class Neo4jStore:
     def __init__(self, driver: Driver, database: str) -> None:
@@ -118,7 +121,8 @@ class Neo4jStore:
             t=tenant_id,
         )
         by_label = {}
-        for label in ["Object", "Field", "TabularSection", "EnumValue", "Predefined", "Form", "Module", "Detail"]:
+        for label in ["Object", "Field", "TabularSection", "EnumValue", "Predefined", "Form",
+                      "Module", "Detail", "Document", "Artifact", "Chunk"]:
             rec = self.read(f"MATCH (n:{label} {{tenant_id: $t}}) RETURN count(n) AS n", t=tenant_id)
             by_label[label] = rec[0]["n"] if rec else 0
         rels = self.read(
@@ -145,10 +149,15 @@ class Neo4jStore:
             if not rows or rows[0]["c"] == 0:
                 break
 
-    def write_chunks(self, tenant_id: str, rows: list[dict]) -> int:
+    def write_chunks(self, tenant_id: str, rows: list[dict], owner_label: str = "Object") -> int:
+        """Attach chunks to their owner via HAS_CHUNK. owner_label ∈ Object|Document|Artifact;
+        the owner node must already exist (config Objects from indexing; doc owners from
+        write_documents). Label is from a fixed allowlist (safe to inject)."""
+        if owner_label not in _OWNER_LABELS:
+            raise ValueError(f"Unsupported owner_label: {owner_label!r}")
         query = (
             "UNWIND $rows AS r "
-            "MATCH (o:Object {tenant_id: $t, fqn: r.owner_fqn}) "
+            f"MATCH (o:{owner_label} {{tenant_id: $t, fqn: r.owner_fqn}}) "
             "MERGE (c:Chunk {tenant_id: $t, fqn: r.fqn}) "
             "SET c += r.props "
             "MERGE (o)-[:HAS_CHUNK]->(c) "
@@ -160,6 +169,96 @@ class Neo4jStore:
             self.write(query, t=tenant_id, rows=chunk)
             written += len(chunk)
         return written
+
+    # ── doc corpora (multi-source: ITS / artifacts) ───────────────────
+    def write_documents(self, tenant_id: str, owner_label: str, rows: list[dict]) -> int:
+        """MERGE Document/Artifact owner nodes (rows: [{fqn, props}]). props carry source,
+        version_hash, title, section_path, source_url, etc."""
+        if owner_label not in _OWNER_LABELS or owner_label == "Object":
+            raise ValueError(f"Unsupported doc owner_label: {owner_label!r}")
+        query = (
+            "UNWIND $rows AS r "
+            f"MERGE (d:{owner_label} {{tenant_id: $t, fqn: r.fqn}}) SET d += r.props"
+        )
+        written = 0
+        for chunk in _chunks(rows, 1000):
+            self.write(query, t=tenant_id, rows=chunk)
+            written += len(chunk)
+        return written
+
+    def doc_versions(self, tenant_id: str, source: str) -> dict[str, str | None]:
+        """{owner_fqn: version_hash} for a corpus — drives incremental re-ingest."""
+        rows = self.read(
+            "MATCH (d {tenant_id: $t}) WHERE (d:Document OR d:Artifact) AND d.source = $s "
+            "RETURN d.fqn AS fqn, d.version_hash AS v",
+            t=tenant_id, s=source,
+        )
+        return {r["fqn"]: r["v"] for r in rows}
+
+    def delete_docs(self, tenant_id: str, fqns: list[str]) -> None:
+        """Remove doc owners (and their chunks via HAS_CHUNK) by fqn — for incremental refresh."""
+        for i in range(0, len(fqns), 500):
+            self.write(
+                "MATCH (d {tenant_id: $t}) WHERE (d:Document OR d:Artifact) AND d.fqn IN $f "
+                "OPTIONAL MATCH (d)-[:HAS_CHUNK]->(c:Chunk) DETACH DELETE c, d",
+                t=tenant_id, f=fqns[i : i + 500],
+            )
+
+    def existing_object_fqns(self, tenant_id: str, fqns: list[str]) -> set[str]:
+        """Subset of `fqns` that exist as real (non-stub) Objects — for validating doc mentions."""
+        rows = self.read(
+            "MATCH (o:Object {tenant_id: $t}) WHERE o.fqn IN $f AND coalesce(o.stub, false) = false "
+            "RETURN o.fqn AS fqn",
+            t=tenant_id, f=fqns,
+        )
+        return {r["fqn"] for r in rows}
+
+    def write_mentions(self, tenant_id: str, rows: list[dict]) -> int:
+        """MENTIONS edges (doc owner → Object). rows: [{doc_fqn, object_fqn}]."""
+        query = (
+            "UNWIND $rows AS r "
+            "MATCH (d {tenant_id: $t, fqn: r.doc_fqn}) WHERE d:Document OR d:Artifact "
+            "MATCH (o:Object {tenant_id: $t, fqn: r.object_fqn}) "
+            "MERGE (d)-[:MENTIONS]->(o)"
+        )
+        written = 0
+        for chunk in _chunks(rows, 2000):
+            self.write(query, t=tenant_id, rows=chunk)
+            written += len(chunk)
+        return written
+
+    def write_relates(self, tenant_id: str, rows: list[dict]) -> int:
+        """RELATES_TO edges (doc owner → Object) with confidence. rows: [{doc_fqn, object_fqn, confidence}]."""
+        query = (
+            "UNWIND $rows AS r "
+            "MATCH (d {tenant_id: $t, fqn: r.doc_fqn}) WHERE d:Document OR d:Artifact "
+            "MATCH (o:Object {tenant_id: $t, fqn: r.object_fqn}) "
+            "MERGE (d)-[rel:RELATES_TO]->(o) SET rel.confidence = r.confidence"
+        )
+        written = 0
+        for chunk in _chunks(rows, 2000):
+            self.write(query, t=tenant_id, rows=chunk)
+            written += len(chunk)
+        return written
+
+    def delete_source(self, tenant_id: str, source: str, batch: int = 5000) -> None:
+        """Wipe an entire corpus (chunks + owners) for a tenant."""
+        while True:
+            rows = self.read(
+                "MATCH (c:Chunk {tenant_id: $t, source: $s}) WITH c LIMIT $b DETACH DELETE c "
+                "RETURN count(c) AS n",
+                t=tenant_id, s=source, b=batch,
+            )
+            if not rows or rows[0]["n"] == 0:
+                break
+        while True:
+            rows = self.read(
+                "MATCH (d {tenant_id: $t}) WHERE (d:Document OR d:Artifact) AND d.source = $s "
+                "WITH d LIMIT $b DETACH DELETE d RETURN count(d) AS n",
+                t=tenant_id, s=source, b=batch,
+            )
+            if not rows or rows[0]["n"] == 0:
+                break
 
     def create_vector_index(self, dim: int, name: str = "chunk_embedding",
                             prop: str = "embedding", similarity: str = "cosine") -> None:
@@ -175,9 +274,10 @@ class Neo4jStore:
         self.write(f"DROP INDEX {name} IF EXISTS")
         self.write(f"CREATE FULLTEXT INDEX {name} IF NOT EXISTS FOR (c:Chunk) ON EACH [c.text, c.text_tokens]")
 
-    # Shared chunk-search filter: by owner kind, by chunk kind, by containing subsystem
+    # Shared chunk-search filter: by corpus source, owner kind, chunk kind, containing subsystem
     # (direct or via nested subsystems). `c` and `o` must be bound before this clause.
     _CHUNK_FILTER = (
+        "  AND ($source IS NULL OR c.source IN $source) "
         "  AND ($chunk_kinds IS NULL OR c.chunk_kind IN $chunk_kinds) "
         "  AND ($kinds IS NULL OR o.kind IN $kinds) "
         "  AND ($subsystem IS NULL OR EXISTS { "
@@ -187,61 +287,61 @@ class Neo4jStore:
     )
     _CHUNK_RETURN = (
         "RETURN o.fqn AS fqn, o.kind AS kind, o.synonym AS synonym, c.fqn AS chunk_fqn, "
-        "       c.name AS chunk_name, c.chunk_kind AS via, c.text AS matched, score "
+        "       c.name AS chunk_name, c.chunk_kind AS via, c.source AS source, c.text AS matched, score "
     )
 
     def vector_search(self, tenant_id: str, query_vec: list[float], fetch: int,
                       index: str = "chunk_embedding", kinds: list[str] | None = None,
-                      chunk_kinds: list[str] | None = None,
-                      subsystem: str | None = None) -> list[dict[str, Any]]:
+                      chunk_kinds: list[str] | None = None, subsystem: str | None = None,
+                      source: list[str] | None = None) -> list[dict[str, Any]]:
         return self.read(
             "CALL db.index.vector.queryNodes($index, $fetch, $vec) YIELD node AS c, score "
             "WHERE c.tenant_id = $t "
-            "MATCH (o:Object)-[:HAS_CHUNK]->(c) WHERE true "
+            "MATCH (o)-[:HAS_CHUNK]->(c) WHERE true "  # owner: Object | Document | Artifact
             + self._CHUNK_FILTER + self._CHUNK_RETURN + "ORDER BY score DESC",
             index=index, fetch=fetch, vec=query_vec, t=tenant_id,
-            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem,
+            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
         )
 
     def fulltext_search(self, tenant_id: str, query: str, limit: int,
                         index: str = "chunk_text", kinds: list[str] | None = None,
-                        chunk_kinds: list[str] | None = None,
-                        subsystem: str | None = None) -> list[dict[str, Any]]:
+                        chunk_kinds: list[str] | None = None, subsystem: str | None = None,
+                        source: list[str] | None = None) -> list[dict[str, Any]]:
         return self.read(
             "CALL db.index.fulltext.queryNodes($index, $q) YIELD node AS c, score "
             "WHERE c.tenant_id = $t "
-            "MATCH (o:Object)-[:HAS_CHUNK]->(c) WHERE true "
+            "MATCH (o)-[:HAS_CHUNK]->(c) WHERE true "  # owner: Object | Document | Artifact
             + self._CHUNK_FILTER + self._CHUNK_RETURN + "ORDER BY score DESC LIMIT $lim",
             index=index, q=query, t=tenant_id, lim=limit,
-            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem,
+            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
         )
 
     def filtered_chunk_count(self, tenant_id: str, cap: int, kinds: list[str] | None = None,
-                             chunk_kinds: list[str] | None = None,
-                             subsystem: str | None = None) -> int:
+                             chunk_kinds: list[str] | None = None, subsystem: str | None = None,
+                             source: list[str] | None = None) -> int:
         """Count chunks matching the filter, scanning at most `cap` (so the gate that decides
         exact-vs-index search is itself bounded). Returns `cap` when the set is at least that big."""
         rows = self.read(
-            "MATCH (o:Object)-[:HAS_CHUNK]->(c:Chunk {tenant_id: $t}) WHERE true "
+            "MATCH (o)-[:HAS_CHUNK]->(c:Chunk {tenant_id: $t}) WHERE true "  # owner: Object|Document|Artifact
             + self._CHUNK_FILTER + "WITH c LIMIT $cap RETURN count(c) AS n",
-            t=tenant_id, cap=cap, kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem,
+            t=tenant_id, cap=cap, kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
         )
         return rows[0]["n"] if rows else 0
 
     def exact_vector_search(self, tenant_id: str, query_vec: list[float], fetch: int,
                             index: str = "chunk_embedding", kinds: list[str] | None = None,
-                            chunk_kinds: list[str] | None = None,
-                            subsystem: str | None = None) -> list[dict[str, Any]]:
+                            chunk_kinds: list[str] | None = None, subsystem: str | None = None,
+                            source: list[str] | None = None) -> list[dict[str, Any]]:
         """Exact cosine over the filtered candidate set (no vector-index recall loss). Use only
         when the filtered set is small — otherwise this scans too many vectors."""
         prop = "embedding_ident" if index.endswith("_ident") else "embedding"
         return self.read(
-            "MATCH (o:Object)-[:HAS_CHUNK]->(c:Chunk {tenant_id: $t}) WHERE true "
+            "MATCH (o)-[:HAS_CHUNK]->(c:Chunk {tenant_id: $t}) WHERE true "  # owner: Object|Document|Artifact
             + self._CHUNK_FILTER
             + f"WITH o, c, vector.similarity.cosine(c.{prop}, $vec) AS score WHERE score IS NOT NULL "
             + self._CHUNK_RETURN + "ORDER BY score DESC LIMIT $fetch",
             t=tenant_id, vec=query_vec, fetch=fetch,
-            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem,
+            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
         )
 
     def chunk_count(self, tenant_id: str) -> int:

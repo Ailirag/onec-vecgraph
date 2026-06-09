@@ -245,6 +245,7 @@ def _rrf_fuse(sources: list[tuple[str, list[dict]]], top_k: int, rrf_k: int = 60
             if "matched" not in entry:
                 entry["matched"] = r.get("matched")
                 entry["via"] = r.get("via")
+                entry["corpus"] = r.get("source")  # config | its | artifact
                 # For code units, surface the routine address; harmless otherwise.
                 if r.get("via") == "code" and r.get("chunk_fqn"):
                     entry["routine_fqn"] = _routine_fqn(r["chunk_fqn"])
@@ -328,6 +329,55 @@ def find_handlers(store, tenant_id: str, q: str) -> dict[str, Any]:
     }
 
 
+def find_related_docs(store, tenant_id: str, q: str) -> dict[str, Any]:
+    """Documentation (ITS / project artifacts) linked to an object via MENTIONS (explicit/scanned
+    fqns) or RELATES_TO (semantic). Answers 'what docs/standards cover this object'."""
+    head = _resolve(store, tenant_id, q)
+    if head is None:
+        return {"found": False, "query": q}
+    docs = store.read(
+        "MATCH (d)-[r:MENTIONS|RELATES_TO]->(o:Object {tenant_id: $t, fqn: $fqn}) "
+        "WHERE d:Document OR d:Artifact "
+        "RETURN d.fqn AS fqn, labels(d)[0] AS label, d.source AS source, d.title AS title, "
+        "       d.source_url AS source_url, type(r) AS rel, r.confidence AS confidence "
+        "ORDER BY rel, confidence DESC, title",
+        t=tenant_id, fqn=head["fqn"],
+    )
+    return {"found": True, "fqn": head["fqn"], "docs": docs, "count": len(docs)}
+
+
+def get_document(store, tenant_id: str, fqn: str) -> dict[str, Any]:
+    """Full document by owner fqn (e.g. 'its:art-1' / 'artifact:design.md#0'): metadata, full text
+    (chunks rejoined), and the config objects it links to."""
+    rows = store.read(
+        "MATCH (d {tenant_id: $t, fqn: $fqn}) WHERE d:Document OR d:Artifact "
+        "RETURN labels(d)[0] AS label, properties(d) AS props",
+        t=tenant_id, fqn=fqn,
+    )
+    if not rows:
+        return {"found": False, "fqn": fqn}
+    chunks = store.read(
+        "MATCH (d {tenant_id: $t, fqn: $fqn})-[:HAS_CHUNK]->(c:Chunk) "
+        "RETURN c.fqn AS fqn, c.text AS text ORDER BY c.fqn",
+        t=tenant_id, fqn=fqn,
+    )
+    links = store.read(
+        "MATCH (d {tenant_id: $t, fqn: $fqn})-[r:MENTIONS|RELATES_TO]->(o:Object) "
+        "RETURN type(r) AS rel, o.fqn AS object, r.confidence AS confidence ORDER BY rel, object",
+        t=tenant_id, fqn=fqn,
+    )
+    props = dict(rows[0]["props"])
+    for k in ("tenant_id", "config_id"):
+        props.pop(k, None)
+    return {
+        "found": True, "fqn": fqn, "label": rows[0]["label"],
+        "source": props.get("source"), "title": props.get("title"),
+        "section_path": props.get("section_path"), "source_url": props.get("source_url"),
+        "text": "\n\n".join(c["text"] for c in chunks),
+        "links": links,
+    }
+
+
 def call_path(store, tenant_id: str, src: str, dst: str, max_hops: int = 8) -> dict[str, Any]:
     src_fqns = _resolve_routines(store, tenant_id, src)
     dst_fqns = _resolve_routines(store, tenant_id, dst)
@@ -361,6 +411,15 @@ def _expand(store, tenant_id: str, results: list[dict]) -> list[dict]:
                 t=tenant_id, f=r["routine_fqn"],
             )
             r["context"] = rows[0] if rows else {}
+        elif r.get("corpus") in ("its", "artifact"):
+            # doc hit → the config objects it links to
+            rows = store.read(
+                "MATCH (d {tenant_id: $t, fqn: $f})-[rel:MENTIONS|RELATES_TO]->(o:Object) "
+                "WHERE d:Document OR d:Artifact "
+                "RETURN type(rel) AS rel, o.fqn AS object ORDER BY rel, object",
+                t=tenant_id, f=r["fqn"],
+            )
+            r["context"] = {"links": rows}
         else:
             rows = store.read(
                 "MATCH (o:Object {tenant_id: $t, fqn: $f}) "
@@ -464,16 +523,16 @@ def _vector_retrievers(store, tenant_id, vec, fetch, f):
 
 
 def semantic_search(store, tenant_id, query, embedder, top_k=10, overfetch=5,
-                    kinds=None, chunk_kinds=None, subsystem=None, expand=False):
+                    kinds=None, chunk_kinds=None, subsystem=None, source=None, expand=False):
     """Multi-vector semantic search (meaning × identifier), fused with RRF.
 
-    Optional filters (kinds / chunk_kinds / subsystem) are post-applied to the vector hits;
-    fetch is widened when filtering so a narrow slice still fills top_k. With expand=True each
-    hit is enriched with a compact graph neighborhood (GraphRAG)."""
+    Optional filters (source / kinds / chunk_kinds / subsystem) are post-applied to the vector
+    hits; fetch is widened when filtering so a narrow slice still fills top_k. With expand=True
+    each hit is enriched with a compact graph neighborhood (GraphRAG)."""
     vec = embedder.embed([query], is_query=True)[0]
-    filtered = bool(kinds or chunk_kinds or subsystem)
+    filtered = bool(kinds or chunk_kinds or subsystem or source)
     fetch = top_k * overfetch * (4 if filtered else 1)
-    f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem)
+    f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source)
     sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f)
     results = _rrf_fuse([("semantic", sem), ("ident", idt)], top_k)
     if expand:
@@ -482,15 +541,15 @@ def semantic_search(store, tenant_id, query, embedder, top_k=10, overfetch=5,
 
 
 def hybrid_search(store, tenant_id, query, embedder, top_k=10, overfetch=5, rrf_k=60,
-                  reranker=None, kinds=None, chunk_kinds=None, subsystem=None, expand=False):
+                  reranker=None, kinds=None, chunk_kinds=None, subsystem=None, source=None, expand=False):
     """Multi-vector (meaning × identifier) + full-text, fused with RRF; optional rerank.
 
-    Optional filters (kinds / chunk_kinds / subsystem) restrict all three retrievers. With
-    expand=True each hit is enriched with a compact graph neighborhood (GraphRAG)."""
+    Optional filters (source / kinds / chunk_kinds / subsystem) restrict all three retrievers.
+    With expand=True each hit is enriched with a compact graph neighborhood (GraphRAG)."""
     vec = embedder.embed([query], is_query=True)[0]
-    filtered = bool(kinds or chunk_kinds or subsystem)
+    filtered = bool(kinds or chunk_kinds or subsystem or source)
     fetch = top_k * overfetch * (4 if filtered else 1)
-    f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem)
+    f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source)
     sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f)
     ft = _dedup(store.fulltext_search(tenant_id, _fts_query(query), limit=fetch, **f))
     pool = top_k if reranker is None else max(top_k, 20)
