@@ -165,13 +165,24 @@ docker compose run --rm -v /path/to/public-sources.yaml:/m.yaml:ro app \
 данным (сервер добавляет общий тенант в скоуп; клиент шлёт только свой `X-Tenant-Id`). Управление —
 `INCLUDE_SHARED_TENANT=true|false`. Различение корпусов — `source` (`platform_help`/`bsp_help`/…).
 
-**Справка платформы (синтаксис-помощник) из `.hbk`** — источник `hbk` (примонтируйте `bin` платформы):
-```bash
-docker compose run --rm -v "C:/Program Files/1cv8/8.3.27.1989/bin:/pf-bin:ro" -v /path/sources.yaml:/m.yaml:ro app \
-  onec-vecgraph ingest /m.yaml --tenant-id __shared__ --only hbk
-```
-Запись манифеста `hbk` принимает `bin` (автодискавери `sh*_ru.hbk`), `bins`-glob (все сборки),
-`files` (явные пути), `domains` (`shcntx`/`shlang`/`shquery`), `platform_version` (иначе из пути), `limit`.
+**Справка платформы (синтаксис-помощник) из `.hbk`** — запуск **только из CLI** (MCP read-only, инструмента
+ингеста в нём нет by design). Два пути:
+
+1. Отдельная команда **`ingest-help`** (рекомендуется) — с **валидацией пути** (если путь не задан или `.hbk`
+   не найден → понятная ошибка и `exit 1`, а не тихий 0):
+   ```bash
+   docker compose run --rm -v "C:/Program Files/1cv8/8.3.27.1989/bin:/pf-bin:ro" app \
+     onec-vecgraph ingest-help --tenant-id __shared__ --bin /pf-bin --domain shcntx --domain shlang [--reset]
+   ```
+   Опции: `--bin` (автодискавери `sh*_ru.hbk`) / `--file` (повторяемо) / `--domain` (`shcntx`/`shlang`/`shquery`,
+   дефолт `shcntx`+`shlang`) / `--platform-version` (иначе из пути) / `--limit` / `--reset`.
+2. Через общий манифест (`type: hbk`):
+   ```bash
+   docker compose run --rm -v "C:/Program Files/1cv8/8.3.27.1989/bin:/pf-bin:ro" -v /path/sources.yaml:/m.yaml:ro app \
+     onec-vecgraph ingest /m.yaml --tenant-id __shared__ --only hbk
+   ```
+   Запись `hbk` принимает `bin` / `bins`-glob (все сборки) / `files` / `domains` / `platform_version` / `limit`.
+
 Версия пишется на `:Document` → фильтр `platform_version` в поиске и `docinfo`. Контент справки
 **проприетарный** (лицензия платформы 1С) — общий тенант/репо держать приватными.
 

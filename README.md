@@ -42,6 +42,9 @@ uv run onec-vecgraph vectorize --tenant-id <t>                            # эм
 uv run onec-vecgraph search "запрос" --tenant-id <t> --mode hybrid        # поиск
 uv run onec-vecgraph show Catalog.Имя --tenant-id <t>                     # карточка объекта
 uv run onec-vecgraph deps Catalog.Имя --tenant-id <t>                     # зависимости
+uv run onec-vecgraph ingest <manifest.yaml> --tenant-id <t>               # доки: ИТС / git-артефакты / справка
+uv run onec-vecgraph ingest-help --tenant-id __shared__ --bin "<.../1cv8/8.3.x/bin>" --domain shcntx --domain shlang  # справка платформы (.hbk), с проверкой пути
+uv run onec-vecgraph docinfo "Массив.Найти" --tenant-id <t>               # синтаксис-помощник: точный лукап
 ```
 
 Локальные эмбеддинги: `uv sync --extra local-embeddings` (torch cu128 под RTX 50xx),

@@ -120,6 +120,15 @@ docker compose run --rm -v C:\path\sources.yaml:/m.yaml:ro app `
 git-репо источников требуют доступа (deploy key / PAT) — см. [DEPLOYMENT.md §10.4](DEPLOYMENT.md).
 Детали — [DEPLOYMENT.md §5.2](DEPLOYMENT.md).
 
+### 3.5. Справка платформы (синтаксис-помощник) — опц., в общий тенант
+Запуск **только из CLI** (MCP read-only). Команда `ingest-help` сама **проверяет путь** к `.hbk`:
+```powershell
+docker compose run --rm -v "C:\Program Files\1cv8\8.3.27.1989\bin:/pf-bin:ro" app `
+  onec-vecgraph ingest-help --tenant-id __shared__ --bin /pf-bin --domain shcntx --domain shlang [--reset]
+```
+Если путь не задан/`.hbk` не найден — ошибка и `exit 1` (а не тихий 0). Версия берётся из пути `bin`
+(или `--platform-version`); грузится один раз на сборку. Детали — [DEPLOYMENT.md §5.3](DEPLOYMENT.md).
+
 ---
 
 ## Этап 4. Смоук-проверка

@@ -68,6 +68,10 @@ onec-vecgraph serve --transport stdio
 | Векторы/чанки | `vectorize` (+`--code`) | semantic_search, hybrid_search |
 | Граф вызовов BSL | `callgraph` | find_callers, find_callees, call_path, find_handlers, и `entry_points`/`calls_by_kind` в metrics |
 | Doc-корпуса (ИТС / артефакты) | `ingest` | search с `source=['its'\|'artifact']`, find_related_docs, get_document |
+| Справка платформы (`.hbk`) | `ingest-help` (CLI оператора) | search с `source=['platform_help']`, **`docinfo`**, get_document; читается из общего тенанта |
+
+> Загрузка/векторизация корпусов — операция **оператора через CLI** (`ingest` / `ingest-help`); сам MCP
+> **read-only** и индексацию не запускает. Если справка/доки не отвечают — их ещё не заингестили.
 
 **Пустой результат поиска или графа вызовов обычно означает «слой не построен для этого tenant», а не
 «ничего не найдено».** Сначала проверьте `metrics` (есть ли routines/chunks).
