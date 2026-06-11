@@ -104,7 +104,7 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 
 ---
 
-## 4. Карта инструментов по потребности (18)
+## 4. Карта инструментов по потребности (19)
 
 ### Здоровье / контекст
 - **`ping`** — живость сервера (имя/версия).
@@ -137,9 +137,13 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 ### Документация по объекту (нужен ingest корпусов ИТС/артефактов)
 - **`find_related_docs(query)`** — доки (ИТС/артефакты), связанные с объектом через `MENTIONS`
   (явные/сканированные fqn) или `RELATES_TO` (семантика, с `confidence`). «Какие стандарты/доки покрывают объект».
-- **`get_document(fqn)`** — документ по fqn-владельца (`its:<id>` / `artifact:<path>#<n>`, напр. из `fqn` хита поиска):
+- **`get_document(fqn)`** — документ по fqn-владельца (`its:<id>` / `platform_help:<ver>|<Имя>`, напр. из `fqn` хита):
   метаданные, полный текст (чанки склеены), связанные объекты.
-- Поиск по докам: `hybrid_search(query, source=["its"]|["artifact"])`; `expand=True` добавит `context.links`.
+- **`docinfo(name, platform_version?)`** — синтаксис-помощник платформы: точный лукап справки по
+  каноническому имени (RU / English / `Объект.Метод`, напр. `ТаблицаЗначений`, `Массив.Найти`, `QuerySchema`).
+  Одно совпадение → полная статья; несколько → список `candidates`. Версия опц. (иначе последняя проиндексированная).
+- Поиск по докам: `hybrid_search(query, source=["its"|"artifact"|"platform_help"], platform_version="8.3.27.1989")`;
+  `expand=True` добавит `context.links`. Публичная справка (platform_help/bsp_help) читается из общего тенанта автоматически.
 
 ### Поведение / код (нужен граф вызовов)
 - **`find_handlers(query)`** — точки входа объекта: обработчики событий форм (event→рутина) + стандартные

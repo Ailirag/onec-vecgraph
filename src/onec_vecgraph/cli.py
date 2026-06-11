@@ -202,6 +202,7 @@ def search(
     chunk_kind: list[str] = typer.Option(None, help="Filter by chunk kind (repeatable): object, code, attribute, form..."),
     subsystem: str = typer.Option(None, help="Restrict to a subsystem (name/fqn) and its descendants."),
     source: list[str] = typer.Option(None, help="Filter by corpus (repeatable): config, its, artifact, platform_help, bsp_help."),
+    platform_version: str = typer.Option(None, help="Restrict help to a platform build, e.g. 8.3.27.1989."),
     expand: bool = typer.Option(False, help="Attach a compact graph neighborhood (GraphRAG) to each hit."),
     shared: bool = typer.Option(True, help="Additively read the shared public tenant (platform/BSP help). --no-shared to disable."),
 ) -> None:
@@ -215,7 +216,7 @@ def search(
     shared_id = settings.shared_tenant_id if (shared and settings.include_shared_tenant
                                               and settings.shared_tenant_id != tenant_id) else None
     f = dict(kinds=kind or None, chunk_kinds=chunk_kind or None, subsystem=subsystem,
-             source=source or None, expand=expand, shared_tenant_id=shared_id)
+             source=source or None, platform_version=platform_version, expand=expand, shared_tenant_id=shared_id)
     with Neo4jStore.from_settings(settings) as store:
         if mode == "semantic":
             rprint(queries.semantic_search(store, tenant_id, query, embedder, top_k, **f))
@@ -236,6 +237,24 @@ def metrics(
 
     with Neo4jStore.from_settings(get_settings()) as store:
         rprint(queries.metrics(store, tenant_id, subsystem))
+
+
+@app.command()
+def docinfo(
+    name: str = typer.Argument(..., help="Canonical name: 'ТаблицаЗначений', 'Массив.Найти', 'QuerySchema'."),
+    tenant_id: str = typer.Option("default"),
+    platform_version: str = typer.Option(None, help="Platform build, e.g. 8.3.27.1989 (default: latest indexed)."),
+) -> None:
+    """Exact 1C platform-help lookup by name (syntax assistant), version-aware; reads shared tenant."""
+    from . import queries
+    from .storage import Neo4jStore
+
+    settings = get_settings()
+    shared_id = settings.shared_tenant_id if (settings.include_shared_tenant
+                                              and settings.shared_tenant_id != tenant_id) else None
+    with Neo4jStore.from_settings(settings) as store:
+        rprint(queries.docinfo(store, tenant_id, name, platform_version=platform_version,
+                               shared_tenant_id=shared_id))
 
 
 @app.command()

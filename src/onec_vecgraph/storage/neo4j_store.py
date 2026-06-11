@@ -278,6 +278,7 @@ class Neo4jStore:
     # (direct or via nested subsystems). `c` and `o` must be bound before this clause.
     _CHUNK_FILTER = (
         "  AND ($source IS NULL OR c.source IN $source) "
+        "  AND ($platform_version IS NULL OR o.platform_version = $platform_version) "
         "  AND ($chunk_kinds IS NULL OR c.chunk_kind IN $chunk_kinds) "
         "  AND ($kinds IS NULL OR o.kind IN $kinds) "
         "  AND ($subsystem IS NULL OR EXISTS { "
@@ -302,7 +303,8 @@ class Neo4jStore:
     def vector_search(self, tenant_id: str, query_vec: list[float], fetch: int,
                       index: str = "chunk_embedding", kinds: list[str] | None = None,
                       chunk_kinds: list[str] | None = None, subsystem: str | None = None,
-                      source: list[str] | None = None, shared_tenant_id: str | None = None) -> list[dict[str, Any]]:
+                      source: list[str] | None = None, platform_version: str | None = None,
+                      shared_tenant_id: str | None = None) -> list[dict[str, Any]]:
         return self.read(
             "CALL db.index.vector.queryNodes($index, $fetch, $vec) YIELD node AS c, score "
             "WHERE c.tenant_id IN $tenants "
@@ -311,12 +313,14 @@ class Neo4jStore:
             index=index, fetch=fetch, vec=query_vec, t=tenant_id,
             tenants=self._scope(tenant_id, shared_tenant_id),
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
+            platform_version=platform_version,
         )
 
     def fulltext_search(self, tenant_id: str, query: str, limit: int,
                         index: str = "chunk_text", kinds: list[str] | None = None,
                         chunk_kinds: list[str] | None = None, subsystem: str | None = None,
-                        source: list[str] | None = None, shared_tenant_id: str | None = None) -> list[dict[str, Any]]:
+                        source: list[str] | None = None, platform_version: str | None = None,
+                        shared_tenant_id: str | None = None) -> list[dict[str, Any]]:
         return self.read(
             "CALL db.index.fulltext.queryNodes($index, $q) YIELD node AS c, score "
             "WHERE c.tenant_id IN $tenants "
@@ -325,11 +329,13 @@ class Neo4jStore:
             index=index, q=query, t=tenant_id, lim=limit,
             tenants=self._scope(tenant_id, shared_tenant_id),
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
+            platform_version=platform_version,
         )
 
     def filtered_chunk_count(self, tenant_id: str, cap: int, kinds: list[str] | None = None,
                              chunk_kinds: list[str] | None = None, subsystem: str | None = None,
-                             source: list[str] | None = None, shared_tenant_id: str | None = None) -> int:
+                             source: list[str] | None = None, platform_version: str | None = None,
+                             shared_tenant_id: str | None = None) -> int:
         """Count chunks matching the filter, scanning at most `cap` (so the gate that decides
         exact-vs-index search is itself bounded). Returns `cap` when the set is at least that big."""
         rows = self.read(
@@ -337,13 +343,15 @@ class Neo4jStore:
             + self._CHUNK_FILTER + "WITH c LIMIT $cap RETURN count(c) AS n",
             t=tenant_id, cap=cap, tenants=self._scope(tenant_id, shared_tenant_id),
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
+            platform_version=platform_version,
         )
         return rows[0]["n"] if rows else 0
 
     def exact_vector_search(self, tenant_id: str, query_vec: list[float], fetch: int,
                             index: str = "chunk_embedding", kinds: list[str] | None = None,
                             chunk_kinds: list[str] | None = None, subsystem: str | None = None,
-                            source: list[str] | None = None, shared_tenant_id: str | None = None) -> list[dict[str, Any]]:
+                            source: list[str] | None = None, platform_version: str | None = None,
+                            shared_tenant_id: str | None = None) -> list[dict[str, Any]]:
         """Exact cosine over the filtered candidate set (no vector-index recall loss). Use only
         when the filtered set is small — otherwise this scans too many vectors."""
         prop = "embedding_ident" if index.endswith("_ident") else "embedding"
@@ -355,6 +363,7 @@ class Neo4jStore:
             t=tenant_id, vec=query_vec, fetch=fetch,
             tenants=self._scope(tenant_id, shared_tenant_id),
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
+            platform_version=platform_version,
         )
 
     def chunk_count(self, tenant_id: str) -> int:

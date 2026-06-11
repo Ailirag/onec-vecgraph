@@ -24,3 +24,14 @@ sources:
     repo: git@example.com:projectA/its-normalized.git   # or: path: /its/projectA
     branch: main
     globs: ["**/*.json"]
+
+  # 1C platform help (syntax assistant) from .hbk — PUBLIC: ingest into the shared tenant
+  #   onec-vecgraph ingest sources.example.yaml --tenant-id __shared__ --only hbk
+  # version is parsed from the bin path; one entry per build, or a glob for all installed builds.
+  - type: hbk
+    bin: "C:/Program Files/1cv8/8.3.27.1989/bin"   # auto-discovers sh*_ru.hbk
+    domains: [shcntx, shlang]                       # context + language (add shquery if needed)
+    # bins: ["C:/Program Files/1cv8/*/bin"]         # alt: all installed builds (each its own version)
+    # files: ["/help/shcntx_ru.hbk"]                # alt: explicit file paths
+    # platform_version: "8.3.27.1989"               # explicit override (else from path)
+    # limit: 500                                     # cap pages per file (smoke/dev)

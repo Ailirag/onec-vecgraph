@@ -383,6 +383,38 @@ def get_document(store, tenant_id: str, fqn: str, shared_tenant_id: str | None =
     }
 
 
+def docinfo(store, tenant_id: str, name: str, platform_version: str | None = None,
+            shared_tenant_id: str | None = None) -> dict[str, Any]:
+    """Exact platform-help lookup by canonical name (RU / English / 'Object.Method'), version-aware.
+    Resolves in caller + shared tenant. One match → full doc; several → disambiguation list."""
+    tenants = [tenant_id] + ([shared_tenant_id] if shared_tenant_id and shared_tenant_id != tenant_id else [])
+    n = name.strip().lower()
+    cands = store.read(
+        "MATCH (d) WHERE d.tenant_id IN $tenants AND d.source = 'platform_help' "
+        "  AND ($pv IS NULL OR d.platform_version = $pv) "
+        "  AND (d.full_name_norm = $n OR d.name_norm = $n OR toLower(coalesce(d.en_name, '')) = $n) "
+        "RETURN d.fqn AS fqn, d.tenant_id AS tenant, d.title AS title, d.en_name AS en_name, "
+        "       d.platform_version AS platform_version, d.help_kind AS help_kind, d.full_name_norm AS fn "
+        "ORDER BY (CASE WHEN d.full_name_norm = $n THEN 0 ELSE 1 END), d.platform_version DESC "
+        "LIMIT 25",
+        tenants=tenants, n=n, pv=platform_version,
+    )
+    if not cands:
+        return {"found": False, "name": name, "platform_version": platform_version}
+    # collapse to one topic per (name, version); if a single topic remains, return its full doc
+    distinct = {(c["fn"], c["platform_version"]): c for c in cands}
+    if len(distinct) == 1:
+        best = cands[0]
+        doc = get_document(store, best["tenant"], best["fqn"], shared_tenant_id=shared_tenant_id)
+        doc["platform_version"] = best["platform_version"]
+        doc["help_kind"] = best["help_kind"]
+        doc["en_name"] = best["en_name"]
+        return doc
+    return {"found": True, "name": name, "ambiguous": True,
+            "candidates": [{"fqn": c["fqn"], "title": c["title"], "platform_version": c["platform_version"],
+                            "help_kind": c["help_kind"]} for c in cands]}
+
+
 def call_path(store, tenant_id: str, src: str, dst: str, max_hops: int = 8) -> dict[str, Any]:
     src_fqns = _resolve_routines(store, tenant_id, src)
     dst_fqns = _resolve_routines(store, tenant_id, dst)
@@ -531,18 +563,19 @@ def _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id=None):
 
 
 def semantic_search(store, tenant_id, query, embedder, top_k=10, overfetch=5,
-                    kinds=None, chunk_kinds=None, subsystem=None, source=None, expand=False,
-                    shared_tenant_id=None):
+                    kinds=None, chunk_kinds=None, subsystem=None, source=None, platform_version=None,
+                    expand=False, shared_tenant_id=None):
     """Multi-vector semantic search (meaning × identifier), fused with RRF.
 
-    Optional filters (source / kinds / chunk_kinds / subsystem) are post-applied to the vector
-    hits; fetch is widened when filtering so a narrow slice still fills top_k. With expand=True
-    each hit is enriched with a compact graph neighborhood (GraphRAG). shared_tenant_id adds a
-    public corpus tenant to the read scope (server-derived)."""
+    Optional filters (source / kinds / chunk_kinds / subsystem / platform_version) are post-applied
+    to the vector hits; fetch is widened when filtering so a narrow slice still fills top_k. With
+    expand=True each hit is enriched with a compact graph neighborhood (GraphRAG). shared_tenant_id
+    adds a public corpus tenant to the read scope (server-derived)."""
     vec = embedder.embed([query], is_query=True)[0]
-    filtered = bool(kinds or chunk_kinds or subsystem or source)
+    filtered = bool(kinds or chunk_kinds or subsystem or source or platform_version)
     fetch = top_k * overfetch * (4 if filtered else 1)
-    f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source)
+    f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
+             platform_version=platform_version)
     sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id)
     results = _rrf_fuse([("semantic", sem), ("ident", idt)], top_k)
     if expand:
@@ -551,17 +584,18 @@ def semantic_search(store, tenant_id, query, embedder, top_k=10, overfetch=5,
 
 
 def hybrid_search(store, tenant_id, query, embedder, top_k=10, overfetch=5, rrf_k=60,
-                  reranker=None, kinds=None, chunk_kinds=None, subsystem=None, source=None, expand=False,
-                  shared_tenant_id=None):
+                  reranker=None, kinds=None, chunk_kinds=None, subsystem=None, source=None,
+                  platform_version=None, expand=False, shared_tenant_id=None):
     """Multi-vector (meaning × identifier) + full-text, fused with RRF; optional rerank.
 
-    Optional filters (source / kinds / chunk_kinds / subsystem) restrict all three retrievers.
-    With expand=True each hit is enriched with a compact graph neighborhood (GraphRAG).
+    Optional filters (source / kinds / chunk_kinds / subsystem / platform_version) restrict all three
+    retrievers. With expand=True each hit is enriched with a compact graph neighborhood (GraphRAG).
     shared_tenant_id adds a public corpus tenant to the read scope (server-derived)."""
     vec = embedder.embed([query], is_query=True)[0]
-    filtered = bool(kinds or chunk_kinds or subsystem or source)
+    filtered = bool(kinds or chunk_kinds or subsystem or source or platform_version)
     fetch = top_k * overfetch * (4 if filtered else 1)
-    f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source)
+    f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
+             platform_version=platform_version)
     sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id)
     ft = _dedup(store.fulltext_search(tenant_id, _fts_query(query), limit=fetch, shared_tenant_id=shared_tenant_id, **f))
     pool = top_k if reranker is None else max(top_k, 20)

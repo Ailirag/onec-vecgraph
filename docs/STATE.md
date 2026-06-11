@@ -134,6 +134,18 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   системным `git`) или локальный `path` (для тестов/офлайна). Проверено e2e на demo (its+artifact: ингест,
   инкремент идемпотентен, фильтр `source`, MENTIONS/RELATES_TO, поиск по корпусам не протекает в config).
 
+- **Синтаксис-помощник платформы (.hbk) (2026-06-08)**: источник `hbk` (`source='platform_help'`) — ридер
+  контейнера 1С v8 `sources/hbk_container.py` (16-байт header → блоки 31-байт → директория 12-байт →
+  элемент `FileStorage` = ZIP с HTML-страницами; **stdlib `struct`+`zipfile`**, валидирован на реальном
+  `shcntx_ru.hbk` 8.3.27.1989, ~25.5k страниц), адаптер `sources/hbk.py` (`HbkSource`: `bin`/`bins`-glob/
+  `files`/`domains`/`platform_version`/`help_kind`/`limit`; имя из `<h1>` = `РусИмя (EngName)`, HTML→текст
+  через `lxml`). **Версионность:** `platform_version` (из пути `bin`) пишется на `:Document`-владельца;
+  фильтр поиска `o.platform_version` в `_CHUNK_FILTER` (проброшен в 4 метода + search-функции); версионно-
+  квалиф. fqn `platform_help:<ver>|<Имя>`. Инструмент **`docinfo(name, platform_version?)`** — точный лукап
+  по канон. имени (RU/EN/`Объект.Метод`) с дизамбигуацией; индексы `document_name`/`document_pv` (schema).
+  Грузится в общий тенант: `ingest <m> --tenant-id __shared__ --only hbk`. e2e на реальном файле пройден
+  (ingest 60 стр., docinfo, docsearch аддитивно, версионный фильтр, изоляция, очистка). Лицензия: контент
+  справки проприетарный → общий tenant/репо приватный. БСП-справка — тот же механизм (`source='bsp_help'`).
 - **Общий публичный тенант (2026-06-08)**: зарезервированный tenant (`SHARED_TENANT_ID=__shared__`,
   `INCLUDE_SHARED_TENANT`) под **общедоступные корпуса** (справка платформы, БСП/SSL, будущие). Поиск и
   `get_document` читают его **аддитивно** к тенанту вызывающего: `WHERE c.tenant_id IN $tenants`, где
@@ -164,7 +176,8 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   `MENTIONS` (Document/Artifact→Object, явные/сканированные fqn), `RELATES_TO` (Document/Artifact→Object,
   семантика, `confidence`).
 - **chunk_kind**: object, attribute, tabular_attribute, enum_value, predefined, form, code, **subsystem**,
-  **role**, **its**, **artifact**. Code-чанки дробятся (`…::name#code/N`); doc-чанки (`<owner>#chunk[/N]`);
+  **role**, **its**, **artifact**, **platform_help** (doc-чанки = source). `:Document` владелец справки несёт
+  `platform_version`/`help_kind`/`name_norm`/`full_name_norm`/`en_name`. Code-чанки дробятся (`…::name#code/N`); doc-чанки (`<owner>#chunk[/N]`);
   несут `entry_point` (code) и **`source`** (config|its|artifact). Routine-узлы несут `entry_point`.
 - **Индексы поиска**: vector `chunk_embedding` (semantic) + `chunk_embedding_ident` (ident), cosine,
   dim из модели; fulltext `chunk_text` по `[text, text_tokens]` (идентификаторы расщеплены на под-слова).
@@ -193,8 +206,10 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   `semantic_search`/`hybrid_search` (+`source`-фильтр; `_expand` имеет doc-ветку с `links`).
 - `sources/` — мультиисточник: `base` (`Source` ABC, `DocUnit`, `owner_fqn`, `sha1_text`), `git_repo`
   (`materialize` — локальный path / `git clone --depth 1` системным git; `iter_files`), `markdown`
-  (`split_markdown_sections`), `its` (`ItsSource`), `git_artifacts` (`GitArtifactsSource`), `linking`
-  (`extract_fqn_mentions`/`link_mentions`), `registry` (`build_source`), `manifest` (`load_manifest` YAML/JSON).
+  (`split_markdown_sections`), `its` (`ItsSource`), `git_artifacts` (`GitArtifactsSource`),
+  **`hbk_container`** (v8-контейнер reader: `named_elements`/`iter_html_pages`), **`hbk`** (`HbkSource` —
+  справка платформы из .hbk), `linking` (`extract_fqn_mentions`/`link_mentions`), `registry`
+  (`build_source`: its/git_artifacts/hbk), `manifest` (`load_manifest` YAML/JSON).
 - `ingest.py` — `ingest_source` (doc-корпус: инкремент по version_hash → owners+chunks+embed+MENTIONS+опц.RELATES_TO),
   `ingest_manifest` (по манифесту; `config_dump`→index+callgraph+vectorize), `_link_semantic`.
 - `parsing/`: `ns` (namespaces+хелперы), `types` (разбор типов, cfg-ссылки, alias ConstantValue→Constant),
@@ -218,7 +233,7 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   runtime (кэш провайдера/реранкера).
 - `bsl/parser.py` — чистый Python BSL-парсер: процедуры/функции, export, region, **directive**, вызовы.
 
-## 8. MCP-инструменты (18)
+## 8. MCP-инструменты (19)
 
 > Консьюмер-гайд (подключение/заголовки/fqn/словари/карта инструментов/сценарии): `docs/MCP_USAGE.md`.
 > Сервер отдаёт тот же overview клиенту в `instructions` (FastMCP) при `initialize` — `server.INSTRUCTIONS`.
@@ -226,9 +241,9 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 ping, neo4j_health, whoami, list_metadata, get_object (+`detail`), **get_object_properties**
 (полный сырой набор `<Properties>` из `:Detail`), get_dependencies, impact_analysis,
 find_type_usages, **find_related_docs** (доки по объекту), **get_document** (документ по fqn),
-semantic_search, hybrid_search, **metrics** (инвентарь/хотспоты),
-find_callers, find_callees, call_path, **find_handlers** (обработчики форм+модулей).
-`semantic_search`/`hybrid_search` принимают `source`/`kinds`/`chunk_kinds`/`subsystem`/`expand`.
+**docinfo** (синтаксис-помощник: точный лукап по имени, версионный), semantic_search, hybrid_search,
+**metrics** (инвентарь/хотспоты), find_callers, find_callees, call_path, **find_handlers** (обработчики форм+модулей).
+`semantic_search`/`hybrid_search` принимают `source`/`platform_version`/`kinds`/`chunk_kinds`/`subsystem`/`expand`.
 
 ## 9. Ключевые решённые вопросы / находки
 
@@ -306,7 +321,10 @@ uv run onec-vecgraph search "запрос" --tenant-id demo --mode hybrid       
 uv run onec-vecgraph search "Провести" --tenant-id demo --chunk-kind code --expand
 uv run onec-vecgraph handlers Document.Имя --tenant-id demo                  # обработчики форм+модулей
 uv run onec-vecgraph metrics --tenant-id demo [--subsystem Имя]              # инвентарь/хотспоты
-uv run onec-vecgraph ingest sources.yaml --tenant-id demo [--only its|git_artifacts|config_dump] [--reset] [--link-semantic]
+uv run onec-vecgraph ingest sources.yaml --tenant-id demo [--only its|git_artifacts|hbk|config_dump] [--reset] [--link-semantic]
+uv run onec-vecgraph ingest sources.yaml --tenant-id __shared__ --only hbk   # справка платформы → общий тенант
+uv run onec-vecgraph docinfo "Массив.Найти" --tenant-id demo [--platform-version 8.3.27.1989]
+uv run onec-vecgraph search "схема запроса" --tenant-id demo --source platform_help --platform-version 8.3.27.1989
 uv run onec-vecgraph search "проведение" --tenant-id demo --source its --source artifact  # поиск по корпусам доков
 uv run onec-vecgraph show Catalog.Имя --tenant-id demo [--detail]            # --detail = + полные <Properties> из :Detail
 uv run onec-vecgraph index "<путь>" --tenant-id <t>                          # БЕЗ флагов = неразрушающий MERGE (добавить :Detail, не стирая векторы)

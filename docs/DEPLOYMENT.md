@@ -161,9 +161,19 @@ docker compose run --rm app onec-vecgraph ingest /m.yaml --tenant-id erp --link-
 docker compose run --rm -v /path/to/public-sources.yaml:/m.yaml:ro app \
   onec-vecgraph ingest /m.yaml --tenant-id __shared__
 ```
-Поиск/`get_document` любого арендатора **автоматически** читают `__shared__` дополнительно к его данным
-(сервер добавляет общий тенант в скоуп; клиент шлёт только свой `X-Tenant-Id`). Управление —
+Поиск/`get_document`/`docinfo` любого арендатора **автоматически** читают `__shared__` дополнительно к его
+данным (сервер добавляет общий тенант в скоуп; клиент шлёт только свой `X-Tenant-Id`). Управление —
 `INCLUDE_SHARED_TENANT=true|false`. Различение корпусов — `source` (`platform_help`/`bsp_help`/…).
+
+**Справка платформы (синтаксис-помощник) из `.hbk`** — источник `hbk` (примонтируйте `bin` платформы):
+```bash
+docker compose run --rm -v "C:/Program Files/1cv8/8.3.27.1989/bin:/pf-bin:ro" -v /path/sources.yaml:/m.yaml:ro app \
+  onec-vecgraph ingest /m.yaml --tenant-id __shared__ --only hbk
+```
+Запись манифеста `hbk` принимает `bin` (автодискавери `sh*_ru.hbk`), `bins`-glob (все сборки),
+`files` (явные пути), `domains` (`shcntx`/`shlang`/`shquery`), `platform_version` (иначе из пути), `limit`.
+Версия пишется на `:Document` → фильтр `platform_version` в поиске и `docinfo`. Контент справки
+**проприетарный** (лицензия платформы 1С) — общий тенант/репо держать приватными.
 
 > **Инвариант:** общий тенант **обязан** эмбеддиться той же моделью/размерностью, что и потребители —
 > векторный индекс один на всю БД; рассинхрон размерности сломает поиск. Изоляция: общий тенант

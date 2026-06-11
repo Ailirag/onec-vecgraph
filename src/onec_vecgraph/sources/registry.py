@@ -6,11 +6,11 @@ from .base import Source
 
 # Doc-corpus source types handled by the ingest pipeline. `config_dump` is NOT here — it keeps its
 # rich typed pipeline (index + vectorize) and is delegated by the orchestrator.
-DOC_SOURCE_TYPES = ("its", "git_artifacts")
+DOC_SOURCE_TYPES = ("its", "git_artifacts", "hbk")
 
 
 def build_source(entry: dict) -> Source:
-    """Construct a doc Source from a manifest entry ({type, repo|path, branch?, globs?})."""
+    """Construct a doc Source from a manifest entry ({type, repo|path|bin|files, ...})."""
     t = entry.get("type")
     if t == "its":
         from .its import ItsSource
@@ -20,4 +20,8 @@ def build_source(entry: dict) -> Source:
         from .git_artifacts import GitArtifactsSource
 
         return GitArtifactsSource(entry)
+    if t == "hbk":
+        from .hbk import HbkSource
+
+        return HbkSource(entry)
     raise ValueError(f"Unknown / non-doc source type: {t!r} (doc types: {DOC_SOURCE_TYPES})")
