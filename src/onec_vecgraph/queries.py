@@ -245,7 +245,8 @@ def _rrf_fuse(sources: list[tuple[str, list[dict]]], top_k: int, rrf_k: int = 60
             if "matched" not in entry:
                 entry["matched"] = r.get("matched")
                 entry["via"] = r.get("via")
-                entry["corpus"] = r.get("source")  # config | its | artifact
+                entry["corpus"] = r.get("source")  # config | its | artifact | platform_help | bsp_help
+                entry["tenant"] = r.get("tenant")  # owning tenant (caller or shared) — for expand
                 # For code units, surface the routine address; harmless otherwise.
                 if r.get("via") == "code" and r.get("chunk_fqn"):
                     entry["routine_fqn"] = _routine_fqn(r["chunk_fqn"])
@@ -346,25 +347,29 @@ def find_related_docs(store, tenant_id: str, q: str) -> dict[str, Any]:
     return {"found": True, "fqn": head["fqn"], "docs": docs, "count": len(docs)}
 
 
-def get_document(store, tenant_id: str, fqn: str) -> dict[str, Any]:
-    """Full document by owner fqn (e.g. 'its:art-1' / 'artifact:design.md#0'): metadata, full text
-    (chunks rejoined), and the config objects it links to."""
+def get_document(store, tenant_id: str, fqn: str, shared_tenant_id: str | None = None) -> dict[str, Any]:
+    """Full document by owner fqn (e.g. 'its:art-1' / 'platform_help:8.3.27|Массив.Найти'):
+    metadata, full text (chunks rejoined), and the config objects it links to. Resolves in the
+    caller tenant + the shared public tenant (so platform/BSP help docs are reachable)."""
+    tenants = [tenant_id] + ([shared_tenant_id] if shared_tenant_id and shared_tenant_id != tenant_id else [])
     rows = store.read(
-        "MATCH (d {tenant_id: $t, fqn: $fqn}) WHERE d:Document OR d:Artifact "
-        "RETURN labels(d)[0] AS label, properties(d) AS props",
-        t=tenant_id, fqn=fqn,
+        "MATCH (d {fqn: $fqn}) WHERE d.tenant_id IN $tenants AND (d:Document OR d:Artifact) "
+        "RETURN d.tenant_id AS tenant, labels(d)[0] AS label, properties(d) AS props "
+        "ORDER BY CASE WHEN d.tenant_id = $caller THEN 0 ELSE 1 END LIMIT 1",  # caller wins on fqn clash
+        tenants=tenants, fqn=fqn, caller=tenant_id,
     )
     if not rows:
         return {"found": False, "fqn": fqn}
+    owner = rows[0]["tenant"]  # pin chunk/link reads to the resolved owner tenant (deterministic)
     chunks = store.read(
-        "MATCH (d {tenant_id: $t, fqn: $fqn})-[:HAS_CHUNK]->(c:Chunk) "
+        "MATCH (d {tenant_id: $owner, fqn: $fqn})-[:HAS_CHUNK]->(c:Chunk) "
         "RETURN c.fqn AS fqn, c.text AS text ORDER BY c.fqn",
-        t=tenant_id, fqn=fqn,
+        owner=owner, fqn=fqn,
     )
     links = store.read(
-        "MATCH (d {tenant_id: $t, fqn: $fqn})-[r:MENTIONS|RELATES_TO]->(o:Object) "
+        "MATCH (d {tenant_id: $owner, fqn: $fqn})-[r:MENTIONS|RELATES_TO]->(o:Object) "
         "RETURN type(r) AS rel, o.fqn AS object, r.confidence AS confidence ORDER BY rel, object",
-        t=tenant_id, fqn=fqn,
+        owner=owner, fqn=fqn,
     )
     props = dict(rows[0]["props"])
     for k in ("tenant_id", "config_id"):
@@ -411,13 +416,14 @@ def _expand(store, tenant_id: str, results: list[dict]) -> list[dict]:
                 t=tenant_id, f=r["routine_fqn"],
             )
             r["context"] = rows[0] if rows else {}
-        elif r.get("corpus") in ("its", "artifact"):
-            # doc hit → the config objects it links to
+        elif r.get("corpus") and r.get("corpus") != "config":
+            # doc hit (its / artifact / platform_help / bsp_help / …) → linked config objects.
+            # Use the hit's OWN tenant (doc may live in the shared public tenant, not the caller's).
             rows = store.read(
-                "MATCH (d {tenant_id: $t, fqn: $f})-[rel:MENTIONS|RELATES_TO]->(o:Object) "
+                "MATCH (d {tenant_id: $dt, fqn: $f})-[rel:MENTIONS|RELATES_TO]->(o:Object) "
                 "WHERE d:Document OR d:Artifact "
                 "RETURN type(rel) AS rel, o.fqn AS object ORDER BY rel, object",
-                t=tenant_id, f=r["fqn"],
+                dt=r.get("tenant") or tenant_id, f=r["fqn"],
             )
             r["context"] = {"links": rows}
         else:
@@ -510,30 +516,34 @@ def _fts_query(raw: str) -> str:
 _EXACT_SCAN_CAP = 50000
 
 
-def _vector_retrievers(store, tenant_id, vec, fetch, f):
+def _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id=None):
     """Return (semantic, ident) deduped hit lists, choosing exact vs index retrieval per the
-    filter selectivity."""
+    filter selectivity. `shared_tenant_id` (public corpus tenant) is read additively but does
+    NOT count toward filter selectivity (it must not force the exact-scan path)."""
     use_exact = False
     if any(f.values()):
-        use_exact = store.filtered_chunk_count(tenant_id, _EXACT_SCAN_CAP, **f) < _EXACT_SCAN_CAP
+        use_exact = store.filtered_chunk_count(
+            tenant_id, _EXACT_SCAN_CAP, shared_tenant_id=shared_tenant_id, **f) < _EXACT_SCAN_CAP
     search = store.exact_vector_search if use_exact else store.vector_search
-    sem = _dedup(search(tenant_id, vec, fetch, index="chunk_embedding", **f))
-    idt = _dedup(search(tenant_id, vec, fetch, index="chunk_embedding_ident", **f))
+    sem = _dedup(search(tenant_id, vec, fetch, index="chunk_embedding", shared_tenant_id=shared_tenant_id, **f))
+    idt = _dedup(search(tenant_id, vec, fetch, index="chunk_embedding_ident", shared_tenant_id=shared_tenant_id, **f))
     return sem, idt
 
 
 def semantic_search(store, tenant_id, query, embedder, top_k=10, overfetch=5,
-                    kinds=None, chunk_kinds=None, subsystem=None, source=None, expand=False):
+                    kinds=None, chunk_kinds=None, subsystem=None, source=None, expand=False,
+                    shared_tenant_id=None):
     """Multi-vector semantic search (meaning × identifier), fused with RRF.
 
     Optional filters (source / kinds / chunk_kinds / subsystem) are post-applied to the vector
     hits; fetch is widened when filtering so a narrow slice still fills top_k. With expand=True
-    each hit is enriched with a compact graph neighborhood (GraphRAG)."""
+    each hit is enriched with a compact graph neighborhood (GraphRAG). shared_tenant_id adds a
+    public corpus tenant to the read scope (server-derived)."""
     vec = embedder.embed([query], is_query=True)[0]
     filtered = bool(kinds or chunk_kinds or subsystem or source)
     fetch = top_k * overfetch * (4 if filtered else 1)
     f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source)
-    sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f)
+    sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id)
     results = _rrf_fuse([("semantic", sem), ("ident", idt)], top_k)
     if expand:
         _expand(store, tenant_id, results)
@@ -541,17 +551,19 @@ def semantic_search(store, tenant_id, query, embedder, top_k=10, overfetch=5,
 
 
 def hybrid_search(store, tenant_id, query, embedder, top_k=10, overfetch=5, rrf_k=60,
-                  reranker=None, kinds=None, chunk_kinds=None, subsystem=None, source=None, expand=False):
+                  reranker=None, kinds=None, chunk_kinds=None, subsystem=None, source=None, expand=False,
+                  shared_tenant_id=None):
     """Multi-vector (meaning × identifier) + full-text, fused with RRF; optional rerank.
 
     Optional filters (source / kinds / chunk_kinds / subsystem) restrict all three retrievers.
-    With expand=True each hit is enriched with a compact graph neighborhood (GraphRAG)."""
+    With expand=True each hit is enriched with a compact graph neighborhood (GraphRAG).
+    shared_tenant_id adds a public corpus tenant to the read scope (server-derived)."""
     vec = embedder.embed([query], is_query=True)[0]
     filtered = bool(kinds or chunk_kinds or subsystem or source)
     fetch = top_k * overfetch * (4 if filtered else 1)
     f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source)
-    sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f)
-    ft = _dedup(store.fulltext_search(tenant_id, _fts_query(query), limit=fetch, **f))
+    sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id)
+    ft = _dedup(store.fulltext_search(tenant_id, _fts_query(query), limit=fetch, shared_tenant_id=shared_tenant_id, **f))
     pool = top_k if reranker is None else max(top_k, 20)
     results = _rrf_fuse([("semantic", sem), ("ident", idt), ("fulltext", ft)], pool, rrf_k)
     if reranker is not None:

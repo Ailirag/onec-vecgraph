@@ -287,60 +287,73 @@ class Neo4jStore:
     )
     _CHUNK_RETURN = (
         "RETURN o.fqn AS fqn, o.kind AS kind, o.synonym AS synonym, c.fqn AS chunk_fqn, "
-        "       c.name AS chunk_name, c.chunk_kind AS via, c.source AS source, c.text AS matched, score "
+        "       c.name AS chunk_name, c.chunk_kind AS via, c.source AS source, c.tenant_id AS tenant, "
+        "       c.text AS matched, score "
     )
+
+    # `tenants` = caller + optional shared/public tenant (server-derived list, never client args).
+    # `$t` (the caller) still scopes the subsystem subquery in _CHUNK_FILTER (config-only facet).
+    @staticmethod
+    def _scope(tenant_id: str, shared_tenant_id: str | None) -> list[str]:
+        if shared_tenant_id and shared_tenant_id != tenant_id:
+            return [tenant_id, shared_tenant_id]
+        return [tenant_id]
 
     def vector_search(self, tenant_id: str, query_vec: list[float], fetch: int,
                       index: str = "chunk_embedding", kinds: list[str] | None = None,
                       chunk_kinds: list[str] | None = None, subsystem: str | None = None,
-                      source: list[str] | None = None) -> list[dict[str, Any]]:
+                      source: list[str] | None = None, shared_tenant_id: str | None = None) -> list[dict[str, Any]]:
         return self.read(
             "CALL db.index.vector.queryNodes($index, $fetch, $vec) YIELD node AS c, score "
-            "WHERE c.tenant_id = $t "
+            "WHERE c.tenant_id IN $tenants "
             "MATCH (o)-[:HAS_CHUNK]->(c) WHERE true "  # owner: Object | Document | Artifact
             + self._CHUNK_FILTER + self._CHUNK_RETURN + "ORDER BY score DESC",
             index=index, fetch=fetch, vec=query_vec, t=tenant_id,
+            tenants=self._scope(tenant_id, shared_tenant_id),
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
         )
 
     def fulltext_search(self, tenant_id: str, query: str, limit: int,
                         index: str = "chunk_text", kinds: list[str] | None = None,
                         chunk_kinds: list[str] | None = None, subsystem: str | None = None,
-                        source: list[str] | None = None) -> list[dict[str, Any]]:
+                        source: list[str] | None = None, shared_tenant_id: str | None = None) -> list[dict[str, Any]]:
         return self.read(
             "CALL db.index.fulltext.queryNodes($index, $q) YIELD node AS c, score "
-            "WHERE c.tenant_id = $t "
+            "WHERE c.tenant_id IN $tenants "
             "MATCH (o)-[:HAS_CHUNK]->(c) WHERE true "  # owner: Object | Document | Artifact
             + self._CHUNK_FILTER + self._CHUNK_RETURN + "ORDER BY score DESC LIMIT $lim",
             index=index, q=query, t=tenant_id, lim=limit,
+            tenants=self._scope(tenant_id, shared_tenant_id),
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
         )
 
     def filtered_chunk_count(self, tenant_id: str, cap: int, kinds: list[str] | None = None,
                              chunk_kinds: list[str] | None = None, subsystem: str | None = None,
-                             source: list[str] | None = None) -> int:
+                             source: list[str] | None = None, shared_tenant_id: str | None = None) -> int:
         """Count chunks matching the filter, scanning at most `cap` (so the gate that decides
         exact-vs-index search is itself bounded). Returns `cap` when the set is at least that big."""
         rows = self.read(
-            "MATCH (o)-[:HAS_CHUNK]->(c:Chunk {tenant_id: $t}) WHERE true "  # owner: Object|Document|Artifact
+            "MATCH (o)-[:HAS_CHUNK]->(c:Chunk) WHERE c.tenant_id IN $tenants "  # owner: Object|Document|Artifact
             + self._CHUNK_FILTER + "WITH c LIMIT $cap RETURN count(c) AS n",
-            t=tenant_id, cap=cap, kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
+            t=tenant_id, cap=cap, tenants=self._scope(tenant_id, shared_tenant_id),
+            kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
         )
         return rows[0]["n"] if rows else 0
 
     def exact_vector_search(self, tenant_id: str, query_vec: list[float], fetch: int,
                             index: str = "chunk_embedding", kinds: list[str] | None = None,
                             chunk_kinds: list[str] | None = None, subsystem: str | None = None,
-                            source: list[str] | None = None) -> list[dict[str, Any]]:
+                            source: list[str] | None = None, shared_tenant_id: str | None = None) -> list[dict[str, Any]]:
         """Exact cosine over the filtered candidate set (no vector-index recall loss). Use only
         when the filtered set is small — otherwise this scans too many vectors."""
         prop = "embedding_ident" if index.endswith("_ident") else "embedding"
         return self.read(
-            "MATCH (o)-[:HAS_CHUNK]->(c:Chunk {tenant_id: $t}) WHERE true "  # owner: Object|Document|Artifact
+            "MATCH (o)-[:HAS_CHUNK]->(c:Chunk) WHERE c.tenant_id IN $tenants "  # owner: Object|Document|Artifact
             + self._CHUNK_FILTER
             + f"WITH o, c, vector.similarity.cosine(c.{prop}, $vec) AS score WHERE score IS NOT NULL "
             + self._CHUNK_RETURN + "ORDER BY score DESC LIMIT $fetch",
             t=tenant_id, vec=query_vec, fetch=fetch,
+            tenants=self._scope(tenant_id, shared_tenant_id),
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
         )
 

@@ -134,6 +134,20 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   системным `git`) или локальный `path` (для тестов/офлайна). Проверено e2e на demo (its+artifact: ингест,
   инкремент идемпотентен, фильтр `source`, MENTIONS/RELATES_TO, поиск по корпусам не протекает в config).
 
+- **Общий публичный тенант (2026-06-08)**: зарезервированный tenant (`SHARED_TENANT_ID=__shared__`,
+  `INCLUDE_SHARED_TENANT`) под **общедоступные корпуса** (справка платформы, БСП/SSL, будущие). Поиск и
+  `get_document` читают его **аддитивно** к тенанту вызывающего: `WHERE c.tenant_id IN $tenants`, где
+  `tenants=[caller]` или `[caller,__shared__]` — список формируется **сервером** (`server._shared`,
+  `Settings.search_scope`, `store._scope`), не из аргументов/заголовков клиента → утечки между реальными
+  арендаторами нет (адверсариально проверено: изоляция PASS). Агент шлёт один `X-Tenant-Id`; публичные
+  корпуса приезжают сами. `shared_tenant_id` НЕ входит в селективность exact-vs-index. `_CHUNK_RETURN`
+  отдаёт `c.tenant_id AS tenant`; `_expand`/`_rrf_fuse` используют тенант хита (shared-доки достраиваются
+  корректно). Заливка: `ingest <manifest> --tenant-id __shared__`. **Инвариант:** общий тенант
+  эмбеддить той же моделью/размерностью, что и потребители (единый vector-индекс). Публичные корпуса
+  различаются `source` (`platform_help`/`bsp_help`/…). Юнит-тесты `tests/test_shared_tenant.py`;
+  **e2e не прогонялся — Docker Desktop в сессии не стартовал (WSL-bootstrap), Neo4j недоступен**
+  (скрипт `scripts/_shared_probe.py` готов).
+
 ## 6. Модель графа (Neo4j)
 
 - **Ключ узла**: `(tenant_id, fqn)` MERGE. Constraints + индексы — `graph/schema.py`.

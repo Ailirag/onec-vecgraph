@@ -58,6 +58,21 @@ class Settings(BaseSettings):
     # default — prevents cross-company data access). stdio (local dev) always uses defaults.
     require_tenant: bool = True
 
+    # ── Shared / public corpora ────────────────────────────────────────
+    # A reserved tenant holding PUBLIC, non-company-specific corpora (platform help, BSP/SSL
+    # help, future public docs). Reads additively include it alongside the caller's tenant —
+    # the agent sends only its own X-Tenant-Id; the shared tenant is appended server-side
+    # (never client-controlled → no cross-tenant leakage). Public corpora are distinguished by
+    # `source` (platform_help, bsp_help, ...). Ingest into it with `--tenant-id <shared_tenant_id>`.
+    shared_tenant_id: str = "__shared__"
+    include_shared_tenant: bool = True  # additively read the shared tenant in search/get_document
+
+    def search_scope(self, tenant_id: str) -> list[str]:
+        """Tenant ids a search/get_document call may read: caller + shared (if enabled, deduped)."""
+        if self.include_shared_tenant and self.shared_tenant_id and self.shared_tenant_id != tenant_id:
+            return [tenant_id, self.shared_tenant_id]
+        return [tenant_id]
+
     # ── Auth (HTTP) ────────────────────────────────────────────────────
     # When enabled, every HTTP call must carry `Authorization: Bearer <token>`; the tenant
     # (and optional config) are derived from the token map below — NOT from a client-supplied

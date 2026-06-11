@@ -70,6 +70,13 @@ def _tenant(ctx: Context) -> str:
     return tenancy.resolve(ctx, settings).tenant_id
 
 
+def _shared(tenant_id: str) -> str | None:
+    """Server-derived public-corpus tenant to read additively (None if disabled or caller==shared).
+    Never client-controlled — prevents reading arbitrary tenants."""
+    s = settings.shared_tenant_id
+    return s if settings.include_shared_tenant and s and s != tenant_id else None
+
+
 # ── health / introspection ────────────────────────────────────────────
 @mcp.tool()
 def ping() -> dict[str, Any]:
@@ -163,9 +170,11 @@ def find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
 @mcp.tool()
 def get_document(ctx: Context, fqn: str) -> dict[str, Any]:
     """Full document by owner fqn ('its:<id>' / 'artifact:<path>#<n>', e.g. from a search hit's fqn):
-    metadata, full text (chunks rejoined) and the config objects it links to."""
+    metadata, full text (chunks rejoined) and the config objects it links to. Resolves in the
+    caller tenant and the shared public tenant (platform/BSP help)."""
     with Neo4jStore.from_settings(settings) as store:
-        return queries.get_document(store, _tenant(ctx), fqn)
+        t = _tenant(ctx)
+        return queries.get_document(store, t, fqn, shared_tenant_id=_shared(t))
 
 
 # ── search ────────────────────────────────────────────────────────────
@@ -177,20 +186,22 @@ def semantic_search(
 ) -> dict[str, Any]:
     """Semantic (multi-vector) search over the indexed corpora by meaning.
 
-    Optional filters: source (corpus: ['config','its','artifact'] — config = the 1C configuration,
-    its = 1C ITS docs, artifact = project docs), kinds (object kinds like
+    Optional filters: source (corpus: ['config','its','artifact','platform_help','bsp_help'] — config
+    = the 1C configuration, its = 1C ITS docs, artifact = project docs, platform_help/bsp_help = public
+    platform/library help from the shared tenant), kinds (object kinds like
     ['Catalog','Document','Subsystem']), chunk_kinds (['object','attribute','code','form',
     'enum_value','predefined','subsystem','role']), subsystem (name/fqn — restrict to that subsystem
-    or its descendants). Code hits return routine granularity ('routine_fqn'); each hit carries
-    'corpus'. expand=True attaches a compact graph neighborhood ('context') to each hit (GraphRAG).
-    Returns: {query, mode, results:[{fqn, kind, synonym, via, corpus, matched, rrf_score,
-    routine_fqn?/routine? (code), context? (expand)}]}. Requires prior vectorization."""
+    or its descendants). Public corpora are read additively from the shared tenant — no extra args.
+    Code hits return routine granularity ('routine_fqn'); each hit carries 'corpus'. expand=True
+    attaches a compact graph neighborhood ('context'). Requires prior vectorization."""
     from .embeddings.runtime import provider
 
     with Neo4jStore.from_settings(settings) as store:
+        t = _tenant(ctx)
         return queries.semantic_search(
-            store, _tenant(ctx), query, provider(settings), top_k,
+            store, t, query, provider(settings), top_k,
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source, expand=expand,
+            shared_tenant_id=_shared(t),
         )
 
 
@@ -203,15 +214,18 @@ def hybrid_search(
     """Hybrid search (multi-vector + full-text + RRF). Best for mixed meaning/identifier queries.
 
     Same optional filters as semantic_search (source / kinds / chunk_kinds / subsystem / expand).
-    source selects corpora (['config','its','artifact']). Identifiers are sub-word tokenized, so
-    'Продажи' matches 'ПродажиТоваров'. Code hits are routine-grained; each hit carries 'corpus'.
+    source selects corpora (['config','its','artifact','platform_help','bsp_help']); public corpora
+    are read additively from the shared tenant. Identifiers are sub-word tokenized, so 'Продажи'
+    matches 'ПродажиТоваров'. Code hits are routine-grained; each hit carries 'corpus'.
     Same result shape as semantic_search. Requires prior vectorization."""
     from .embeddings.runtime import provider, reranker
 
     with Neo4jStore.from_settings(settings) as store:
+        t = _tenant(ctx)
         return queries.hybrid_search(
-            store, _tenant(ctx), query, provider(settings), top_k, reranker=reranker(settings),
+            store, t, query, provider(settings), top_k, reranker=reranker(settings),
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source, expand=expand,
+            shared_tenant_id=_shared(t),
         )
 
 

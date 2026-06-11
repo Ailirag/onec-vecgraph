@@ -201,8 +201,9 @@ def search(
     kind: list[str] = typer.Option(None, help="Filter by object kind (repeatable): Catalog, Document, Subsystem..."),
     chunk_kind: list[str] = typer.Option(None, help="Filter by chunk kind (repeatable): object, code, attribute, form..."),
     subsystem: str = typer.Option(None, help="Restrict to a subsystem (name/fqn) and its descendants."),
-    source: list[str] = typer.Option(None, help="Filter by corpus (repeatable): config, its, artifact."),
+    source: list[str] = typer.Option(None, help="Filter by corpus (repeatable): config, its, artifact, platform_help, bsp_help."),
     expand: bool = typer.Option(False, help="Attach a compact graph neighborhood (GraphRAG) to each hit."),
+    shared: bool = typer.Option(True, help="Additively read the shared public tenant (platform/BSP help). --no-shared to disable."),
 ) -> None:
     """Search indexed corpora (semantic or hybrid), with optional filters."""
     from . import queries
@@ -211,8 +212,10 @@ def search(
 
     settings = get_settings()
     embedder = provider(settings)
+    shared_id = settings.shared_tenant_id if (shared and settings.include_shared_tenant
+                                              and settings.shared_tenant_id != tenant_id) else None
     f = dict(kinds=kind or None, chunk_kinds=chunk_kind or None, subsystem=subsystem,
-             source=source or None, expand=expand)
+             source=source or None, expand=expand, shared_tenant_id=shared_id)
     with Neo4jStore.from_settings(settings) as store:
         if mode == "semantic":
             rprint(queries.semantic_search(store, tenant_id, query, embedder, top_k, **f))

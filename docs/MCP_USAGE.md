@@ -88,7 +88,10 @@ Report, DataProcessor, Constant, Subsystem, Role, EventSubscription, BusinessPro
 ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный список — через `metrics`).
 
 **Корпуса (`source`)**: `config` (сама конфигурация 1С), `its` (документация ИТС), `artifact`
-(проектные документы из git). Каждый хит поиска несёт поле `corpus`.
+(проектные документы из git), `platform_help`/`bsp_help` (**общедоступная** справка платформы/БСП).
+Каждый хит несёт поле `corpus`. Публичные корпуса (`platform_help`/`bsp_help`) живут в общем тенанте и
+читаются **автоматически** в дополнение к вашему — никаких доп. аргументов/заголовков не нужно (агент
+по-прежнему шлёт один `X-Tenant-Id`; общий тенант добавляет сервер).
 
 **Виды чанков (`chunk_kinds`)**: `object`, `attribute`, `tabular_attribute`, `enum_value`,
 `predefined`, `form`, `code`, `subsystem`, `role`, `its`, `artifact`.
