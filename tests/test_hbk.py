@@ -31,6 +31,25 @@ def test_parse_page_no_parens() -> None:
     assert ru == "Prikladnye obyekty" and en is None
 
 
+def test_validate_requires_a_path() -> None:
+    with pytest.raises(ValueError):
+        HbkSource({}).validate()
+
+
+def test_validate_errors_when_path_not_found(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        HbkSource({"bin": str(tmp_path / "no-such-bin")}).validate()
+    with pytest.raises(FileNotFoundError):
+        HbkSource({"files": [str(tmp_path / "missing.hbk")]}).validate()
+
+
+@pytest.mark.skipif(not _REAL, reason="no installed 1C platform help (.hbk) on this machine")
+def test_validate_resolves_real_file() -> None:
+    bin_dir = _REAL[-1].rsplit("\\", 1)[0]
+    resolved = HbkSource({"bin": bin_dir, "domains": ["shcntx"]}).validate()
+    assert resolved and resolved[0][1][0].isdigit()  # (path, platform_version, help_kind)
+
+
 @pytest.mark.skipif(not _REAL, reason="no installed 1C platform help (.hbk) on this machine")
 def test_hbk_source_units_on_real_file() -> None:
     bin_dir = _REAL[-1].rsplit("\\", 1)[0]

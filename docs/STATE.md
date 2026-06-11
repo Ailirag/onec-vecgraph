@@ -143,7 +143,10 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   фильтр поиска `o.platform_version` в `_CHUNK_FILTER` (проброшен в 4 метода + search-функции); версионно-
   квалиф. fqn `platform_help:<ver>|<Имя>`. Инструмент **`docinfo(name, platform_version?)`** — точный лукап
   по канон. имени (RU/EN/`Объект.Метод`) с дизамбигуацией; индексы `document_name`/`document_pv` (schema).
-  Грузится в общий тенант: `ingest <m> --tenant-id __shared__ --only hbk`. e2e на реальном файле пройден
+  Грузится в общий тенант: `ingest <m> --tenant-id __shared__ --only hbk` ИЛИ отдельной командой
+  **`ingest-help --bin <…> [--domain shcntx …] [--platform-version …]`** с **валидацией пути**
+  (`HbkSource.validate()` — понятная ошибка + exit 1, если путь не задан/файл не найден; не тихий 0).
+  Запуск векторизации — ТОЛЬКО CLI; MCP read-only (инструмента ингеста нет by design). e2e на реальном файле пройден
   (ingest 60 стр., docinfo, docsearch аддитивно, версионный фильтр, изоляция, очистка). Лицензия: контент
   справки проприетарный → общий tenant/репо приватный. БСП-справка — тот же механизм (`source='bsp_help'`).
 - **Общий публичный тенант (2026-06-08)**: зарезервированный tenant (`SHARED_TENANT_ID=__shared__`,
@@ -323,6 +326,7 @@ uv run onec-vecgraph handlers Document.Имя --tenant-id demo                  
 uv run onec-vecgraph metrics --tenant-id demo [--subsystem Имя]              # инвентарь/хотспоты
 uv run onec-vecgraph ingest sources.yaml --tenant-id demo [--only its|git_artifacts|hbk|config_dump] [--reset] [--link-semantic]
 uv run onec-vecgraph ingest sources.yaml --tenant-id __shared__ --only hbk   # справка платформы → общий тенант
+uv run onec-vecgraph ingest-help --tenant-id __shared__ --bin "C:\Program Files\1cv8\8.3.27.1989\bin" --domain shcntx --domain shlang [--reset]   # запуск векторизации справки с проверкой пути
 uv run onec-vecgraph docinfo "Массив.Найти" --tenant-id demo [--platform-version 8.3.27.1989]
 uv run onec-vecgraph search "схема запроса" --tenant-id demo --source platform_help --platform-version 8.3.27.1989
 uv run onec-vecgraph search "проведение" --tenant-id demo --source its --source artifact  # поиск по корпусам доков

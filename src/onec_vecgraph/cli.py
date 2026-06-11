@@ -257,6 +257,53 @@ def docinfo(
                                shared_tenant_id=shared_id))
 
 
+@app.command(name="ingest-help")
+def ingest_help(
+    tenant_id: str = typer.Option("__shared__", help="Target tenant (public help → the shared tenant)."),
+    bin: str = typer.Option(None, help="Platform bin dir, e.g. 'C:\\Program Files\\1cv8\\8.3.27.1989\\bin' (auto-discovers sh*_ru.hbk)."),
+    file: list[str] = typer.Option(None, help="Explicit .hbk path(s) (repeatable)."),
+    domain: list[str] = typer.Option(None, help="sh* domains (repeatable): shcntx, shlang, shquery (default: shcntx, shlang)."),
+    platform_version: str = typer.Option(None, help="Platform build override (else parsed from the path)."),
+    limit: int = typer.Option(None, help="Cap pages per file (smoke/dev)."),
+    reset: bool = typer.Option(False, help="Rebuild this help corpus/version from scratch."),
+) -> None:
+    """Vectorize 1C platform syntax-assistant help (.hbk) into a tenant (default: the shared tenant).
+
+    Validates the help path FIRST: errors clearly if no path is given or no .hbk file is found
+    (instead of silently doing nothing)."""
+    from .embeddings.runtime import provider
+    from .ingest import ingest_source
+    from .sources.hbk import HbkSource
+    from .storage import Neo4jStore
+
+    entry: dict = {"type": "hbk"}
+    if bin:
+        entry["bin"] = bin
+    if file:
+        entry["files"] = list(file)
+    if domain:
+        entry["domains"] = list(domain)
+    if platform_version:
+        entry["platform_version"] = platform_version
+    if limit:
+        entry["limit"] = limit
+
+    settings = get_settings()
+    src = HbkSource(entry)
+    try:
+        resolved = src.validate()  # path check: raises if not specified / not found
+    except (ValueError, FileNotFoundError) as exc:
+        rprint(f"[red]Cannot start help vectorization:[/] {exc}")
+        raise typer.Exit(code=1)
+    rprint("[green]Help files:[/] " + ", ".join(f"{p} (v{pv}, {hk})" for p, pv, hk in resolved))
+
+    embedder = provider(settings)
+    with Neo4jStore.from_settings(settings) as store:
+        store.ensure_schema()
+        rprint(ingest_source(store, tenant_id, settings, src, embedder, reset=reset))
+    _flush_exit()
+
+
 @app.command()
 def ingest(
     manifest: str = typer.Argument(..., help="Path to a sources manifest (YAML/JSON)."),

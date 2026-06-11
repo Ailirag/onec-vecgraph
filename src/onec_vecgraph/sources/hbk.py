@@ -94,8 +94,25 @@ class HbkSource(Source):
             out.append((f, pv, self.help_kind_override or _help_kind(f)))
         return out
 
+    def validate(self) -> list[tuple[str, str, str]]:
+        """Resolve and CHECK the help path; raise a clear error instead of silently yielding nothing.
+        Returns [(hbk_path, platform_version, help_kind)]."""
+        if not (self.entry.get("bin") or self.entry.get("bins") or self.entry.get("files")):
+            raise ValueError(
+                "hbk source: no help path specified — set 'bin' (platform bin dir), 'bins' (glob) "
+                "or 'files' (explicit .hbk paths) in the manifest entry / CLI options."
+            )
+        files = self._files()
+        if not files:
+            tried = self.entry.get("files") or self.entry.get("bins") or [self.entry.get("bin")]
+            raise FileNotFoundError(
+                f"hbk source: no .hbk help files found (looked at: {tried}; domains={list(self.domains)}). "
+                "Check the path and that sh*_ru.hbk exist there."
+            )
+        return files
+
     def units(self) -> Iterator[DocUnit]:
-        for hbk_path, pv, help_kind in self._files():
+        for hbk_path, pv, help_kind in self.validate():
             n = 0
             for zip_path, html in iter_html_pages(hbk_path):
                 try:
