@@ -15,6 +15,7 @@ from .bsl.parser import parse_module
 from .chunking import classify_entry_point
 from .config import Settings
 from .parsing.forms import parse_form_handlers
+from .progress import Progress
 from .storage import Neo4jStore
 
 log = logging.getLogger(__name__)
@@ -27,7 +28,8 @@ def _read(path: str) -> str | None:
         return None
 
 
-def _parse_modules(modules: list[dict]) -> tuple[list[dict], list[tuple], dict, dict, dict, dict]:
+def _parse_modules(modules: list[dict],
+                   progress_label: str | None = None) -> tuple[list[dict], list[tuple], dict, dict, dict, dict]:
     """Parse module files -> (routine_rows, parsed, local_index, common_index, manager_index, stats)."""
     routine_rows: list[dict] = []
     local_index: dict[str, dict[str, str]] = {}
@@ -35,8 +37,11 @@ def _parse_modules(modules: list[dict]) -> tuple[list[dict], list[tuple], dict, 
     manager_index: dict[str, dict[str, str]] = {}  # object name -> {method: fqn} for ManagerModule
     parsed: list[tuple[str, list]] = []
     modules_parsed = files_missing = total_routines = 0
+    prog = Progress(len(modules), progress_label, unit="модулей", rate_word="модуль/с") if progress_label else None
 
     for m in modules:
+        if prog:
+            prog.advance()
         text = _read(m["path"])
         if text is None:
             files_missing += 1
@@ -70,20 +75,26 @@ def _parse_modules(modules: list[dict]) -> tuple[list[dict], list[tuple], dict, 
                 mi[rt.name] = f"{mf}::{rt.name}"
         parsed.append((mf, routines))
 
+    if prog:
+        prog.finish()
     stats = {"modules_parsed": modules_parsed, "files_missing": files_missing,
              "routines": total_routines}
     return routine_rows, parsed, local_index, common_index, manager_index, stats
 
 
-def _parse_form_modules(forms: list[dict]) -> tuple[list[dict], list[tuple], dict, list[dict], dict]:
+def _parse_form_modules(forms: list[dict],
+                        progress_label: str | None = None) -> tuple[list[dict], list[tuple], dict, list[dict], dict]:
     """Parse form modules -> (routine_rows, parsed, local_index, handles_rows, stats)."""
     routine_rows: list[dict] = []
     local_index: dict[str, dict[str, str]] = {}
     parsed: list[tuple[str, list]] = []
     handles_rows: list[dict] = []
     parsed_cnt = missing = total = 0
+    prog = Progress(len(forms), progress_label, unit="форм", rate_word="форма/с") if progress_label else None
 
     for f in forms:
+        if prog:
+            prog.advance()
         text = _read(f["path"])
         if text is None:
             missing += 1
@@ -116,6 +127,8 @@ def _parse_form_modules(forms: list[dict]) -> tuple[list[dict], list[tuple], dic
                 handles_rows.append({"form_fqn": ff, "routine_fqn": target,
                                      "event": h["event"], "element": h.get("element")})
 
+    if prog:
+        prog.finish()
     stats = {"form_modules_parsed": parsed_cnt, "form_routines": total, "form_files_missing": missing}
     return routine_rows, parsed, local_index, handles_rows, stats
 
@@ -158,8 +171,10 @@ def _resolve(parsed: list[tuple], local_index: dict, common_index: dict,
 
 def _full(tenant_id: str, store: Neo4jStore, reason: str | None = None) -> dict[str, Any]:
     modules = store.routine_modules(tenant_id)
-    routine_rows, parsed, local_index, common_index, manager_index, pstats = _parse_modules(modules)
-    f_rows, f_parsed, f_local, handles_rows, fstats = _parse_form_modules(store.form_modules(tenant_id))
+    routine_rows, parsed, local_index, common_index, manager_index, pstats = _parse_modules(
+        modules, progress_label=f"callgraph:{tenant_id} модули")
+    f_rows, f_parsed, f_local, handles_rows, fstats = _parse_form_modules(
+        store.form_modules(tenant_id), progress_label=f"callgraph:{tenant_id} формы")
     local_index.update(f_local)
 
     store.delete_routines(tenant_id)
@@ -191,7 +206,8 @@ def build_call_graph(
 
         stale_fqns = [fqn for fqn, _ in stale]
         modules = store.routine_modules(tenant_id, only=stale_fqns)
-        routine_rows, parsed, local_index, _common, _manager, pstats = _parse_modules(modules)
+        routine_rows, parsed, local_index, _common, _manager, pstats = _parse_modules(
+            modules, progress_label=f"callgraph:{tenant_id} модули (incr)")
         common_index = store.common_module_routine_index(tenant_id)  # from graph (unchanged)
         manager_index = store.manager_module_routine_index(tenant_id)  # from graph (unchanged)
         store.delete_routines_for(tenant_id, stale_fqns)

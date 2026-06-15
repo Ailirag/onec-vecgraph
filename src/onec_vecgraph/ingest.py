@@ -64,9 +64,11 @@ def ingest_source(store: Neo4jStore, tenant_id: str, settings: Settings, src: So
 
     if owner_rows:
         store.write_documents(tenant_id, src.owner_label, owner_rows)
-    written, by_kind = (0, {})
+    written, by_kind, stats = (0, {}, {})
     if chunks:
-        written, by_kind = _embed_and_write(store, tenant_id, embedder, chunks, owner_label=src.owner_label)
+        written, by_kind, stats = _embed_and_write(
+            store, tenant_id, embedder, chunks, owner_label=src.owner_label,
+            label=f"ingest:{src.source}→{tenant_id}")
         store.create_vector_index(embedder.dim, name="chunk_embedding", prop="embedding")
         store.create_vector_index(embedder.dim, name="chunk_embedding_ident", prop="embedding_ident")
         store.create_fulltext_index()
@@ -75,7 +77,7 @@ def ingest_source(store: Neo4jStore, tenant_id: str, settings: Settings, src: So
     relates = _link_semantic(store, tenant_id, embedder, changed) if link_semantic else 0
     return {"source": src.source, "owner_label": src.owner_label, "units": len(units),
             "changed": len(changed), "deleted": len(deleted), "chunks_written": written,
-            "chunks_by_kind": by_kind, "mentions": mentions, "relates": relates}
+            "chunks_by_kind": by_kind, "mentions": mentions, "relates": relates, **stats}
 
 
 def _ingest_config(entry: dict, tenant_id: str, settings: Settings, reset: bool) -> dict[str, Any]:

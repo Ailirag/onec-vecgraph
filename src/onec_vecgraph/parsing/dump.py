@@ -7,6 +7,7 @@ from pathlib import Path
 
 from lxml import etree
 
+from ..progress import Progress
 from . import objects as obj_parser
 from .dumpinfo import parse_dump_info
 from .model import ConfigPart, MetaObject, ParsedConfig
@@ -155,7 +156,9 @@ def _parse_object_file(
     return obj
 
 
-def _parse_into(parsed: ParsedConfig, refs: list[tuple[str, Path, Path, str, str | None]]) -> None:
+def _parse_into(parsed: ParsedConfig, refs: list[tuple[str, Path, Path, str, str | None]],
+                progress_label: str | None = None) -> None:
+    prog = Progress(len(refs), progress_label, unit="объектов", rate_word="объект/с") if progress_label else None
     for fqn, xml, object_dir, config_id, version in refs:
         parsed.files_seen += 1
         try:
@@ -163,22 +166,27 @@ def _parse_into(parsed: ParsedConfig, refs: list[tuple[str, Path, Path, str, str
         except Exception as exc:  # noqa: BLE001 - one bad file must not abort the import
             log.warning("Failed to parse %s", xml, exc_info=True)
             parsed.errors.append(f"{xml}: {exc!r}")
-            continue
+            obj = None
         if obj is not None:
             parsed.objects.append(obj)
+        if prog:
+            prog.advance()
+    if prog:
+        prog.finish()
 
 
-def parse_config(root: Path, tenant_id: str) -> ParsedConfig:
+def parse_config(root: Path, tenant_id: str, progress_label: str | None = None) -> ParsedConfig:
     parts = discover_parts(root)
     parsed = ParsedConfig(tenant_id=tenant_id, parts=parts)
-    _parse_into(parsed, enumerate_objects(parts))
+    _parse_into(parsed, enumerate_objects(parts), progress_label=progress_label)
     return parsed
 
 
 def parse_objects(
-    tenant_id: str, parts: list[ConfigPart], refs: list[tuple[str, Path, Path, str, str | None]]
+    tenant_id: str, parts: list[ConfigPart], refs: list[tuple[str, Path, Path, str, str | None]],
+    progress_label: str | None = None,
 ) -> ParsedConfig:
     """Parse only the given object refs (incremental indexing)."""
     parsed = ParsedConfig(tenant_id=tenant_id, parts=parts)
-    _parse_into(parsed, refs)
+    _parse_into(parsed, refs, progress_label=progress_label)
     return parsed

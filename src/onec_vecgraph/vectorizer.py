@@ -12,6 +12,7 @@ from . import chunking
 from .chunking import Chunk
 from .config import Settings
 from .embeddings.runtime import provider as get_runtime_provider
+from .progress import Progress
 from .storage import Neo4jStore
 
 _EMBED_BATCH = 512
@@ -161,10 +162,13 @@ def _iter_chunks(store: Neo4jStore, tenant_id: str, only: list[str] | None = Non
 
 
 def _embed_and_write(store: Neo4jStore, tenant_id: str, embedder, chunks: list[Chunk],
-                     owner_label: str = "Object") -> tuple[int, dict]:
+                     owner_label: str = "Object", label: str | None = None) -> tuple[int, dict, dict]:
     by_kind: dict[str, int] = {}
     written = 0
-    for start in range(0, len(chunks), _EMBED_BATCH):
+    total = len(chunks)
+    prog = Progress(total, label or f"vectorize:{tenant_id}", unit="чанков",
+                    rate_word="чанк/с", detail=f"батч {_EMBED_BATCH}")
+    for start in range(0, total, _EMBED_BATCH):
         batch = chunks[start : start + _EMBED_BATCH]
         sem = embedder.embed([c.text for c in batch], is_query=False)
         idt = embedder.embed([c.text_ident for c in batch], is_query=False)
@@ -176,7 +180,9 @@ def _embed_and_write(store: Neo4jStore, tenant_id: str, embedder, chunks: list[C
         for c in batch:
             by_kind[c.chunk_kind] = by_kind.get(c.chunk_kind, 0) + 1
         _free_gpu()
-    return written, by_kind
+        prog.advance(len(batch))
+    stats = prog.finish()
+    return written, by_kind, {"elapsed_sec": stats["elapsed_sec"], "chunks_per_sec": stats["items_per_sec"]}
 
 
 def vectorize(
@@ -193,7 +199,8 @@ def vectorize(
             chunks = list(_iter_chunks(store, tenant_id, only=stale)) if stale else []
             if code and stale:
                 chunks += list(_iter_code_chunks(store, tenant_id, only=stale))
-            written, by_kind = _embed_and_write(store, tenant_id, embedder, chunks)
+            written, by_kind, stats = _embed_and_write(
+                store, tenant_id, embedder, chunks, label=f"vectorize:{tenant_id} (incr)")
             store.create_vector_index(embedder.dim, name="chunk_embedding", prop="embedding")
             store.create_vector_index(embedder.dim, name="chunk_embedding_ident", prop="embedding_ident")
             store.create_fulltext_index()
@@ -201,6 +208,7 @@ def vectorize(
                 "mode": "incremental", "tenant_id": tenant_id, "model": settings.embedding_model,
                 "device": getattr(embedder, "device", None), "dimensions": embedder.dim,
                 "stale_objects": len(stale), "chunks_written": written, "chunks_by_kind": by_kind,
+                **stats,
             }
 
         if reset:
@@ -208,7 +216,8 @@ def vectorize(
         chunks = list(_iter_chunks(store, tenant_id))
         if code:
             chunks += list(_iter_code_chunks(store, tenant_id))
-        written, by_kind = _embed_and_write(store, tenant_id, embedder, chunks)
+        written, by_kind, stats = _embed_and_write(
+            store, tenant_id, embedder, chunks, label=f"vectorize:{tenant_id}")
         store.create_vector_index(embedder.dim, name="chunk_embedding", prop="embedding")
         store.create_vector_index(embedder.dim, name="chunk_embedding_ident", prop="embedding_ident")
         store.create_fulltext_index()
@@ -216,4 +225,5 @@ def vectorize(
             "mode": "full", "tenant_id": tenant_id, "model": settings.embedding_model,
             "provider": settings.embedding_provider, "device": getattr(embedder, "device", None),
             "dimensions": embedder.dim, "chunks_written": written, "chunks_by_kind": by_kind,
+            **stats,
         }

@@ -29,6 +29,25 @@ app = typer.Typer(
 )
 
 
+@app.callback()
+def _configure(
+    verbose: bool = typer.Option(
+        True, "--verbose/--quiet",
+        help="Логировать прогресс векторизации/ingest (скорость, %, ETA) в stderr; --quiet — только предупреждения.",
+    ),
+) -> None:
+    """Общие настройки CLI (логирование прогресса). Опции ставятся ДО подкоманды."""
+    import logging
+
+    logger = logging.getLogger("onec_vecgraph")
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
+        logger.addHandler(handler)
+        logger.propagate = False  # our handler emits these; don't also hit root's lastResort
+    logger.setLevel(logging.INFO if verbose else logging.WARNING)
+
+
 def _flush_exit() -> None:
     """Force a clean process exit.
 

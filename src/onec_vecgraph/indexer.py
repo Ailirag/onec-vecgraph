@@ -6,6 +6,7 @@ in ConfigDumpInfo.xml changed; removes objects deleted from the dump).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ from .config import Settings
 from .graph.builder import build_graph
 from .parsing import discover_parts, enumerate_objects, parse_config, parse_objects
 from .storage import Neo4jStore
+
+log = logging.getLogger(__name__)
 
 
 def _parts_summary(parts: list) -> list[dict[str, Any]]:
@@ -38,12 +41,16 @@ def index_dump(
     if incremental and not reset:
         return _index_incremental(root, tenant_id, settings, parts)
 
-    parsed = parse_config(root, tenant_id)
+    parsed = parse_config(root, tenant_id, progress_label=f"index:{tenant_id}")
     graph = build_graph(parsed)
     with Neo4jStore.from_settings(settings) as store:
         store.ensure_schema()
         if reset:
             store.delete_tenant(tenant_id)
+        n_nodes = sum(len(rows) for rows in graph.nodes.values())
+        n_edges = sum(len(g.rows) for g in graph.edges.values())
+        log.info("[index:%s] запись графа в Neo4j: %s узлов, %s рёбер…",
+                 tenant_id, f"{n_nodes:,}", f"{n_edges:,}")
         written = store.write_graph(graph)
         counts = store.counts(tenant_id)
 
@@ -77,7 +84,8 @@ def _index_incremental(root: Path, tenant_id: str, settings: Settings, parts: li
         ]
         deleted = [fqn for fqn in stored if fqn not in current_fqns]
 
-        parsed = parse_objects(tenant_id, parts, changed)
+        parsed = parse_objects(tenant_id, parts, changed,
+                               progress_label=f"index:{tenant_id} (incr)" if changed else None)
         graph = build_graph(parsed)
 
         for ref in changed:
