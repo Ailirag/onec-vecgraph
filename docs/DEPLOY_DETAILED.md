@@ -139,16 +139,31 @@ volumes: ["./data/hf-cache:/models"]  # кэш скачанной local-моде
 
 ## Шаг 4. Собрать образ (build-args разобраны)
 
+> ⚠️ Форма `VAR=значение docker compose …` — это **bash**; в Windows (CMD/PowerShell) она НЕ работает.
+> Ниже — кросс-платформенный способ через `--build-arg` (работает в CMD/PowerShell/bash).
+
 ```bash
 # CPU-local (по умолчанию)
 docker compose build
 # GPU-local: torch cu128 (+ на Шаге 5 EMBEDDING_DEVICE=cuda и раскомментировать deploy.resources)
-TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 docker compose build
+docker compose build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
 # Cloud: лёгкий образ без torch
-EXTRAS=cloud-embeddings docker compose build
+docker compose build --build-arg EXTRAS=cloud-embeddings
 ```
-- `EXTRAS` — какие зависимости вшить (см. Шаг 0/3).
-- `TORCH_INDEX_URL` — источник torch (cpu/cu128); влияет только при `EXTRAS=local-embeddings`.
+Альтернативы для Windows (если не хотите `--build-arg`):
+```powershell
+# PowerShell:
+$env:TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"; docker compose build
+```
+```cmd
+:: CMD:
+set "TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128" && docker compose build
+```
+Самое надёжное — задать `EXTRAS`/`TORCH_INDEX_URL` в `.env` (compose читает его сам для `${...}`),
+затем обычный `docker compose build`.
+
+- `EXTRAS` — какие зависимости вшить (см. Шаг 0/3): `local-embeddings` | `cloud-embeddings`.
+- `TORCH_INDEX_URL` — источник torch (`…/whl/cpu` | `…/whl/cu128`); влияет только при `EXTRAS=local-embeddings`.
 - Образ ставит и системный `git` (для ингеста git-источников), и extra `ingest` (pyyaml).
 
 ---

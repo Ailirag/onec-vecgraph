@@ -67,19 +67,28 @@
 
 `docker-compose.yml` содержит `neo4j` + `app`. Переменные берутся из окружения/`.env`.
 
+> ⚠️ На **Windows** форма `VAR=значение docker compose …` (bash) НЕ работает. Задавайте переменные в
+> **`.env`** (compose читает его сам) и запускайте обычной командой; build-args — через `--build-arg`.
+
+**Рекомендуемый способ (кросс-платформенный): задать профиль в `.env`, затем:**
 ```bash
 # CPU local (по умолчанию)
 docker compose up -d --build
-
-# Cloud (лёгкий образ, эмбеддинги OpenAI)
-EXTRAS=cloud-embeddings EMBEDDING_PROVIDER=openai \
-  EMBEDDING_MODEL=text-embedding-3-large OPENAI_API_KEY=sk-… \
-  docker compose up -d --build
-
-# GPU local: build с cu128 + раскомментировать deploy.resources в compose, EMBEDDING_DEVICE=cuda
-TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 EMBEDDING_DEVICE=cuda \
-  docker compose up -d --build
+# Cloud / GPU — пропишите в .env: EXTRAS, TORCH_INDEX_URL, EMBEDDING_PROVIDER/DEVICE/MODEL, ключи
+docker compose up -d --build
 ```
+Пример `.env` для cloud: `EXTRAS=cloud-embeddings`, `EMBEDDING_PROVIDER=openai`,
+`EMBEDDING_MODEL=text-embedding-3-large`, `OPENAI_API_KEY=sk-…`.
+Пример `.env` для GPU: `TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128`, `EMBEDDING_DEVICE=cuda`
+(+ раскомментировать `deploy.resources` в compose, хост с NVIDIA Container Toolkit).
+
+**Разовая сборка без `.env` (build-args, кросс-платформенно):**
+```bash
+docker compose build --build-arg EXTRAS=cloud-embeddings
+docker compose build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+```
+**PowerShell** (если нужен env на одну команду): `$env:TORCH_INDEX_URL="…/cu128"; docker compose up -d --build`.
+
 MCP доступен на `http://127.0.0.1:8000/mcp`. Порт намеренно слушает только loopback —
 наружу публиковать через reverse-proxy с TLS (§8).
 
