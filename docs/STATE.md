@@ -3,7 +3,8 @@
 > Дата фиксации: 2026-06-08. Читать ПЕРВЫМ при старте новой сессии.
 > Авто-память (`MEMORY.md` и связанные файлы) загружается автоматически; этот файл — полный снимок.
 > Связанное: `README.md`, `PLAN.md`, `docs/INCREMENTAL_TEST_PLAN.md`, `docs/DEPLOYMENT.md`,
-> `docs/DEPLOY_RUNBOOK.md`, `docs/MCP_USAGE.md`, `docs/ITS_PARSER_REQUIREMENTS.md` (контракт парсера ИТС).
+> `docs/DEPLOY_RUNBOOK.md`, `docs/DEPLOY_DETAILED.md` (детальный запуск, каждая настройка),
+> `docs/MCP_USAGE.md`, `docs/ITS_PARSER_REQUIREMENTS.md` (контракт парсера ИТС).
 
 > **Git:** репозиторий `https://github.com/Ailirag/onec-vecgraph` (private), ветка `main`.
 > Флоу: `git add -A; git commit -m "…"; git push`. `.gitignore` исключает `.env`, `.venv/`, `data/`,

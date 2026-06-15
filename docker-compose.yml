@@ -62,6 +62,9 @@ services:
       HF_HOME: "/models"
       HF_TOKEN: "${HF_TOKEN:-}"   # optional: removes HuggingFace model-download rate limit
       REQUIRE_TENANT: "true"
+      # Shared public-corpus tenant (platform/BSP help), read additively by every tenant.
+      SHARED_TENANT_ID: "${SHARED_TENANT_ID:-__shared__}"
+      INCLUDE_SHARED_TENANT: "${INCLUDE_SHARED_TENANT:-true}"
       # Bearer-token auth (recommended for networked access). Enable + provide a token map:
       #   AUTH_ENABLED=true  AUTH_TOKENS="tok_abc=acme,tok_xyz=globex:ext_crm"
       AUTH_ENABLED: "${AUTH_ENABLED:-false}"

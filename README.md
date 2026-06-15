@@ -8,7 +8,8 @@ MCP-сервер для **векторизации конфигураций 1С:
 сценарии): [docs/MCP_USAGE.md](docs/MCP_USAGE.md).
 **Деплой в Docker и варианты образа** (CPU/GPU/cloud, env, аутентификация, офлайн-индексация):
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). **Пошаговый runbook развёртывания**:
-[docs/DEPLOY_RUNBOOK.md](docs/DEPLOY_RUNBOOK.md).
+[docs/DEPLOY_RUNBOOK.md](docs/DEPLOY_RUNBOOK.md). **Детальная инструкция по запуску** (каждая
+настройка прокомментирована): [docs/DEPLOY_DETAILED.md](docs/DEPLOY_DETAILED.md).
 
 ## Статус
 
