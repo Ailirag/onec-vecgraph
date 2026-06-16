@@ -31,4 +31,20 @@ def schema_statements() -> list[str]:
     stmts.append(
         "CREATE INDEX document_pv IF NOT EXISTS FOR (n:Document) ON (n.tenant_id, n.platform_version)"
     )
+    # Classification facets for filtered search (owner-node): doc_topic / corpus_version.
+    stmts.append(
+        "CREATE INDEX document_topic IF NOT EXISTS FOR (n:Document) ON (n.tenant_id, n.doc_topic)"
+    )
+    stmts.append(
+        "CREATE INDEX document_corpusv IF NOT EXISTS FOR (n:Document) ON (n.tenant_id, n.corpus_version)"
+    )
+    stmts.append(
+        "CREATE INDEX artifact_topic IF NOT EXISTS FOR (n:Artifact) ON (n.tenant_id, n.doc_topic)"
+    )
+    stmts.append(
+        "CREATE INDEX artifact_corpusv IF NOT EXISTS FOR (n:Artifact) ON (n.tenant_id, n.corpus_version)"
+    )
+    stmts.append(
+        "CREATE INDEX object_corpusv IF NOT EXISTS FOR (n:Object) ON (n.tenant_id, n.corpus_version)"
+    )
     return stmts

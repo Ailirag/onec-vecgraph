@@ -57,6 +57,25 @@ def test_git_artifacts_source_sections_per_file(tmp_path) -> None:
     assert goal.version_hash  # content-hashed
 
 
+def test_its_source_sets_doc_topic_and_corpus_version(tmp_path) -> None:
+    (tmp_path / "a.json").write_text(json.dumps({"text": "Текст.", "title": "T"}), encoding="utf-8")
+    u = next(iter(ItsSource({"path": str(tmp_path), "corpus_version": "config:ERP_2.5"}).units()))
+    assert u.extra["doc_topic"] == "config"            # ITS defaults to configuration topic
+    assert u.extra["corpus_version"] == "config:ERP_2.5"
+
+
+def test_its_source_record_overrides_topic(tmp_path) -> None:
+    (tmp_path / "a.json").write_text(json.dumps({"text": "T", "doc_topic": "platform"}), encoding="utf-8")
+    u = next(iter(ItsSource({"path": str(tmp_path)}).units()))
+    assert u.extra["doc_topic"] == "platform"          # per-record override beats the manifest default
+
+
+def test_git_artifacts_source_sets_task_topic(tmp_path) -> None:
+    (tmp_path / "d.md").write_text("# A\nbody", encoding="utf-8")
+    u = next(iter(GitArtifactsSource({"path": str(tmp_path)}).units()))
+    assert u.extra["doc_topic"] == "task"
+
+
 def test_load_manifest_json(tmp_path) -> None:
     p = tmp_path / "m.json"
     p.write_text(json.dumps({"tenant": "demo", "sources": [{"type": "its", "path": "/x"}]}), encoding="utf-8")

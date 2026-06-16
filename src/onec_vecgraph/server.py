@@ -50,6 +50,16 @@ WHICH TOOL (by need):
 • Documentation → search with source=['its'|'artifact'] (1C ITS / project docs, if ingested);
   find_related_docs (docs linked to an object) / get_document (full doc by fqn). Search hits carry
   a 'corpus' field; filter by source to keep config and docs separate.
+• Platform/BSP help (syntax assistant) → docinfo (exact name lookup, e.g. 'Массив.Найти' / 'Array.Find')
+  or search with source=['platform_help']. These live in the shared public tenant and are VERSION-AWARE:
+  pass platform_version (e.g. '8.3.27.2130') to pin a build — use it ONLY together with
+  source=['platform_help'] (it filters by the doc's version, so it would drop config results, which have
+  none). Omit it to span all loaded versions (docinfo then returns per-version 'candidates' when several
+  match; a single match returns the article). get_document fqn encodes the version: 'platform_help:<ver>|<Name>'.
+• Doc-classification facets (search filters on the owner node — pair with the matching source, else config
+  drops out): doc_topic ('platform' | 'config' | 'task') separates platform vs configuration vs task docs;
+  corpus_version (typed, e.g. 'config:ERP_2.5.18') pins a configuration release; help_kind ('context' |
+  'language' | 'query') narrows syntax-assistant help. These classify; tenant still controls isolation.
 
 DATA-DEPTH LAYERS (cheap → exhaustive): search & list (discovery) → get_object (semantic structure)
 → get_object_properties / :Detail (every raw property). The detail layer is deliberately NOT
@@ -194,7 +204,9 @@ def docinfo(ctx: Context, name: str, platform_version: str | None = None) -> dic
 def semantic_search(
     ctx: Context, query: str, top_k: int = 10, kinds: list[str] | None = None,
     chunk_kinds: list[str] | None = None, subsystem: str | None = None,
-    source: list[str] | None = None, platform_version: str | None = None, expand: bool = False,
+    source: list[str] | None = None, platform_version: str | None = None,
+    doc_topic: str | None = None, corpus_version: str | None = None, help_kind: str | None = None,
+    expand: bool = False,
 ) -> dict[str, Any]:
     """Semantic (multi-vector) search over the indexed corpora by meaning.
 
@@ -203,9 +215,12 @@ def semantic_search(
     platform/library help from the shared tenant), platform_version (e.g. '8.3.27.1989' — restrict help
     to one build), kinds (object kinds like ['Catalog','Document','Subsystem']), chunk_kinds
     (['object','attribute','code','form','enum_value','predefined','subsystem','role']), subsystem
-    (name/fqn). Public corpora are read additively from the shared tenant — no extra args. Code hits
-    return routine granularity ('routine_fqn'); each hit carries 'corpus'. expand=True attaches a
-    compact graph neighborhood ('context'). Requires prior vectorization."""
+    (name/fqn). Doc-classification facets (owner-node — pair with the matching source, else config is
+    dropped): doc_topic ('platform' | 'config' | 'task'), corpus_version (typed, e.g. 'config:ERP_2.5.18'
+    / 'task:JIRA-1234'), help_kind ('context' | 'language' | 'query'). Public corpora are read additively
+    from the shared tenant — no extra args. Code hits return routine granularity ('routine_fqn'); each
+    hit carries 'corpus'. expand=True attaches a compact graph neighborhood ('context'). Requires prior
+    vectorization."""
     from .embeddings.runtime import provider
 
     with Neo4jStore.from_settings(settings) as store:
@@ -213,7 +228,8 @@ def semantic_search(
         return queries.semantic_search(
             store, t, query, provider(settings), top_k,
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
-            platform_version=platform_version, expand=expand, shared_tenant_id=_shared(t),
+            platform_version=platform_version, doc_topic=doc_topic, corpus_version=corpus_version,
+            help_kind=help_kind, expand=expand, shared_tenant_id=_shared(t),
         )
 
 
@@ -221,15 +237,19 @@ def semantic_search(
 def hybrid_search(
     ctx: Context, query: str, top_k: int = 10, kinds: list[str] | None = None,
     chunk_kinds: list[str] | None = None, subsystem: str | None = None,
-    source: list[str] | None = None, platform_version: str | None = None, expand: bool = False,
+    source: list[str] | None = None, platform_version: str | None = None,
+    doc_topic: str | None = None, corpus_version: str | None = None, help_kind: str | None = None,
+    expand: bool = False,
 ) -> dict[str, Any]:
     """Hybrid search (multi-vector + full-text + RRF). Best for mixed meaning/identifier queries.
 
     Same optional filters as semantic_search (source / platform_version / kinds / chunk_kinds /
-    subsystem / expand). source selects corpora (['config','its','artifact','platform_help','bsp_help']);
-    public corpora are read additively from the shared tenant. platform_version restricts help to one
-    build. Identifiers are sub-word tokenized, so 'Продажи' matches 'ПродажиТоваров'. Code hits are
-    routine-grained; each hit carries 'corpus'. Same result shape as semantic_search."""
+    subsystem / doc_topic / corpus_version / help_kind / expand). source selects corpora
+    (['config','its','artifact','platform_help','bsp_help']); public corpora are read additively from
+    the shared tenant. platform_version restricts help to one build; doc_topic/corpus_version/help_kind
+    are owner-node facets (pair with the matching source). Identifiers are sub-word tokenized, so
+    'Продажи' matches 'ПродажиТоваров'. Code hits are routine-grained; each hit carries 'corpus'. Same
+    result shape as semantic_search."""
     from .embeddings.runtime import provider, reranker
 
     with Neo4jStore.from_settings(settings) as store:
@@ -237,7 +257,8 @@ def hybrid_search(
         return queries.hybrid_search(
             store, t, query, provider(settings), top_k, reranker=reranker(settings),
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
-            platform_version=platform_version, expand=expand, shared_tenant_id=_shared(t),
+            platform_version=platform_version, doc_topic=doc_topic, corpus_version=corpus_version,
+            help_kind=help_kind, expand=expand, shared_tenant_id=_shared(t),
         )
 
 

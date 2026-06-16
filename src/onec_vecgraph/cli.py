@@ -111,12 +111,16 @@ def index(
     incremental: bool = typer.Option(
         False, help="Reindex only objects changed since last index (by ConfigDumpInfo hashes)."
     ),
+    config_release: str = typer.Option(
+        None, help="Human-readable configuration release (e.g. 'ERP_2.5.18') → stored as corpus_version='config:<release>' on objects for filtered search."
+    ),
 ) -> None:
     """Index a 1C Configurator XML dump (base + extensions) into Neo4j."""
     from .indexer import index_dump
 
     settings = get_settings()
-    result = index_dump(path, tenant_id=tenant_id, settings=settings, reset=reset, incremental=incremental)
+    result = index_dump(path, tenant_id=tenant_id, settings=settings, reset=reset,
+                        incremental=incremental, config_release=config_release)
     rprint(f"[green]Indexed[/] ({result['mode']}) tenant={tenant_id!r} from {path!r}")
     for part in result["parts"]:
         tag = "extension" if part["extension"] else "base"
@@ -222,6 +226,9 @@ def search(
     subsystem: str = typer.Option(None, help="Restrict to a subsystem (name/fqn) and its descendants."),
     source: list[str] = typer.Option(None, help="Filter by corpus (repeatable): config, its, artifact, platform_help, bsp_help."),
     platform_version: str = typer.Option(None, help="Restrict help to a platform build, e.g. 8.3.27.1989."),
+    doc_topic: str = typer.Option(None, help="Doc topic facet (owner): platform | config | task. Pair with --source."),
+    corpus_version: str = typer.Option(None, help="Typed corpus version, e.g. config:ERP_2.5.18 / task:JIRA-1234."),
+    help_kind: str = typer.Option(None, help="Syntax-assistant help kind: context | language | query."),
     expand: bool = typer.Option(False, help="Attach a compact graph neighborhood (GraphRAG) to each hit."),
     shared: bool = typer.Option(True, help="Additively read the shared public tenant (platform/BSP help). --no-shared to disable."),
 ) -> None:
@@ -235,7 +242,8 @@ def search(
     shared_id = settings.shared_tenant_id if (shared and settings.include_shared_tenant
                                               and settings.shared_tenant_id != tenant_id) else None
     f = dict(kinds=kind or None, chunk_kinds=chunk_kind or None, subsystem=subsystem,
-             source=source or None, platform_version=platform_version, expand=expand, shared_tenant_id=shared_id)
+             source=source or None, platform_version=platform_version, doc_topic=doc_topic,
+             corpus_version=corpus_version, help_kind=help_kind, expand=expand, shared_tenant_id=shared_id)
     with Neo4jStore.from_settings(settings) as store:
         if mode == "semantic":
             rprint(queries.semantic_search(store, tenant_id, query, embedder, top_k, **f))

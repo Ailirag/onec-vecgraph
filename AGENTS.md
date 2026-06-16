@@ -47,6 +47,11 @@ uv run onec-vecgraph metrics --tenant-id acme_erp
 reset (безопасно); `--no-reset --code` доливает код без перезатирания. Пустой результат поиска ⇒ «слой не построен
 для тенанта» — проверь `metrics` (есть ли chunks/routines).
 
+Классификация для фильтрованного поиска (owner-фасеты): `index --config-release "ERP_2.5.18"` → `corpus_version=config:<релиз>`
+на объектах; источники манифеста (`its`/`git_artifacts`) принимают `doc_topic` (`platform`/`config`/`task`) и `corpus_version`.
+Потребитель фильтрует по `doc_topic`/`corpus_version`/`help_kind` — только вместе с соответствующим `source`. Изоляцию это
+НЕ заменяет (только тенант). Детали — [docs/OPERATOR_PLAYBOOK.md](docs/OPERATOR_PLAYBOOK.md), [docs/MCP_USAGE.md](docs/MCP_USAGE.md).
+
 ## Прочее
 - Тесты: `uv run pytest tests/` (bare `pytest` соберёт 0 — нет testpaths).
 - Как роли-потребители читают данные (read-only API из 19 инструментов) — [docs/MCP_USAGE.md](docs/MCP_USAGE.md).

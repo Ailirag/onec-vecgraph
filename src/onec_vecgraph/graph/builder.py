@@ -42,9 +42,11 @@ def _top_level(fqn: str) -> str:
 
 
 class _Builder:
-    def __init__(self, tenant_id: str) -> None:
+    def __init__(self, tenant_id: str, config_release: str | None = None) -> None:
         self.data = GraphData(tenant_id=tenant_id)
         self._seen: set[tuple[str, str]] = set()
+        # Optional human-readable release → corpus_version='config:<release>' on objects (filter facet).
+        self.corpus_version = f"config:{config_release}" if config_release else None
 
     def node(self, label: str, fqn: str, props: dict) -> None:
         if (label, fqn) in self._seen:
@@ -106,6 +108,8 @@ class _Builder:
         }
         for flag, value in obj.flags.items():
             props[f"flag_{flag}"] = value
+        if self.corpus_version:
+            props["corpus_version"] = self.corpus_version
         self.node("Object", obj.fqn, props)
 
         # Sidecar detail node: full property set for dev/analyst lookup (not vectorized).
@@ -183,8 +187,8 @@ class _Builder:
                       props={"granted": sorted(granted)})
 
 
-def build_graph(parsed: ParsedConfig) -> GraphData:
-    builder = _Builder(parsed.tenant_id)
+def build_graph(parsed: ParsedConfig, config_release: str | None = None) -> GraphData:
+    builder = _Builder(parsed.tenant_id, config_release=config_release)
     for obj in parsed.objects:
         builder.object(obj)
     return builder.data

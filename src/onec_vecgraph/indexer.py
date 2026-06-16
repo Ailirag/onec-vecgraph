@@ -31,6 +31,7 @@ def index_dump(
     settings: Settings,
     reset: bool = False,
     incremental: bool = False,
+    config_release: str | None = None,
 ) -> dict[str, Any]:
     root = Path(path)
     if not root.is_dir():
@@ -39,10 +40,10 @@ def index_dump(
     parts = discover_parts(root)
 
     if incremental and not reset:
-        return _index_incremental(root, tenant_id, settings, parts)
+        return _index_incremental(root, tenant_id, settings, parts, config_release=config_release)
 
     parsed = parse_config(root, tenant_id, progress_label=f"index:{tenant_id}")
-    graph = build_graph(parsed)
+    graph = build_graph(parsed, config_release=config_release)
     with Neo4jStore.from_settings(settings) as store:
         store.ensure_schema()
         if reset:
@@ -67,7 +68,8 @@ def index_dump(
     }
 
 
-def _index_incremental(root: Path, tenant_id: str, settings: Settings, parts: list) -> dict[str, Any]:
+def _index_incremental(root: Path, tenant_id: str, settings: Settings, parts: list,
+                       config_release: str | None = None) -> dict[str, Any]:
     with Neo4jStore.from_settings(settings) as store:
         store.ensure_schema()
         stored = store.object_versions(tenant_id)
@@ -86,7 +88,7 @@ def _index_incremental(root: Path, tenant_id: str, settings: Settings, parts: li
 
         parsed = parse_objects(tenant_id, parts, changed,
                                progress_label=f"index:{tenant_id} (incr)" if changed else None)
-        graph = build_graph(parsed)
+        graph = build_graph(parsed, config_release=config_release)
 
         for ref in changed:
             store.scoped_delete_object(tenant_id, ref[0])

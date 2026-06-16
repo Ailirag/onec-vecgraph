@@ -21,3 +21,11 @@ def test_store_scope_static_matches() -> None:
     assert Neo4jStore._scope("acme", "__shared__") == ["acme", "__shared__"]
     assert Neo4jStore._scope("acme", "acme") == ["acme"]       # no self-dup
     assert Neo4jStore._scope("acme", None) == ["acme"]          # disabled / not provided
+
+
+def test_chunk_filter_includes_classification_facets() -> None:
+    # Classification facets are owner-node predicates added alongside platform_version.
+    f = Neo4jStore._CHUNK_FILTER
+    for token in ("$doc_topic", "o.doc_topic", "$corpus_version", "o.corpus_version",
+                  "$help_kind", "o.help_kind"):
+        assert token in f

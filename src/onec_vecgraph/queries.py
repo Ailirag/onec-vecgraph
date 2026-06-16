@@ -564,18 +564,22 @@ def _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id=None):
 
 def semantic_search(store, tenant_id, query, embedder, top_k=10, overfetch=5,
                     kinds=None, chunk_kinds=None, subsystem=None, source=None, platform_version=None,
+                    doc_topic=None, corpus_version=None, help_kind=None,
                     expand=False, shared_tenant_id=None):
     """Multi-vector semantic search (meaning × identifier), fused with RRF.
 
-    Optional filters (source / kinds / chunk_kinds / subsystem / platform_version) are post-applied
-    to the vector hits; fetch is widened when filtering so a narrow slice still fills top_k. With
-    expand=True each hit is enriched with a compact graph neighborhood (GraphRAG). shared_tenant_id
-    adds a public corpus tenant to the read scope (server-derived)."""
+    Optional filters (source / kinds / chunk_kinds / subsystem / platform_version / doc_topic /
+    corpus_version / help_kind) are post-applied to the vector hits; fetch is widened when filtering
+    so a narrow slice still fills top_k. doc_topic / corpus_version / help_kind are owner-node facets
+    (apply only with the matching source). With expand=True each hit is enriched with a compact graph
+    neighborhood (GraphRAG). shared_tenant_id adds a public corpus tenant to the read scope (server-derived)."""
     vec = embedder.embed([query], is_query=True)[0]
-    filtered = bool(kinds or chunk_kinds or subsystem or source or platform_version)
+    filtered = bool(kinds or chunk_kinds or subsystem or source or platform_version
+                    or doc_topic or corpus_version or help_kind)
     fetch = top_k * overfetch * (4 if filtered else 1)
     f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
-             platform_version=platform_version)
+             platform_version=platform_version, doc_topic=doc_topic,
+             corpus_version=corpus_version, help_kind=help_kind)
     sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id)
     results = _rrf_fuse([("semantic", sem), ("ident", idt)], top_k)
     if expand:
@@ -585,17 +589,22 @@ def semantic_search(store, tenant_id, query, embedder, top_k=10, overfetch=5,
 
 def hybrid_search(store, tenant_id, query, embedder, top_k=10, overfetch=5, rrf_k=60,
                   reranker=None, kinds=None, chunk_kinds=None, subsystem=None, source=None,
-                  platform_version=None, expand=False, shared_tenant_id=None):
+                  platform_version=None, doc_topic=None, corpus_version=None, help_kind=None,
+                  expand=False, shared_tenant_id=None):
     """Multi-vector (meaning × identifier) + full-text, fused with RRF; optional rerank.
 
-    Optional filters (source / kinds / chunk_kinds / subsystem / platform_version) restrict all three
-    retrievers. With expand=True each hit is enriched with a compact graph neighborhood (GraphRAG).
-    shared_tenant_id adds a public corpus tenant to the read scope (server-derived)."""
+    Optional filters (source / kinds / chunk_kinds / subsystem / platform_version / doc_topic /
+    corpus_version / help_kind) restrict all three retrievers. doc_topic / corpus_version / help_kind
+    are owner-node facets (apply only with the matching source). With expand=True each hit is enriched
+    with a compact graph neighborhood (GraphRAG). shared_tenant_id adds a public corpus tenant to the
+    read scope (server-derived)."""
     vec = embedder.embed([query], is_query=True)[0]
-    filtered = bool(kinds or chunk_kinds or subsystem or source or platform_version)
+    filtered = bool(kinds or chunk_kinds or subsystem or source or platform_version
+                    or doc_topic or corpus_version or help_kind)
     fetch = top_k * overfetch * (4 if filtered else 1)
     f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
-             platform_version=platform_version)
+             platform_version=platform_version, doc_topic=doc_topic,
+             corpus_version=corpus_version, help_kind=help_kind)
     sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id)
     ft = _dedup(store.fulltext_search(tenant_id, _fts_query(query), limit=fetch, shared_tenant_id=shared_tenant_id, **f))
     pool = top_k if reranker is None else max(top_k, 20)

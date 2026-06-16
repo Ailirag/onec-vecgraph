@@ -132,6 +132,7 @@ class HbkSource(Source):
                     section_path=section,
                     source_url=zip_path,
                     extra={
+                        "doc_topic": "platform",  # platform-level help, not configuration-specific
                         "platform_version": pv,
                         "help_kind": help_kind,
                         "name_norm": (full.split(".")[-1] if full else "").lower(),

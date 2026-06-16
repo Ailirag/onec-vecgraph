@@ -21,6 +21,9 @@ class GitArtifactsSource(Source):
     def __init__(self, entry: dict) -> None:
         self.entry = entry
         self.globs = entry.get("globs") or ["**/*.md", "**/*.markdown", "**/*.adoc"]
+        # Classification facets (manifest-level): project/task docs by default.
+        self.doc_topic = entry.get("doc_topic") or "task"
+        self.corpus_version = entry.get("corpus_version")  # e.g. 'task:JIRA-1234' / 'git:<tag>'
 
     def units(self) -> Iterator[DocUnit]:
         root = materialize(self.entry)
@@ -39,4 +42,5 @@ class GitArtifactsSource(Source):
                     version_hash=sha1_text(rel, sec["title"], body),
                     section_path=[rel, *sec["path"]],
                     source_url=rel,
+                    extra={"doc_topic": self.doc_topic, "corpus_version": self.corpus_version},
                 )

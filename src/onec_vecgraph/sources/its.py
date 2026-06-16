@@ -21,6 +21,9 @@ class ItsSource(Source):
     def __init__(self, entry: dict) -> None:
         self.entry = entry
         self.globs = entry.get("globs") or ["**/*.json"]
+        # Manifest-level defaults for the classification facets (a unit may override per-record).
+        self.default_topic = entry.get("doc_topic") or "config"  # ITS docs are usually about a config
+        self.corpus_version = entry.get("corpus_version")  # e.g. 'config:ERP_2.5.18'
 
     def units(self) -> Iterator[DocUnit]:
         root = materialize(self.entry)
@@ -43,5 +46,7 @@ class ItsSource(Source):
                     links=list(d.get("related_fqns") or []),
                     source_url=d.get("source_url"),
                     extra={"related_kinds": d.get("related_kinds"), "lang": d.get("lang"),
-                           "product": d.get("product")},
+                           "product": d.get("product"),
+                           "doc_topic": d.get("doc_topic") or self.default_topic,
+                           "corpus_version": d.get("corpus_version") or self.corpus_version},
                 )

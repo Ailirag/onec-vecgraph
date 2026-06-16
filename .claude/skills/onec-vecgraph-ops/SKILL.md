@@ -42,3 +42,5 @@ uv run onec-vecgraph serve --transport http
 uv run onec-vecgraph metrics --tenant-id acme_erp
 ```
 Гочи: если `uv` падает на офлайн-пересборке → `uv run --no-sync onec-vecgraph …`. Пустой результат поиска ⇒ «слой не построен для тенанта», проверь `metrics`. `vectorize --incremental` игнорирует reset (безопасно); `--no-reset --code` доливает код без перезатирания.
+
+Классификация для фильтрованного поиска (owner-фасеты): `index --config-release "ERP_2.5.18"` ставит `corpus_version=config:<релиз>` на объекты; у источников манифеста (`its`/`git_artifacts`) можно задать `doc_topic` (`platform`/`config`/`task`) и `corpus_version`. Потребитель фильтрует поиск по `doc_topic`/`corpus_version`/`help_kind` — **только вместе с соответствующим `source`** (иначе корпуса без поля выпадают). Изоляцию это НЕ заменяет — только тенант. Детали — [docs/OPERATOR_PLAYBOOK.md](../../../docs/OPERATOR_PLAYBOOK.md) и [docs/MCP_USAGE.md](../../../docs/MCP_USAGE.md).

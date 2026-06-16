@@ -34,6 +34,7 @@ uv run onec-vecgraph vectorize --tenant-id acme_erp --code
 ```
 - `index --reset` — очистить граф тенанта перед загрузкой (чистая первичная загрузка). Без `--reset` — догрузка.
 - `vectorize` по умолчанию ПЕРЕСТРАИВАЕТ чанки; `--code` добавляет векторизацию BSL по рутинам (модули объектов/общие/формы).
+- `index --config-release "ERP_2.5.18"` — проставить релиз конфигурации как `corpus_version=config:<релиз>` на объектах (owner-фасет для фильтра поиска `corpus_version`; без флага не ставится).
 
 ## 2. Инкрементальное обновление после правок (configVersion-based, безопасно)
 ```
@@ -64,6 +65,12 @@ uv run onec-vecgraph ingest <manifest.yaml> --tenant-id acme_erp --reset        
 uv run onec-vecgraph ingest <manifest.yaml> --tenant-id acme_erp --link-semantic  # + RELATES_TO к ближайшим объектам
 ```
 `--only` ∈ `config_dump | its | git_artifacts`. Контракт парсера ИТС — [ITS_PARSER_REQUIREMENTS.md](ITS_PARSER_REQUIREMENTS.md).
+
+**Классификация (owner-фасеты для фильтрованного поиска).** В записи источника манифеста можно задать `doc_topic`
+(`platform`/`config`/`task`) и `corpus_version` (напр. `config:ERP_2.5.18`, `task:JIRA-1234`); для ИТС их также может
+проставлять парсер по-записям (см. контракт). Дефолты: ИТС → `doc_topic=config`, артефакты git → `doc_topic=task`.
+Размещение по-прежнему решает тенант: доки, которые должны линковаться с объектами проекта, грузить в тенант проекта,
+а не в `__shared__` (линковка `MENTIONS`/`RELATES_TO` внутритенантна).
 
 ## 5. Справка платформы (.hbk) → общий тенант `__shared__` (версионно; путь валидируется до старта)
 ```
