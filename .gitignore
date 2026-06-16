@@ -14,8 +14,9 @@ dist/
 .mypy_cache/
 .ruff_cache/
 
-# editor / session-local (Claude Code, etc.)
-.claude/
+# editor / session-local (Claude Code, etc.) — ignore all of .claude except shared skills
+.claude/*
+!.claude/skills/
 
 # secrets / local config
 .env
