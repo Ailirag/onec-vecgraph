@@ -1,5 +1,8 @@
 # Overlay tenants — baseline (release) + per-task developer delta
 
+> Реализуемый контракт интеграции для оркестратора (эндпоинты, аргументы `index_overlay`, формат
+> ответа, правила чтения) — [ORCHESTRATOR_CONTRACT.md](ORCHESTRATOR_CONTRACT.md). Ниже — модель и устройство.
+
 Поддержка двухслойной модели тенантов для оркестратора «Full development pipeline»: тяжёлая
 релизная поставка (**baseline**) индексируется один раз, а правки разработчика по задаче кладутся
 как дешёвая **дельта** в эфемерный overlay-тенант — без полной ре-векторизации на каждого разработчика.
@@ -80,7 +83,10 @@ OVERLAY_WRITE_ENABLED=true                 # включить write-endpoint
 WRITE_MCP_PORT=8001                        # порт write-сервера
 WRITE_AUTH_TOKENS=wtok=grand-dev-mdm@release   # token=base namespace (overlay только '<base>@task/*')
 ```
-Запуск: `onec-vecgraph serve` (read) и отдельно `onec-vecgraph serve-write` (write).
+Запуск (CLI): `onec-vecgraph serve` (read) и отдельно `onec-vecgraph serve-write` (write).
+Запуск (Docker): read-сервис `app` (порт 8000) поднимается всегда; overlay-write — сервис `app-write`
+(порт 8001) под compose-профилем `overlay-write`: `docker compose --profile overlay-write up -d`
+(`OVERLAY_WRITE_ENABLED=true` сервис проставляет сам). Детали — [docs/DEPLOYMENT.md §4.1](DEPLOYMENT.md).
 
 ## Код
 - `overlay.py` — неймспейс тенантов, `in_namespace` (write/anti-leak guard), `map_paths_to_object_fqns`, `fqn_from_object_key`.

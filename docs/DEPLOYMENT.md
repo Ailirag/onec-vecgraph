@@ -51,6 +51,7 @@
 | Cloud | `OPENAI_API_KEY`, `OPENAI_BASE_URL` (для совместимых шлюзов), `VOYAGE_API_KEY`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` (опц. ≤4096) | ключи и модель облака |
 | Аренда | `REQUIRE_TENANT`, `DEFAULT_TENANT_ID`, `DEFAULT_CONFIG_ID` | изоляция/дефолты |
 | Auth | `AUTH_ENABLED`, `AUTH_TOKENS` | bearer-токен → tenant (см. §7) |
+| Overlay-write | `OVERLAY_WRITE_ENABLED`, `WRITE_MCP_PORT` (8001), `WRITE_AUTH_TOKENS` | отдельный пишущий сервер `index_overlay` (см. §4.1, [OVERLAY.md](OVERLAY.md)) |
 
 Полный шаблон — [../.env.example](../.env.example).
 
@@ -91,6 +92,29 @@ docker compose build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/wh
 
 MCP доступен на `http://127.0.0.1:8000/mcp`. Порт намеренно слушает только loopback —
 наружу публиковать через reverse-proxy с TLS (§8).
+
+### 4.1. Overlay-write сервер (per-task дельта разработчика, opt-in)
+
+`app` строго read-only. Для оркестратора «Full development pipeline» нужен **отдельный пишущий
+эндпоинт** с единственным инструментом `index_overlay` (инкрементальная индексация дельты разработчика
+в overlay-тенант `<base>@task/*`; модель — [docs/OVERLAY.md](OVERLAY.md)). В compose это сервис
+`app-write` под **профилем** `overlay-write` — тот же образ, своя команда (`serve-write`) и порт **8001**.
+По умолчанию (`docker compose up -d`) он **не поднимается** — деплой остаётся read-only.
+
+```bash
+# read-сервер + overlay-write вместе
+docker compose --profile overlay-write up -d --build
+```
+`.env` для write-эндпоинта (авторизация неймспейса; без токенов — dev-режим, запись только в `@task/`):
+```
+WRITE_AUTH_TOKENS=wtok=grand-dev-mdm@release   # token=base → писать можно только '<base>@task/*'
+# WRITE_MCP_PORT=8001                          # порт write-сервера (по умолчанию 8001)
+```
+Write-MCP доступен на `http://127.0.0.1:8001/mcp` (тоже только loopback). `OVERLAY_WRITE_ENABLED=true`
+сервис задаёт сам. Эмбеддинг-провайдер/модель наследуются от общего блока — **обязаны совпадать** с
+baseline (overlay векторизуется той же моделью). Чтение `baseline ∪ overlay` идёт через обычный `app`
+(графовые инструменты принимают `overlay_tenant_id`) — см. [OVERLAY.md](OVERLAY.md). Полный контракт
+интеграции (аргументы `index_overlay`, формат ответа, правила чтения) — [ORCHESTRATOR_CONTRACT.md](ORCHESTRATOR_CONTRACT.md).
 
 ---
 

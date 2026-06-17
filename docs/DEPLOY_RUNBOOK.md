@@ -81,6 +81,15 @@ docker compose ps                       # оба healthy
 docker compose logs app --tail 20
 ```
 
+**Опционально — overlay-write эндпоинт** (per-task дельта разработчика, нужен оркестратору; см.
+[DEPLOYMENT.md §4.1](DEPLOYMENT.md) и [OVERLAY.md](OVERLAY.md)). По умолчанию НЕ поднимается — деплой
+read-only. Включается профилем `overlay-write` (поднимет ещё сервис `app-write` на порту 8001):
+```powershell
+# в .env: WRITE_AUTH_TOKENS=wtok=grand-dev-mdm@release   # token=base (запись только '<base>@task/*')
+docker compose --profile overlay-write up -d --build
+docker compose ps                       # neo4j + app + app-write healthy
+```
+
 ---
 
 ## Этап 3. Офлайн-индексация каждой конфигурации

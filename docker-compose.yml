@@ -1,5 +1,36 @@
 name: onec-vecgraph
 
+# Shared build + base environment for the read server (`app`) and the opt-in overlay-write
+# server (`app-write`). Both run the SAME image and differ only by command + listening port.
+x-app-build: &app-build
+  context: .
+  args:
+    EXTRAS: "${EXTRAS:-local-embeddings}"   # or 'cloud-embeddings' for a torch-free image
+    TORCH_INDEX_URL: "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+
+x-app-environment: &app-environment
+  MCP_HOST: "0.0.0.0"
+  NEO4J_URI: "bolt://neo4j:7687"
+  NEO4J_PASSWORD: "${NEO4J_PASSWORD:-onec_vecgraph_dev}"
+  EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-local}"   # local | openai | voyage
+  EMBEDDING_DEVICE: "${EMBEDDING_DEVICE:-cpu}"          # local: cpu | cuda | auto
+  EMBEDDING_MODEL: "${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
+  # Cloud providers (used when EMBEDDING_PROVIDER=openai|voyage; build with EXTRAS=cloud-embeddings):
+  OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+  OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+  VOYAGE_API_KEY: "${VOYAGE_API_KEY:-}"
+  EMBEDDING_DIMENSIONS: "${EMBEDDING_DIMENSIONS:-}"
+  HF_HOME: "/models"
+  HF_TOKEN: "${HF_TOKEN:-}"   # optional: removes HuggingFace model-download rate limit
+  REQUIRE_TENANT: "true"
+  # Shared public-corpus tenant (platform/BSP help), read additively by every tenant.
+  SHARED_TENANT_ID: "${SHARED_TENANT_ID:-__shared__}"
+  INCLUDE_SHARED_TENANT: "${INCLUDE_SHARED_TENANT:-true}"
+  # Bearer-token auth (recommended for networked access). Enable + provide a token map:
+  #   AUTH_ENABLED=true  AUTH_TOKENS="tok_abc=acme,tok_xyz=globex:ext_crm"
+  AUTH_ENABLED: "${AUTH_ENABLED:-false}"
+  AUTH_TOKENS: "${AUTH_TOKENS:-}"
+
 services:
   neo4j:
     image: neo4j:5.26-community
@@ -31,15 +62,12 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # MCP server. CPU image by default; for GPU build with
+  # Read-only MCP query server (hybrid_search, graph tools, …). CPU image by default; for GPU build with
   #   --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
   # and uncomment the `deploy.resources` block + set EMBEDDING_DEVICE=cuda.
   app:
-    build:
-      context: .
-      args:
-        EXTRAS: "${EXTRAS:-local-embeddings}"   # or 'cloud-embeddings' for a torch-free image
-        TORCH_INDEX_URL: "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+    build: *app-build
+    image: onec-vecgraph:local   # shared tag so `app-write` reuses the same built image
     container_name: onec_vecgraph_app
     depends_on:
       neo4j:
@@ -47,28 +75,8 @@ services:
     ports:
       - "127.0.0.1:8000:8000"   # MCP Streamable HTTP at /mcp
     environment:
-      MCP_HOST: "0.0.0.0"
+      <<: *app-environment
       MCP_PORT: "8000"
-      NEO4J_URI: "bolt://neo4j:7687"
-      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-onec_vecgraph_dev}"
-      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-local}"   # local | openai | voyage
-      EMBEDDING_DEVICE: "${EMBEDDING_DEVICE:-cpu}"          # local: cpu | cuda | auto
-      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
-      # Cloud providers (used when EMBEDDING_PROVIDER=openai|voyage; build with EXTRAS=cloud-embeddings):
-      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
-      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
-      VOYAGE_API_KEY: "${VOYAGE_API_KEY:-}"
-      EMBEDDING_DIMENSIONS: "${EMBEDDING_DIMENSIONS:-}"
-      HF_HOME: "/models"
-      HF_TOKEN: "${HF_TOKEN:-}"   # optional: removes HuggingFace model-download rate limit
-      REQUIRE_TENANT: "true"
-      # Shared public-corpus tenant (platform/BSP help), read additively by every tenant.
-      SHARED_TENANT_ID: "${SHARED_TENANT_ID:-__shared__}"
-      INCLUDE_SHARED_TENANT: "${INCLUDE_SHARED_TENANT:-true}"
-      # Bearer-token auth (recommended for networked access). Enable + provide a token map:
-      #   AUTH_ENABLED=true  AUTH_TOKENS="tok_abc=acme,tok_xyz=globex:ext_crm"
-      AUTH_ENABLED: "${AUTH_ENABLED:-false}"
-      AUTH_TOKENS: "${AUTH_TOKENS:-}"
     volumes:
       - ./data/hf-cache:/models   # persist the downloaded embedding model (~1.2 GB)
     restart: unless-stopped
@@ -80,3 +88,32 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
+
+  # Overlay WRITE endpoint — OPT-IN, separate process/port. Exposes only `index_overlay`
+  # (per-task developer delta), confined to overlay tenants '<base>@task/*'; the read server
+  # above stays strictly read-only. Off by default — start it with the `overlay-write` profile:
+  #   docker compose --profile overlay-write up -d
+  # See docs/OVERLAY.md. Authorize write namespaces via WRITE_AUTH_TOKENS="wtok=<base>".
+  app-write:
+    profiles: ["overlay-write"]
+    build: *app-build
+    image: onec-vecgraph:local
+    container_name: onec_vecgraph_app_write
+    command: ["onec-vecgraph", "serve-write", "--transport", "http"]
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8001:8001"   # overlay-write MCP Streamable HTTP at /mcp
+    environment:
+      <<: *app-environment
+      MCP_PORT: "8000"
+      # Overlay-write toggles (the same embedding model/provider as baseline is enforced above).
+      OVERLAY_WRITE_ENABLED: "true"
+      WRITE_MCP_PORT: "${WRITE_MCP_PORT:-8001}"
+      # token=base namespace; a token may write only '<base>@task/*'. Empty → dev mode (overlay-only).
+      WRITE_AUTH_TOKENS: "${WRITE_AUTH_TOKENS:-}"
+    volumes:
+      - ./data/hf-cache:/models   # reuse the same embedding-model cache as `app`
+    restart: unless-stopped
+    # GPU: mirror the `deploy.resources` block from `app` if overlay vectorize needs cu128.

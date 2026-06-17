@@ -86,6 +86,8 @@ uv run onec-vecgraph ingest-help --tenant-id __shared__ --file "<...>\shcntx_ru.
 ```
 # Пишущий эндпоинт (отдельный сервер; read-сервер остаётся read-only):
 OVERLAY_WRITE_ENABLED=true uv run onec-vecgraph serve-write --transport http   # порт WRITE_MCP_PORT (8001)
+# В Docker: сервис app-write под профилем (OVERLAY_WRITE_ENABLED ставит сам, порт 8001):
+docker compose --profile overlay-write up -d
 # Инкрементальная индексация дельты в overlay-тенант '<base>@task/<id>' (оффлайн-зеркало MCP-инструмента):
 uv run onec-vecgraph index-overlay payload.json
 # Релиз baseline индексируется обычным index/callgraph/vectorize; overlay наполняет ТОЛЬКО touched-объекты.

@@ -48,7 +48,9 @@ RUN if echo "${EXTRAS}" | grep -q local-embeddings; then \
 RUN mkdir -p /models && useradd -m -u 10001 app && chown -R app:app /app /models
 USER app
 
-EXPOSE 8000
+# 8000 = read query server (default CMD); 8001 = opt-in overlay-write server (`serve-write`,
+# launched via compose `command:` override — see docker-compose.yml `app-write`).
+EXPOSE 8000 8001
 
 # Liveness: verifies Neo4j connectivity (the server's hard dependency).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=5 \
