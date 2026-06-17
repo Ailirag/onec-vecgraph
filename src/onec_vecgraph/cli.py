@@ -103,6 +103,28 @@ def serve(
         raise typer.BadParameter("transport must be 'http' or 'stdio'")
 
 
+@app.command(name="serve-write")
+def serve_write(
+    transport: str = typer.Option("http", help="Transport: 'http' (streamable) or 'stdio'."),
+) -> None:
+    """Run the overlay WRITE MCP server (separate endpoint; needs OVERLAY_WRITE_ENABLED=true)."""
+    from .write_server import run
+
+    if transport == "http":
+        s = get_settings()
+        rprint(
+            f"[green]Starting overlay-write MCP server[/] (streamable-http) on "
+            f"http://{s.mcp_host}:{s.write_mcp_port}{s.mcp_path}"
+        )
+        if not s.overlay_write_enabled:
+            rprint("[yellow]Note:[/] OVERLAY_WRITE_ENABLED is false — index_overlay will refuse calls.")
+        run("streamable-http")
+    elif transport == "stdio":
+        run("stdio")
+    else:
+        raise typer.BadParameter("transport must be 'http' or 'stdio'")
+
+
 @app.command()
 def index(
     path: str = typer.Argument(..., help="Path to the 1C Configurator XML dump directory."),
@@ -344,6 +366,28 @@ def ingest(
 
     rprint(ingest_manifest(manifest, get_settings(), tenant_id=tenant_id, only_type=only,
                            reset=reset, link_semantic=link_semantic))
+    _flush_exit()
+
+
+@app.command(name="index-overlay")
+def index_overlay_cmd(
+    payload: str = typer.Argument(..., help="JSON payload path: {tenant_id, base_tenant_id, roots, files, deleted, options}."),
+) -> None:
+    """Index a per-task overlay delta (touched objects → overlay tenant + tombstones).
+
+    Offline/dev mirror of the write-server `index_overlay` MCP tool. The overlay tenant must
+    contain '@task/' (e.g. 'proj@release@task/T-1'); baselines are never written here."""
+    import json
+    from pathlib import Path as _P
+
+    from .overlay_index import index_overlay
+
+    data = json.loads(_P(payload).read_text(encoding="utf-8"))
+    rprint(index_overlay(
+        get_settings(), tenant_id=data["tenant_id"], base_tenant_id=data.get("base_tenant_id"),
+        roots=data.get("roots") or [], files=data.get("files") or [],
+        deleted=data.get("deleted") or [], options=data.get("options") or {},
+    ))
     _flush_exit()
 
 

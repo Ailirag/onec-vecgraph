@@ -170,7 +170,15 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 - **`find_handlers(query)`** — точки входа объекта: обработчики событий форм (event→рутина) + стандартные
   события модулей (проведение/запись/проверка_заполнения/нумерация/…). Ответ на «что срабатывает при проведении/записи».
 - **`find_callers(query)`** / **`find_callees(query)`** — кто вызывает рутину / что вызывает рутина.
+- **`call_graph(query)`** — объединённо `{callers, callees}` вокруг рутины.
 - **`call_path(from_routine, to_routine)`** — кратчайший путь вызовов между двумя рутинами.
+
+### Overlay (baseline + рабочая копия задачи) — Phase 2
+Графовые инструменты `get_dependencies` / `impact_analysis` / `find_callers` / `find_callees` / `call_graph`
+принимают опциональный **`overlay_tenant_id`** (`<base>@task/<id>` — только под вашим тенантом, иначе отказ):
+результат объединяет baseline ∪ рабочую копию (overlay выигрывает по объекту; tombstones маскируют удаления),
+каждая строка несёт `layer` (`release`/`working`). Наполнение overlay — через write-эндпоинт (`serve-write`,
+инструмент `index_overlay`). Подробно — [OVERLAY.md](OVERLAY.md).
 
 ### Обзор
 - **`metrics(subsystem?)`** — объекты по видам, объём кода, рёбра графа вызовов по kind/confidence,

@@ -111,3 +111,21 @@ def resolve(ctx: object, settings: Settings) -> TenantContext:
             config_id=headers.get(CONFIG_HEADER) or settings.default_config_id,
         )
     return default_context(settings)
+
+
+def resolve_write_base(ctx: object, settings: Settings) -> str | None:
+    """Authorized base namespace for an overlay WRITE call (from the write bearer-token map).
+
+    Returns the base tenant the token may write overlays under ('<base>@task/*'), or None when no
+    write tokens are configured (trusted/dev mode — the caller still confines writes to an overlay
+    tenant). Raises if write tokens ARE configured but the request carries no matching one.
+    """
+    mapping = settings.write_auth_token_map()
+    if not mapping:
+        return None
+    request = _http_request(ctx)
+    headers = getattr(request, "headers", None) if request is not None else None
+    token = _bearer_token(headers) if headers is not None else None
+    if not token or token not in mapping:
+        raise TenantResolutionError("Missing or invalid write 'Authorization: Bearer <token>'.")
+    return mapping[token]

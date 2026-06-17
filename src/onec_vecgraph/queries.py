@@ -155,14 +155,48 @@ def find_type_usages(store: Neo4jStore, tenant_id: str, q: str) -> dict[str, Any
     return {"found": True, "fqn": head["fqn"], "used_by": usages, "count": len(usages)}
 
 
-def get_dependencies(
-    store: Neo4jStore, tenant_id: str, q: str, direction: str = "out"
-) -> dict[str, Any]:
-    head = _resolve(store, tenant_id, q)
-    if head is None:
-        return {"found": False, "query": q}
-    fqn = head["fqn"]
+# ── Phase-2 overlay union (baseline ∪ per-task overlay) ───────────────────────────────
+# Rule: an edge is "live" in the tenant that owns its SOURCE object's current version —
+# overlay if the source is touched (present in the overlay tenant), else baseline. Tombstones
+# (deletions recorded in the overlay tenant) drop the object and any edge into it. Every merged
+# row is tagged `layer` = 'working' (overlay) | 'release' (baseline) for provenance.
 
+def _overlay_sets(store: Neo4jStore, overlay_tenant_id: str) -> tuple[set[str], set[str]]:
+    """(touched, tombstoned) fqns for an overlay tenant: touched = objects present there."""
+    touched = {
+        r["fqn"]
+        for r in store.read("MATCH (o:Object {tenant_id: $t}) RETURN o.fqn AS fqn", t=overlay_tenant_id)
+    }
+    return touched, set(store.tombstoned_fqns(overlay_tenant_id))
+
+
+def _merge_edge_rows(base: list[dict], overlay: list[dict], *, src_key: str,
+                     touched: set[str], tombstoned: set[str]) -> list[dict]:
+    """Union edge-rows by the override/tombstone rule. `src_key` names the field holding the
+    edge's source-object fqn (the side that owns the relationship). Pure / unit-tested."""
+    out: dict[tuple, dict] = {}
+    for r in overlay:
+        if r.get(src_key) in tombstoned:
+            continue
+        out[(r.get("rel"), r.get("fqn"))] = {**r, "layer": "working"}
+    for r in base:
+        s = r.get(src_key)
+        if s in touched or s in tombstoned:
+            continue  # baseline edge superseded by overlay, or source deleted
+        k = (r.get("rel"), r.get("fqn"))
+        if k not in out:
+            out[k] = {**r, "layer": "release"}
+    return sorted(out.values(), key=lambda r: (r.get("rel") or "", r.get("fqn") or ""))
+
+
+def _tag_layer(rows: list[dict], layer: str, tombstoned: set[str]) -> list[dict]:
+    """Tag owned (out-side) rows with a layer and drop those pointing at a tombstoned object."""
+    return [{**r, "layer": layer} for r in rows if r.get("fqn") not in tombstoned]
+
+
+def _deps_single(store: Neo4jStore, tenant_id: str, fqn: str, direction: str) -> dict[str, list]:
+    """The four raw dependency lists for one tenant (no merge)."""
+    out_refs = out_related = in_refs = in_related = []
     if direction in ("out", "both"):
         out_refs = store.read(
             f"MATCH (o:Object {{tenant_id: $t, fqn: $fqn}})-{_FIELD_PATH}->(:Field)-[:REFERENCES]->(dep:Object) "
@@ -186,19 +220,59 @@ def get_dependencies(
             t=tenant_id, fqn=fqn,
         )
         in_related = store.read(
-            f"MATCH (src:Object {{tenant_id: $t}})-[r:{_RELATED_RELS}]->(o:Object {{fqn: $fqn}}) "
+            f"MATCH (src:Object {{tenant_id: $t}})-[r:{_RELATED_RELS}]->(o:Object {{tenant_id: $t, fqn: $fqn}}) "
             "RETURN type(r) AS rel, src.fqn AS fqn, src.kind AS kind ORDER BY rel, fqn",
             t=tenant_id, fqn=fqn,
         )
     else:
         in_refs, in_related = [], []
 
+    return {"out_refs": out_refs, "out_related": out_related,
+            "in_refs": in_refs, "in_related": in_related}
+
+
+def get_dependencies(store: Neo4jStore, tenant_id: str, q: str, direction: str = "out",
+                     overlay_tenant_id: str | None = None) -> dict[str, Any]:
+    """Dependencies of an object. With `overlay_tenant_id`, union baseline ∪ overlay: outgoing
+    edges follow the queried object's live version; incoming edges merge by source ownership;
+    tombstones mask deletions; rows carry `layer` (release/working)."""
+    head = _resolve(store, tenant_id, q) or (
+        _resolve(store, overlay_tenant_id, q) if overlay_tenant_id else None)
+    if head is None:
+        return {"found": False, "query": q}
+    fqn = head["fqn"]
+
+    if not overlay_tenant_id:
+        base = _deps_single(store, tenant_id, fqn, direction)
+        return {
+            "found": True, "fqn": fqn, "direction": direction,
+            "depends_on": {"references": base["out_refs"], "related": base["out_related"]},
+            "dependents": {"referenced_by": base["in_refs"], "related": base["in_related"]},
+        }
+
+    touched, tombstoned = _overlay_sets(store, overlay_tenant_id)
+    if fqn in tombstoned:  # object deleted in the working copy → no live deps either way
+        return {
+            "found": True, "fqn": fqn, "direction": direction, "overlay": True, "tombstoned": True,
+            "depends_on": {"references": [], "related": []},
+            "dependents": {"referenced_by": [], "related": []},
+        }
+    base = _deps_single(store, tenant_id, fqn, direction)
+    ov = _deps_single(store, overlay_tenant_id, fqn, direction)
+    owner_layer = "working" if fqn in touched else "release"
+    src_out = ov if fqn in touched else base  # outgoing edges belong to fqn itself
     return {
-        "found": True,
-        "fqn": fqn,
-        "direction": direction,
-        "depends_on": {"references": out_refs, "related": out_related},
-        "dependents": {"referenced_by": in_refs, "related": in_related},
+        "found": True, "fqn": fqn, "direction": direction, "overlay": True,
+        "depends_on": {
+            "references": _tag_layer(src_out["out_refs"], owner_layer, tombstoned),
+            "related": _tag_layer(src_out["out_related"], owner_layer, tombstoned),
+        },
+        "dependents": {
+            "referenced_by": _merge_edge_rows(base["in_refs"], ov["in_refs"],
+                                              src_key="fqn", touched=touched, tombstoned=tombstoned),
+            "related": _merge_edge_rows(base["in_related"], ov["in_related"],
+                                        src_key="fqn", touched=touched, tombstoned=tombstoned),
+        },
     }
 
 
@@ -281,26 +355,91 @@ def _resolve_routines(store, tenant_id: str, q: str) -> list[str]:
     return [x["fqn"] for x in rows]
 
 
-def find_callers(store, tenant_id: str, q: str) -> dict[str, Any]:
-    fqns = _resolve_routines(store, tenant_id, q)
-    callers = store.read(
+def _callers_rows(store, tenant_id: str, fqns: list[str]) -> list[dict]:
+    return store.read(
         "MATCH (caller:Routine)-[c:CALLS]->(r:Routine {tenant_id: $t}) WHERE r.fqn IN $fqns "
         "RETURN DISTINCT caller.fqn AS fqn, caller.name AS name, caller.object_fqn AS object, "
         "       caller.routine_kind AS kind, c.confidence AS confidence ORDER BY object, name",
         t=tenant_id, fqns=fqns,
     )
-    return {"query": q, "routines": fqns, "callers": callers, "count": len(callers)}
 
 
-def find_callees(store, tenant_id: str, q: str) -> dict[str, Any]:
-    fqns = _resolve_routines(store, tenant_id, q)
-    callees = store.read(
+def _callees_rows(store, tenant_id: str, fqns: list[str]) -> list[dict]:
+    return store.read(
         "MATCH (r:Routine {tenant_id: $t})-[c:CALLS]->(callee:Routine) WHERE r.fqn IN $fqns "
         "RETURN DISTINCT callee.fqn AS fqn, callee.name AS name, callee.object_fqn AS object, "
         "       callee.routine_kind AS kind, c.kind AS via ORDER BY object, name",
         t=tenant_id, fqns=fqns,
     )
-    return {"query": q, "routines": fqns, "callees": callees, "count": len(callees)}
+
+
+def _routine_objects(store, tenant_id: str, fqns: list[str]) -> set[str]:
+    """Owning object fqns of the given routines (for self-tombstone checks)."""
+    if not fqns:
+        return set()
+    rows = store.read(
+        "MATCH (r:Routine {tenant_id: $t}) WHERE r.fqn IN $f AND r.object_fqn IS NOT NULL "
+        "RETURN DISTINCT r.object_fqn AS o",
+        t=tenant_id, f=fqns,
+    )
+    return {r["o"] for r in rows if r.get("o")}
+
+
+def find_callers(store, tenant_id: str, q: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
+    """Who calls a routine. With overlay: callers whose object is touched come from the overlay,
+    unchanged callers from baseline (their code is unchanged); tombstoned callers are dropped. If the
+    queried routine's own object is deleted in the working copy, returns empty (tombstoned)."""
+    fqns = _resolve_routines(store, tenant_id, q)
+    base = _callers_rows(store, tenant_id, fqns)
+    if not overlay_tenant_id:
+        return {"query": q, "routines": fqns, "callers": base, "count": len(base), "overlay": False}
+    touched, tombstoned = _overlay_sets(store, overlay_tenant_id)
+    objs = _routine_objects(store, tenant_id, fqns)
+    if objs and objs <= tombstoned:  # the queried routine's object is deleted in the working copy
+        return {"query": q, "routines": fqns, "callers": [], "count": 0,
+                "tombstoned": True, "overlay": True}
+    fqns = sorted(set(fqns) | set(_resolve_routines(store, overlay_tenant_id, q)))
+    ov = _callers_rows(store, overlay_tenant_id, fqns)
+    merged = _merge_edge_rows(base, ov, src_key="object", touched=touched, tombstoned=tombstoned)
+    return {"query": q, "routines": fqns, "callers": merged, "count": len(merged), "overlay": True}
+
+
+def find_callees(store, tenant_id: str, q: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
+    """What a routine calls. With overlay: the working version's callees win (overlay), unioned with
+    baseline callees for recall (overlay-internal call resolution is touched-scoped — see docs/OVERLAY.md).
+    If the queried routine's own object is deleted in the working copy, returns empty (tombstoned)."""
+    fqns = _resolve_routines(store, tenant_id, q)
+    base = _callees_rows(store, tenant_id, fqns)
+    if not overlay_tenant_id:
+        return {"query": q, "routines": fqns, "callees": base, "count": len(base), "overlay": False}
+    _, tombstoned = _overlay_sets(store, overlay_tenant_id)
+    objs = _routine_objects(store, tenant_id, fqns)
+    if objs and objs <= tombstoned:  # the queried routine's object is deleted in the working copy
+        return {"query": q, "routines": fqns, "callees": [], "count": 0,
+                "tombstoned": True, "overlay": True}
+    ov_fqns = _resolve_routines(store, overlay_tenant_id, q)
+    ov = _callees_rows(store, overlay_tenant_id, ov_fqns)
+    out: dict[str, dict] = {}
+    for r in ov:
+        if r.get("fqn") in tombstoned:
+            continue
+        out[r["fqn"]] = {**r, "layer": "working"}
+    for r in base:
+        if r.get("fqn") in tombstoned:
+            continue
+        out.setdefault(r["fqn"], {**r, "layer": "release"})
+    callees = sorted(out.values(), key=lambda r: (r.get("object") or "", r.get("name") or ""))
+    return {"query": q, "routines": sorted(set(fqns) | set(ov_fqns)),
+            "callees": callees, "count": len(callees), "overlay": True}
+
+
+def call_graph(store, tenant_id: str, q: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
+    """Combined call graph around a routine: {callers, callees}. Overlay-aware (Phase 2)."""
+    callers = find_callers(store, tenant_id, q, overlay_tenant_id)
+    callees = find_callees(store, tenant_id, q, overlay_tenant_id)
+    return {"query": q, "routines": callers.get("routines", []),
+            "callers": callers.get("callers", []), "callees": callees.get("callees", []),
+            "overlay": bool(overlay_tenant_id)}
 
 
 def find_handlers(store, tenant_id: str, q: str) -> dict[str, Any]:

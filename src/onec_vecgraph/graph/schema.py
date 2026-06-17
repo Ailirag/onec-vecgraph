@@ -7,6 +7,8 @@ NODE_LABELS = [
     "Routine", "Detail",
     # Multi-source doc corpora (ITS / project artifacts) — own the doc chunks, link to Objects.
     "Document", "Artifact",
+    # Overlay deletions: a Tombstone (tenant_id, fqn) in an overlay tenant masks a baseline object.
+    "Tombstone",
 ]
 
 

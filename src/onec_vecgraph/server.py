@@ -87,6 +87,23 @@ def _shared(tenant_id: str) -> str | None:
     return s if settings.include_shared_tenant and s and s != tenant_id else None
 
 
+def _overlay(caller_tenant: str, overlay_tenant_id: str | None) -> str | None:
+    """Validate a client-supplied overlay tenant against the caller's namespace (anti-leak).
+
+    A caller may union its own baseline only with an overlay UNDER that baseline ('<base>@task/*').
+    Any other overlay_tenant_id is rejected, so this query arg cannot read foreign tenants."""
+    if not overlay_tenant_id:
+        return None
+    from .overlay import base_tenant_of, in_namespace
+
+    base = base_tenant_of(caller_tenant)  # caller may itself be an overlay → compare against its base
+    if not in_namespace(overlay_tenant_id, base):
+        raise ValueError(
+            f"overlay_tenant_id {overlay_tenant_id!r} is not an overlay under the caller's base {base!r}"
+        )
+    return overlay_tenant_id
+
+
 # ── health / introspection ────────────────────────────────────────────
 @mcp.tool()
 def ping() -> dict[str, Any]:
@@ -145,19 +162,29 @@ def get_object_properties(ctx: Context, query: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_dependencies(ctx: Context, query: str, direction: str = "both") -> dict[str, Any]:
+def get_dependencies(ctx: Context, query: str, direction: str = "both",
+                     overlay_tenant_id: str | None = None) -> dict[str, Any]:
     """Dependency graph around an object. direction: 'out' (what it depends on), 'in' (what depends
     on it), or 'both'. Returns depends_on/dependents each with 'references' (type refs) and 'related'
-    (CONTAINS/OWNED_BY/SUBSCRIBES/HAS_RIGHT_ON/WRITES_TO/... edges, labelled by 'rel')."""
+    (CONTAINS/OWNED_BY/SUBSCRIBES/HAS_RIGHT_ON/WRITES_TO/... edges, labelled by 'rel').
+    overlay_tenant_id ('<base>@task/<id>' under the caller's tenant) unions baseline ∪ working copy:
+    outgoing edges follow the object's live version, incoming edges merge by source ownership,
+    tombstones mask deletions; rows carry 'layer' (release/working)."""
     with Neo4jStore.from_settings(settings) as store:
-        return queries.get_dependencies(store, _tenant(ctx), query, direction)
+        t = _tenant(ctx)
+        return queries.get_dependencies(store, t, query, direction,
+                                        overlay_tenant_id=_overlay(t, overlay_tenant_id))
 
 
 @mcp.tool()
-def impact_analysis(ctx: Context, query: str) -> dict[str, Any]:
-    """What would be affected if this object changes: incoming references, subsystems, roles and subscriptions that depend on it."""
+def impact_analysis(ctx: Context, query: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
+    """What would be affected if this object changes: incoming references, subsystems, roles and
+    subscriptions that depend on it. overlay_tenant_id ('<base>@task/<id>' under the caller's tenant)
+    unions baseline ∪ working copy with tombstone masking and 'layer' provenance (Phase 2)."""
     with Neo4jStore.from_settings(settings) as store:
-        return queries.get_dependencies(store, _tenant(ctx), query, "in")
+        t = _tenant(ctx)
+        return queries.get_dependencies(store, t, query, "in",
+                                        overlay_tenant_id=_overlay(t, overlay_tenant_id))
 
 
 @mcp.tool()
@@ -272,26 +299,39 @@ def metrics(ctx: Context, subsystem: str | None = None) -> dict[str, Any]:
 
 # ── BSL call graph ────────────────────────────────────────────────────
 @mcp.tool()
-def find_callers(ctx: Context, query: str) -> dict[str, Any]:
+def find_callers(ctx: Context, query: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
     """Which BSL routines call the given procedure/function (by routine fqn, 'Module.Method', or
     bare name). Returns {query, routines, callers:[{fqn, name, object, kind, confidence}], count}.
-    Requires the BSL call graph to have been built for the tenant."""
+    overlay_tenant_id unions baseline ∪ working copy (callers tagged 'layer'). Requires the call graph."""
     with Neo4jStore.from_settings(settings) as store:
-        return queries.find_callers(store, _tenant(ctx), query)
+        t = _tenant(ctx)
+        return queries.find_callers(store, t, query, overlay_tenant_id=_overlay(t, overlay_tenant_id))
 
 
 @mcp.tool()
-def find_callees(ctx: Context, query: str) -> dict[str, Any]:
+def find_callees(ctx: Context, query: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
     """Which BSL routines the given procedure/function calls. Returns {query, routines,
     callees:[{fqn, name, object, kind, via (local/common_module/manager)}], count}.
-    Requires the BSL call graph to have been built for the tenant."""
+    overlay_tenant_id unions baseline ∪ working copy (callees tagged 'layer'). Requires the call graph."""
     with Neo4jStore.from_settings(settings) as store:
-        return queries.find_callees(store, _tenant(ctx), query)
+        t = _tenant(ctx)
+        return queries.find_callees(store, t, query, overlay_tenant_id=_overlay(t, overlay_tenant_id))
+
+
+@mcp.tool()
+def call_graph(ctx: Context, query: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
+    """Combined BSL call graph around a routine: {callers, callees}. With overlay_tenant_id
+    ('<base>@task/<id>' under the caller's tenant) the result unions baseline ∪ working copy
+    (overlay wins, tombstones mask deletions; rows carry 'layer'). Requires the call graph."""
+    with Neo4jStore.from_settings(settings) as store:
+        t = _tenant(ctx)
+        return queries.call_graph(store, t, query, overlay_tenant_id=_overlay(t, overlay_tenant_id))
 
 
 @mcp.tool()
 def call_path(ctx: Context, from_routine: str, to_routine: str) -> dict[str, Any]:
-    """Shortest BSL call path between two routines."""
+    """Shortest BSL call path between two routines (single tenant; for overlay-aware analysis use
+    call_graph — cross-layer path-finding is not unioned, see docs/OVERLAY.md)."""
     with Neo4jStore.from_settings(settings) as store:
         return queries.call_path(store, _tenant(ctx), from_routine, to_routine)
 

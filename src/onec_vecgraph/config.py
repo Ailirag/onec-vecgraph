@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,13 +18,15 @@ class Settings(BaseSettings):
 
     # ── Neo4j (graph + vectors) ────────────────────────────────────────
     neo4j_uri: str = "bolt://localhost:7687"
-    neo4j_user: str = "neo4j"
+    # Accept NEO4J_USERNAME too (orchestrator deployment skeletons use that spelling).
+    neo4j_user: str = Field("neo4j", validation_alias=AliasChoices("neo4j_user", "neo4j_username"))
     neo4j_password: str = "onec_vecgraph_dev"
     neo4j_database: str = "neo4j"
 
     # ── Embeddings ─────────────────────────────────────────────────────
-    # hashing | local | openai | voyage
-    embedding_provider: str = "hashing"
+    # hashing | local | openai | voyage. Accept EMBEDDINGS_PROVIDER too (deployment-skeleton spelling).
+    embedding_provider: str = Field(
+        "hashing", validation_alias=AliasChoices("embedding_provider", "embeddings_provider"))
     # Per 1C-RAG best practice (documents1c / metacode both use Qwen3-Embedding).
     # 0.6B (1024-dim) is the responsive default; switch to Qwen/Qwen3-Embedding-4B
     # (2560-dim) for higher quality. BGE-m3 is a multilingual alternative.
@@ -52,7 +54,9 @@ class Settings(BaseSettings):
     mcp_path: str = "/mcp"
 
     # ── Tenant context ─────────────────────────────────────────────────
-    default_tenant_id: str = "default"
+    # Accept ONEC_VECGRAPH_TENANT_ID too (orchestrator deployment skeleton spelling).
+    default_tenant_id: str = Field(
+        "default", validation_alias=AliasChoices("default_tenant_id", "onec_vecgraph_tenant_id"))
     default_config_id: str = "base"
     # Over HTTP, require the X-Tenant-Id header (no silent fallback to the shared
     # default — prevents cross-company data access). stdio (local dev) always uses defaults.
@@ -82,6 +86,15 @@ class Settings(BaseSettings):
     # e.g. AUTH_TOKENS="tok_abc=acme,tok_xyz=globex:ext_crm"
     auth_tokens: str = ""
 
+    # ── Overlay WRITE endpoint (separate, opt-in; the query server stays read-only) ────
+    # A dedicated write-capable MCP server (cli `serve-write`) exposes only `index_overlay`,
+    # confined to overlay tenants '<base>@task/*'. Off unless explicitly enabled.
+    overlay_write_enabled: bool = False
+    write_mcp_port: int = 8001
+    # Token map authorizing overlay WRITE per base namespace: comma-separated "token=base".
+    # A token may write only to '<base>@task/*'. e.g. WRITE_AUTH_TOKENS="wtok=grand-dev-mdm@release"
+    write_auth_tokens: str = ""
+
     # Empty env strings (e.g. compose `VAR: "${VAR:-}"`) → None for optional fields, so an
     # unset cloud var doesn't break parsing (e.g. "" is not a valid int for embedding_dimensions).
     @field_validator(
@@ -105,6 +118,19 @@ class Settings(BaseSettings):
                 continue
             tenant, sep, config = target.partition(":")
             out[token] = (tenant.strip(), config.strip() if sep and config.strip() else None)
+        return out
+
+    def write_auth_token_map(self) -> dict[str, str]:
+        """Parse write_auth_tokens into {token: base_namespace}; a token may write '<base>@task/*'."""
+        out: dict[str, str] = {}
+        for entry in self.write_auth_tokens.split(","):
+            entry = entry.strip()
+            if not entry or "=" not in entry:
+                continue
+            token, _, base = entry.partition("=")
+            token, base = token.strip(), base.strip()
+            if token and base:
+                out[token] = base
         return out
 
 

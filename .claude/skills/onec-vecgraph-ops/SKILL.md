@@ -39,8 +39,10 @@ uv run onec-vecgraph ingest-help --tenant-id __shared__ --bin "C:\Program Files\
 uv run onec-vecgraph ingest <manifest.yaml> --tenant-id acme_erp
 # Сервер / проверка:
 uv run onec-vecgraph serve --transport http
+uv run onec-vecgraph serve-write --transport http   # overlay write-эндпоинт (нужен OVERLAY_WRITE_ENABLED=true)
 uv run onec-vecgraph metrics --tenant-id acme_erp
 ```
+Overlay (baseline + per-task дельта разработчика): write-эндпоинт `serve-write`/`index-overlay` пишет только в `<base>@task/*`; графовые инструменты принимают `overlay_tenant_id` для union-чтения. Детали — [docs/OVERLAY.md](../../../docs/OVERLAY.md).
 Гочи: если `uv` падает на офлайн-пересборке → `uv run --no-sync onec-vecgraph …`. Пустой результат поиска ⇒ «слой не построен для тенанта», проверь `metrics`. `vectorize --incremental` игнорирует reset (безопасно); `--no-reset --code` доливает код без перезатирания.
 
 Классификация для фильтрованного поиска (owner-фасеты): `index --config-release "ERP_2.5.18"` ставит `corpus_version=config:<релиз>` на объекты; у источников манифеста (`its`/`git_artifacts`) можно задать `doc_topic` (`platform`/`config`/`task`) и `corpus_version`. Потребитель фильтрует поиск по `doc_topic`/`corpus_version`/`help_kind` — **только вместе с соответствующим `source`** (иначе корпуса без поля выпадают). Изоляцию это НЕ заменяет — только тенант. Детали — [docs/OPERATOR_PLAYBOOK.md](../../../docs/OPERATOR_PLAYBOOK.md) и [docs/MCP_USAGE.md](../../../docs/MCP_USAGE.md).

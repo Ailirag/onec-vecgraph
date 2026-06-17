@@ -41,8 +41,10 @@ uv run onec-vecgraph ingest-help --tenant-id __shared__ --bin "C:\Program Files\
 uv run onec-vecgraph ingest <manifest.yaml> --tenant-id acme_erp
 # Сервер / диагностика:
 uv run onec-vecgraph serve --transport http
+uv run onec-vecgraph serve-write --transport http   # overlay write-эндпоинт (нужен OVERLAY_WRITE_ENABLED=true)
 uv run onec-vecgraph metrics --tenant-id acme_erp
 ```
+Overlay (baseline + per-task дельта разработчика): `serve-write`/`index-overlay` пишет только в `<base>@task/*`; графовые инструменты принимают `overlay_tenant_id` для union-чтения. Детали — [docs/OVERLAY.md](docs/OVERLAY.md).
 Гочи: при падении `uv` на офлайн-пересборке → `uv run --no-sync onec-vecgraph …`. `vectorize --incremental` игнорирует
 reset (безопасно); `--no-reset --code` доливает код без перезатирания. Пустой результат поиска ⇒ «слой не построен
 для тенанта» — проверь `metrics` (есть ли chunks/routines).

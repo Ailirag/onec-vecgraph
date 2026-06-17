@@ -82,9 +82,20 @@ uv run onec-vecgraph ingest-help --tenant-id __shared__ --file "<...>\shcntx_ru.
 - Если путь не указан / `.hbk` не найден — команда падает с явной ошибкой (не делает «тихо ничего»).
 - Проверка: `uv run onec-vecgraph docinfo "Массив.Найти" --tenant-id acme_erp` (читает `__shared__` аддитивно).
 
+## 5a. Overlay (baseline + per-task дельта разработчика; см. docs/OVERLAY.md)
+```
+# Пишущий эндпоинт (отдельный сервер; read-сервер остаётся read-only):
+OVERLAY_WRITE_ENABLED=true uv run onec-vecgraph serve-write --transport http   # порт WRITE_MCP_PORT (8001)
+# Инкрементальная индексация дельты в overlay-тенант '<base>@task/<id>' (оффлайн-зеркало MCP-инструмента):
+uv run onec-vecgraph index-overlay payload.json
+# Релиз baseline индексируется обычным index/callgraph/vectorize; overlay наполняет ТОЛЬКО touched-объекты.
+```
+- Запись разрешена только в overlay-тенант (`@task/`); `WRITE_AUTH_TOKENS="token=base"` ограничивает namespace.
+- Чтение со слиянием: графовые инструменты принимают `overlay_tenant_id` (Phase 2); поиск сливает оркестратор.
+
 ## 6. Поднять сервер / проверка / диагностика
 ```
-uv run onec-vecgraph serve --transport http          # http://127.0.0.1:8000/mcp
+uv run onec-vecgraph serve --transport http          # http://127.0.0.1:8000/mcp (read-only)
 uv run onec-vecgraph serve --transport stdio         # локальные MCP-клиенты
 uv run onec-vecgraph health                          # связность Neo4j
 uv run onec-vecgraph metrics --tenant-id acme_erp    # объекты/код/рёбра графа/хотспоты

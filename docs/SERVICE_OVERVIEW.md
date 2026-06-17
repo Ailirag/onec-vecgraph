@@ -54,7 +54,8 @@ MCP-сервер, который векторизует конфигурации
 |---|---|
 | [STATE.md](STATE.md) | Снимок состояния: окружение, что готово, данные в Neo4j, ограничения (читать первым по сути) |
 | [OPERATOR_PLAYBOOK.md](OPERATOR_PLAYBOOK.md) | Управление: index / callgraph / vectorize / ingest / ingest-help |
-| [MCP_USAGE.md](MCP_USAGE.md) | Гайд для агентов-потребителей (подключение, словари, 19 инструментов, сценарии) |
+| [MCP_USAGE.md](MCP_USAGE.md) | Гайд для агентов-потребителей (подключение, словари, инструменты, сценарии) |
+| [OVERLAY.md](OVERLAY.md) | Overlay-тенанты: baseline + per-task дельта, write-эндпоинт `index_overlay`, union-граф (Phase 2) |
 | [DEPLOY_DETAILED.md](DEPLOY_DETAILED.md) · [DEPLOYMENT.md](DEPLOYMENT.md) | Деплой, докер (CPU/GPU), настройки, auth |
 | [../AGENTS.md](../AGENTS.md) | Точка входа для Codex / AGENTS.md-совместимых агентов |
 | [ITS_PARSER_REQUIREMENTS.md](ITS_PARSER_REQUIREMENTS.md) | Контракт внешнего парсера документации ИТС |

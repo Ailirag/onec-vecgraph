@@ -405,6 +405,30 @@ class Neo4jStore:
                 t=tenant_id, f=fqns[i : i + 1000],
             )
 
+    # ── Overlay tombstones (mask baseline objects deleted in a dev working tree) ──────
+    def write_tombstones(self, tenant_id: str, fqns: list[str]) -> int:
+        """MERGE a :Tombstone (tenant_id, fqn) per deleted object in the overlay tenant."""
+        if not fqns:
+            return 0
+        for i in range(0, len(fqns), 1000):
+            self.write(
+                "UNWIND $f AS fqn MERGE (:Tombstone {tenant_id: $t, fqn: fqn})",
+                t=tenant_id, f=fqns[i : i + 1000],
+            )
+        return len(fqns)
+
+    def clear_tombstones(self, tenant_id: str, fqns: list[str] | None = None) -> None:
+        """Drop tombstones in a tenant (all, or only the given fqns — e.g. an object resurrected)."""
+        if fqns is None:
+            self.write("MATCH (t:Tombstone {tenant_id: $t}) DELETE t", t=tenant_id)
+        elif fqns:
+            self.write("MATCH (t:Tombstone {tenant_id: $t}) WHERE t.fqn IN $f DELETE t",
+                       t=tenant_id, f=fqns)
+
+    def tombstoned_fqns(self, tenant_id: str) -> list[str]:
+        rows = self.read("MATCH (t:Tombstone {tenant_id: $t}) RETURN t.fqn AS fqn", t=tenant_id)
+        return [r["fqn"] for r in rows]
+
     # ── call graph (M3) ───────────────────────────────────────────────
     def delete_routines(self, tenant_id: str, batch: int = 25000) -> None:
         while True:
