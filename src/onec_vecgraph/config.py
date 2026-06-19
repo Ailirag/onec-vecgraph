@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     shared_tenant_id: str = "__shared__"
     include_shared_tenant: bool = True  # additively read the shared tenant in search/get_document
 
+    # ── Development standards (1C v8std) read tools ────────────────────
+    # `search_standards` / `get_standard` target the ITS development-standards corpus. It is ingested
+    # (`type: its`) into the shared tenant with this corpus_version; ids look like '<prefix><number>'.
+    standards_corpus_version: str = "platform:v8std"
+    standards_id_prefix: str = "v8std_"
+
     def search_scope(self, tenant_id: str) -> list[str]:
         """Tenant ids a search/get_document call may read: caller + shared (if enabled, deduped)."""
         if self.include_shared_tenant and self.shared_tenant_id and self.shared_tenant_id != tenant_id:

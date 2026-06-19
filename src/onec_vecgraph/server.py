@@ -7,6 +7,7 @@ shared default (prevents cross-company access). stdio (local dev) uses configure
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -50,6 +51,9 @@ WHICH TOOL (by need):
 • Documentation → search with source=['its'|'artifact'] (1C ITS / project docs, if ingested);
   find_related_docs (docs linked to an object) / get_document (full doc by fqn). Search hits carry
   a 'corpus' field; filter by source to keep config and docs separate.
+• 1C development STANDARDS ("как писать по стандартам 1С": naming/coding conventions, event handlers,
+  query rules) → search_standards (ranked search over the v8std corpus) then get_standard(<number>)
+  for one standard's full text. Always available — the standards live in the shared public tenant.
 • Platform/BSP help (syntax assistant) → docinfo (exact name lookup, e.g. 'Массив.Найти' / 'Array.Find')
   or search with source=['platform_help']. These live in the shared public tenant and are VERSION-AWARE:
   pass platform_version (e.g. '8.3.27.2130') to pin a build — use it ONLY together with
@@ -224,6 +228,57 @@ def docinfo(ctx: Context, name: str, platform_version: str | None = None) -> dic
     with Neo4jStore.from_settings(settings) as store:
         t = _tenant(ctx)
         return queries.docinfo(store, t, name, platform_version=platform_version, shared_tenant_id=_shared(t))
+
+
+# ── 1C development standards (v8std) ───────────────────────────────────
+_STD_NUM_RE = re.compile(r"\d+")
+
+
+def _standard_fqn(standard: str) -> str:
+    """Normalize a standard reference to a document fqn 'its:<id>'.
+
+    Accepts a bare number ('396'), an anchor ('std396' / '#std396'), the external id
+    ('v8std_396'), or an already-qualified fqn ('its:v8std_396')."""
+    s = (standard or "").strip()
+    if s.startswith("its:"):
+        return s
+    if s.lower().startswith(settings.standards_id_prefix.lower()):
+        return f"its:{s}"
+    m = _STD_NUM_RE.search(s)
+    return f"its:{settings.standards_id_prefix}{m.group(0)}" if m else f"its:{s}"
+
+
+@mcp.tool()
+def search_standards(ctx: Context, query: str, top_k: int = 8, expand: bool = False) -> dict[str, Any]:
+    """Search the 1C:Enterprise DEVELOPMENT STANDARDS (official «Система стандартов и методик разработки
+    конфигураций», ITS v8std) by meaning or keywords: naming/coding conventions, event-handler rules,
+    query standards, module structure, common-module usage, etc. Use this whenever you need "how should
+    this be done per 1C standards" guidance for writing or reviewing configuration code.
+
+    Returns ranked hits; each carries the standard's fqn ('its:<id>' — feed it to get_standard for the
+    full text), title, section_path and source_url (its.1c.ru). expand=True attaches a graph
+    neighborhood. The standards live in the shared public tenant and are read for EVERY tenant — no
+    special access needed. (Thin wrapper over hybrid_search pinned to the standards corpus.)"""
+    from .embeddings.runtime import provider, reranker
+
+    with Neo4jStore.from_settings(settings) as store:
+        t = _tenant(ctx)
+        return queries.hybrid_search(
+            store, t, query, provider(settings), top_k, reranker=reranker(settings),
+            source=["its"], corpus_version=settings.standards_corpus_version,
+            expand=expand, shared_tenant_id=_shared(t),
+        )
+
+
+@mcp.tool()
+def get_standard(ctx: Context, standard: str) -> dict[str, Any]:
+    """Full text of ONE 1C development standard by its number or id. Accepts a bare number ('396'),
+    an anchor ('std396' / '#std396'), the id ('v8std_396'), or a search hit's fqn ('its:v8std_396').
+    Returns the standard's title, full text (chunks rejoined), section_path and source_url. Use after
+    search_standards to read a specific standard end-to-end."""
+    with Neo4jStore.from_settings(settings) as store:
+        t = _tenant(ctx)
+        return queries.get_document(store, t, _standard_fqn(standard), shared_tenant_id=_shared(t))
 
 
 # ── search ────────────────────────────────────────────────────────────

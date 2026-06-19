@@ -31,14 +31,15 @@ MCP-сервер, который векторизует конфигурации
 - `chunking.py` — построение чанков; `vectorizer.py` — эмбеддинги; `ingest.py` + `sources/` — мультиисточник.
 - `embeddings/` — провайдеры (`hashing`/`local`/`cloud`) + реранкер + runtime.
 - `storage/neo4j_store.py` — доступ к Neo4j; `queries.py` — поиск/граф/документы.
-- `server.py` — FastMCP-сервер (19 read-only инструментов + `instructions`); `cli.py` — CLI.
+- `server.py` — FastMCP-сервер (21 read-only инструмент + `instructions`); `cli.py` — CLI.
 - `config.py` — настройки; `tenancy.py` — резолв арендатора; `progress.py` — лог прогресса (скорость/%/ETA).
 
-## MCP умеет (read-only, 19 инструментов; детально — [MCP_USAGE.md](MCP_USAGE.md))
+## MCP умеет (read-only, 21 инструмент; детально — [MCP_USAGE.md](MCP_USAGE.md))
 здоровье/контекст (`ping`/`neo4j_health`/`whoami`) · поиск (`hybrid_search`/`semantic_search`) ·
 структура (`list_metadata`/`get_object`/`get_object_properties`) · зависимости (`get_dependencies`/
 `impact_analysis`/`find_type_usages`) · код (`find_handlers`/`find_callers`/`find_callees`/`call_path`) ·
-документация (`find_related_docs`/`get_document`/`docinfo`) · обзор (`metrics`).
+документация (`find_related_docs`/`get_document`/`docinfo`) · стандарты разработки 1С
+(`search_standards`/`get_standard`) · обзор (`metrics`).
 
 ## Как начать сессию (чеклист)
 1. Прочитать [STATE.md](STATE.md) — актуальное состояние, что в Neo4j, ограничения, гочи.

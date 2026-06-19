@@ -57,3 +57,15 @@ def test_rrf_fuse_surfaces_corpus_from_source() -> None:
             "chunk_fqn": "its::a#0", "source": "its", "matched": "методика проведения"}]
     fused = _rrf_fuse([("semantic", sem)], top_k=5)
     assert fused[0]["corpus"] == "its"
+
+
+def test_standard_fqn_normalizes_number_anchor_id_and_fqn() -> None:
+    from onec_vecgraph.server import _standard_fqn
+
+    # bare number, anchor forms, raw id, and an already-qualified fqn all map to 'its:v8std_<n>'
+    assert _standard_fqn("396") == "its:v8std_396"
+    assert _standard_fqn("std440") == "its:v8std_440"
+    assert _standard_fqn("#std412") == "its:v8std_412"
+    assert _standard_fqn("v8std_7") == "its:v8std_7"
+    assert _standard_fqn("its:v8std_396") == "its:v8std_396"  # passthrough
+    assert _standard_fqn("  396  ") == "its:v8std_396"  # trimmed
