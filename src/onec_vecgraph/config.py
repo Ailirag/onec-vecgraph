@@ -116,6 +116,10 @@ class Settings(BaseSettings):
     # Optional path to persist baseline job state across restarts (JSON). Unset → in-process only
     # (status still survives across MCP calls within one running server; lost on restart).
     baseline_jobs_path: str | None = None
+    # Opt-in read-only web dashboard for baseline jobs on the admin server (GET /jobs, /jobs.json).
+    # UNAUTHENTICATED (a browser can't easily send a bearer token) — only expose on loopback or
+    # behind an authenticating proxy. Off by default; the API tools stay token-scoped regardless.
+    admin_dashboard_enabled: bool = False
 
     # Empty env strings (e.g. compose `VAR: "${VAR:-}"`) → None for optional fields, so an
     # unset cloud var doesn't break parsing (e.g. "" is not a valid int for embedding_dimensions).

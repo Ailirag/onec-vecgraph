@@ -145,6 +145,8 @@ services:
       ADMIN_TOKENS: "${ADMIN_TOKENS:-}"
       # Persist job state so `index_job_status` survives a restart (mid-flight jobs → 'failed').
       BASELINE_JOBS_PATH: "/state/baseline_jobs.json"
+      # Read-only web dashboard at /jobs (UNAUTHENTICATED — loopback only). Off by default.
+      ADMIN_DASHBOARD_ENABLED: "${ADMIN_DASHBOARD_ENABLED:-false}"
     volumes:
       - ./data/hf-cache:/models       # reuse the same embedding-model cache as `app`
       - ./data/admin-state:/state     # baseline job state (JSON), persisted across restarts

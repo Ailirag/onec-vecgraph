@@ -158,6 +158,11 @@ class JobStore:
         with self._lock:
             return sum(1 for j in self._jobs.values() if j.status in ACTIVE)
 
+    def list_all(self) -> list[BaselineJob]:
+        """All jobs, newest first (by created_at). Snapshot the copies for read-only display."""
+        with self._lock:
+            return sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
+
     # ── writes ────────────────────────────────────────────────────────
     def add(self, job: BaselineJob) -> None:
         with self._lock:

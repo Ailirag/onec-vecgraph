@@ -203,7 +203,9 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 - `admin_server.py` — FastMCP admin/baseline (opt-in, :8002): `reindex_baseline` (fire-and-poll) +
   `index_job_status` + ping/neo4j_health/whoami. `baseline.py` — драйвер (обёртка index→callgraph→vectorize:
   `validate_reindex_request`/`run_baseline_reindex`/`final_status`, детект `files_missing`/`empty_graph`).
-  `jobs.py` — job-store + single-flight FIFO runner (in-mem + опц. JSON-persist). Контракт — `docs/ORCHESTRATOR_CONTRACT.md §10`.
+  `jobs.py` — job-store + single-flight FIFO runner (in-mem + опц. JSON-persist). `dashboard.py` —
+  read-only веб-дашборд джоб (`GET /jobs` HTML + `/jobs.json`, opt-in `ADMIN_DASHBOARD_ENABLED`, чистые
+  рендер-функции). Контракт — `docs/ORCHESTRATOR_CONTRACT.md §10`.
 - `indexer.py` — `index_dump(..., reset, incremental)` (полный/инкремент).
 - `vectorizer.py` — `vectorize(..., reset, incremental, code)`; `_iter_chunks` (+subsystem/role циклы)/`_iter_code_chunks`.
 - `callgrapher.py` — `build_call_graph(...)`; `_parse_modules` (+manager_index)/`_parse_form_modules`/`_resolve`

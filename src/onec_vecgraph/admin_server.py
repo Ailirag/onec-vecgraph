@@ -15,13 +15,17 @@ serialized server-side (one shared GPU); an admin bearer token authorizes one ba
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__, tenancy
 from .baseline import final_status, run_baseline_reindex, validate_reindex_request
 from .config import get_settings
+from .dashboard import render_page, render_rows
 from .jobs import BaselineJob, BaselineRunner, JobSpec, JobStore
 from .overlay import base_tenant_of
 from .storage import Neo4jStore
@@ -138,6 +142,37 @@ def index_job_status(ctx: Context, job_id: str) -> dict[str, Any]:
     if authorized is not None and base_tenant_of(job.tenant_id) != authorized:
         raise ValueError(f"job {job_id!r} is not under the authorized base")
     return job.snapshot()
+
+
+# ── read-only web dashboard (opt-in: ADMIN_DASHBOARD_ENABLED) ───────────
+def _job_snapshots() -> list[dict[str, Any]]:
+    return [j.snapshot() for j in runner.store.list_all()]
+
+
+@mcp.custom_route("/jobs", methods=["GET"])
+async def jobs_dashboard(request: Request) -> Response:
+    """Read-only HTML dashboard of baseline jobs. `?partial=1` returns just the table body (for the
+    page's live in-place refresh). Disabled (404) unless ADMIN_DASHBOARD_ENABLED=true. Unauthenticated
+    — keep it on loopback / behind an authenticating proxy."""
+    if not settings.admin_dashboard_enabled:
+        return PlainTextResponse("dashboard is disabled (set ADMIN_DASHBOARD_ENABLED=true)", status_code=404)
+    snapshots = _job_snapshots()
+    if request.query_params.get("partial"):
+        return HTMLResponse(render_rows(snapshots))
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return HTMLResponse(render_page(snapshots, generated_at=now, active=runner.store.count_active()))
+
+
+@mcp.custom_route("/jobs.json", methods=["GET"])
+async def jobs_json(request: Request) -> Response:
+    """Machine-readable job list (same data as the dashboard). 404 unless ADMIN_DASHBOARD_ENABLED=true."""
+    if not settings.admin_dashboard_enabled:
+        return JSONResponse({"error": "dashboard disabled"}, status_code=404)
+    return JSONResponse({
+        "jobs": _job_snapshots(),
+        "active": runner.store.count_active(),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    })
 
 
 def run(transport: str = "streamable-http") -> None:

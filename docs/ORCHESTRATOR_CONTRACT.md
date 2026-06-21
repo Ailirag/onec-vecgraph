@@ -278,3 +278,12 @@ baseline_index_url:   "http://host:8002/mcp"   # отдельный порт adm
 
 `ping` (liveness), `neo4j_health` (коннект к Neo4j), `whoami` (резолвнутый `authorized_base` +
 `baseline_reindex_enabled` + число активных джоб) — для readiness-probe и `tools/list`.
+
+### 10.6. Read-only веб-дашборд (опционально)
+
+Лёгкий человекочитаемый статус джоб на том же admin-порту: `GET /jobs` (HTML-таблица с автообновлением
+in-place) и `GET /jobs.json` (та же выборка машиночитаемо: `{jobs:[…snapshot], active, generated_at}`).
+Opt-in `ADMIN_DASHBOARD_ENABLED=true` (иначе оба пути отдают `404`). **Без аутентификации** (браузер не
+шлёт bearer-токен) — включать только на loopback / за аутентифицирующим прокси; MCP-тулы остаются
+токен-скоупленными независимо от дашборда. Это вспомогательный просмотр для оператора — основной UI
+(кнопки/расписание) остаётся на стороне оркестратора.
