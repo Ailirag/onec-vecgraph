@@ -116,6 +116,32 @@ baseline (overlay векторизуется той же моделью). Чте
 (графовые инструменты принимают `overlay_tenant_id`) — см. [OVERLAY.md](OVERLAY.md). Полный контракт
 интеграции (аргументы `index_overlay`, формат ответа, правила чтения) — [ORCHESTRATOR_CONTRACT.md](ORCHESTRATOR_CONTRACT.md).
 
+### 4.2. Admin/baseline-реиндекс сервер (полная (пере)индексация тенанта, opt-in)
+
+Чтобы оркестратор мог **запускать и мониторить полный baseline-реиндекс** (`index` → `callgraph` →
+`vectorize`) из UI, не заходя в контейнер, есть третий эндпоинт: сервис `app-admin` под **профилем**
+`baseline-admin` — тот же образ, команда `serve-admin`, порт **8002**. Инструменты: `reindex_baseline`
+(fire-and-poll — сразу возвращает `job_id`, работа уходит в фон) и `index_job_status` (поллинг фаз/счётчиков),
+плюс `ping`/`neo4j_health`/`whoami` для readiness-probe. По умолчанию **не поднимается**.
+
+```bash
+# read-сервер + admin/baseline вместе
+docker compose --profile baseline-admin up -d --build
+```
+`.env` для admin-эндпоинта:
+```
+ADMIN_TOKENS=atok=grand-dev-mdm@release       # token=base → запускать baseline можно только тенанта '<base>'
+# ADMIN_MCP_PORT=8002                          # порт admin-сервера
+BASELINE_DUMP_DIR=/host/path/to/erp_xml_dump   # МОНТИРУЕТСЯ как /dumps:ro внутрь контейнера
+```
+`BASELINE_REINDEX_ENABLED=true` и `BASELINE_JOBS_PATH` сервис задаёт сам. **Важно:** baseline-выгрузка
+монтируется read-only (`${BASELINE_DUMP_DIR}:/dumps:ro`); оркестратор в `reindex_baseline` передаёт
+`source`/`roots` как пути **внутри контейнера** (напр. `/dumps/erp`). Рассинхрон host↔container путей не
+роняет прогон, а возвращает терминальный статус `warning` с `files_missing/empty_graph` — это главный
+пилотный сигнал «пустой граф из-за неверного mount». baseline-джобы **сериализуются** на сервере (одна
+зараз — общий GPU). Полный контракт (аргументы, статус-схема, очередь, reset-guard) —
+[ORCHESTRATOR_CONTRACT.md](ORCHESTRATOR_CONTRACT.md). Эмбеддинг-модель/размерность — те же, что у read-сервера.
+
 ---
 
 ## 5. Офлайн-конвейер индексации (в контейнере)

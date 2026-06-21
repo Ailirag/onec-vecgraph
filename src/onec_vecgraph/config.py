@@ -101,10 +101,27 @@ class Settings(BaseSettings):
     # A token may write only to '<base>@task/*'. e.g. WRITE_AUTH_TOKENS="wtok=grand-dev-mdm@release"
     write_auth_tokens: str = ""
 
+    # ── Admin / baseline-reindex endpoint (separate, opt-in; for the orchestrator) ────
+    # A dedicated maintenance MCP server (cli `serve-admin`) exposes `reindex_baseline` (full
+    # index→callgraph→vectorize of a BASELINE tenant, fire-and-poll) + `index_job_status`. Distinct
+    # from overlay write: it writes the baseline tenant '<base>' ITSELF, so it has its own auth map
+    # and runs on its own port. Off unless explicitly enabled.
+    baseline_reindex_enabled: bool = False
+    admin_mcp_port: int = 8002
+    # Token map authorizing BASELINE reindex per base: comma-separated "token=base". A token may
+    # (re)index the baseline tenant '<base>' (owner-of-base). e.g. ADMIN_TOKENS="atok=grand-dev-mdm@release".
+    # The short ADMIN_TOKENS spelling is the documented one (also accepts ADMIN_AUTH_TOKENS).
+    admin_auth_tokens: str = Field(
+        "", validation_alias=AliasChoices("admin_auth_tokens", "admin_tokens"))
+    # Optional path to persist baseline job state across restarts (JSON). Unset → in-process only
+    # (status still survives across MCP calls within one running server; lost on restart).
+    baseline_jobs_path: str | None = None
+
     # Empty env strings (e.g. compose `VAR: "${VAR:-}"`) → None for optional fields, so an
     # unset cloud var doesn't break parsing (e.g. "" is not a valid int for embedding_dimensions).
     @field_validator(
         "embedding_dimensions", "openai_api_key", "openai_base_url", "voyage_api_key",
+        "baseline_jobs_path",
         mode="before",
     )
     @classmethod
@@ -128,8 +145,17 @@ class Settings(BaseSettings):
 
     def write_auth_token_map(self) -> dict[str, str]:
         """Parse write_auth_tokens into {token: base_namespace}; a token may write '<base>@task/*'."""
+        return self._base_token_map(self.write_auth_tokens)
+
+    def admin_auth_token_map(self) -> dict[str, str]:
+        """Parse admin_auth_tokens into {token: base}; a token may baseline-reindex the tenant '<base>'."""
+        return self._base_token_map(self.admin_auth_tokens)
+
+    @staticmethod
+    def _base_token_map(raw: str) -> dict[str, str]:
+        """Parse a comma-separated "token=base" map (shared by write/admin token parsing)."""
         out: dict[str, str] = {}
-        for entry in self.write_auth_tokens.split(","):
+        for entry in raw.split(","):
             entry = entry.strip()
             if not entry or "=" not in entry:
                 continue

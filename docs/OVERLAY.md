@@ -9,6 +9,9 @@
 
 ## Модель
 - **Baseline** `<base>` (напр. `grand-dev-mdm@release`) — полный `index + callgraph + vectorize`, read-only.
+  Индексируется офлайн-CLI **или** оркестратором через отдельный admin-эндпоинт `reindex_baseline`
+  (fire-and-poll, порт 8002) — см. [ORCHESTRATOR_CONTRACT.md §10](ORCHESTRATOR_CONTRACT.md). Этот эндпоинт
+  отделён от overlay-write: overlay пишет per-task дельту, admin (пере)индексирует базу целиком.
 - **Overlay** `<base>@task/<task_id>` — только изменённые/добавленные объекты выгрузки разработчика
   (touched) + tombstones удалённых. Эфемерный, дропается по завершении задачи. Это **обычный tenant**
   в той же Neo4j (ключ `(tenant_id, fqn)`), модель/размерность эмбеддингов общая с baseline.

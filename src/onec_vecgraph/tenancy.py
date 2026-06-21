@@ -113,6 +113,22 @@ def resolve(ctx: object, settings: Settings) -> TenantContext:
     return default_context(settings)
 
 
+def _resolve_base(ctx: object, mapping: dict[str, str], what: str) -> str | None:
+    """Resolve the authorized base namespace for a privileged call from a {token: base} map.
+
+    Returns None when the map is empty (trusted/dev mode); raises if the map is configured but the
+    request carries no matching bearer token. Shared by overlay-write and admin/baseline auth.
+    """
+    if not mapping:
+        return None
+    request = _http_request(ctx)
+    headers = getattr(request, "headers", None) if request is not None else None
+    token = _bearer_token(headers) if headers is not None else None
+    if not token or token not in mapping:
+        raise TenantResolutionError(f"Missing or invalid {what} 'Authorization: Bearer <token>'.")
+    return mapping[token]
+
+
 def resolve_write_base(ctx: object, settings: Settings) -> str | None:
     """Authorized base namespace for an overlay WRITE call (from the write bearer-token map).
 
@@ -120,12 +136,14 @@ def resolve_write_base(ctx: object, settings: Settings) -> str | None:
     write tokens are configured (trusted/dev mode — the caller still confines writes to an overlay
     tenant). Raises if write tokens ARE configured but the request carries no matching one.
     """
-    mapping = settings.write_auth_token_map()
-    if not mapping:
-        return None
-    request = _http_request(ctx)
-    headers = getattr(request, "headers", None) if request is not None else None
-    token = _bearer_token(headers) if headers is not None else None
-    if not token or token not in mapping:
-        raise TenantResolutionError("Missing or invalid write 'Authorization: Bearer <token>'.")
-    return mapping[token]
+    return _resolve_base(ctx, settings.write_auth_token_map(), "write")
+
+
+def resolve_admin_base(ctx: object, settings: Settings) -> str | None:
+    """Authorized base namespace for an ADMIN/baseline-reindex call (from the admin bearer-token map).
+
+    Returns the base tenant the token may baseline-reindex ('<base>' itself — owner-of-base), or None
+    when no admin tokens are configured (trusted/dev mode). Raises if admin tokens ARE configured but
+    the request carries no matching one. Unlike write tokens, this authorizes writing the baseline.
+    """
+    return _resolve_base(ctx, settings.admin_auth_token_map(), "admin")

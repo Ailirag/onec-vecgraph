@@ -117,3 +117,40 @@ services:
       - ./data/hf-cache:/models   # reuse the same embedding-model cache as `app`
     restart: unless-stopped
     # GPU: mirror the `deploy.resources` block from `app` if overlay vectorize needs cu128.
+
+  # Admin / baseline-reindex endpoint — OPT-IN, separate process/port. Exposes `reindex_baseline`
+  # (fire-and-poll full index→callgraph→vectorize of a BASELINE tenant) + `index_job_status`, for the
+  # orchestrator to run/monitor a full reindex without `docker exec`. Off by default — start it with
+  # the `baseline-admin` profile:
+  #   docker compose --profile baseline-admin up -d app-admin
+  # See docs/ORCHESTRATOR_CONTRACT.md. Authorize baseline writes via ADMIN_TOKENS="atok=<base>".
+  app-admin:
+    profiles: ["baseline-admin"]
+    build: *app-build
+    image: onec-vecgraph:local
+    container_name: onec_vecgraph_app_admin
+    command: ["onec-vecgraph", "serve-admin", "--transport", "http"]
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8002:8002"   # admin MCP Streamable HTTP at /mcp
+    environment:
+      <<: *app-environment
+      MCP_PORT: "8000"
+      # Baseline-reindex toggles (same embedding model/provider as the read server — enforced above).
+      BASELINE_REINDEX_ENABLED: "true"
+      ADMIN_MCP_PORT: "${ADMIN_MCP_PORT:-8002}"
+      # token=base; a token may baseline-reindex the tenant '<base>'. Empty → dev mode (no auth).
+      ADMIN_TOKENS: "${ADMIN_TOKENS:-}"
+      # Persist job state so `index_job_status` survives a restart (mid-flight jobs → 'failed').
+      BASELINE_JOBS_PATH: "/state/baseline_jobs.json"
+    volumes:
+      - ./data/hf-cache:/models       # reuse the same embedding-model cache as `app`
+      - ./data/admin-state:/state     # baseline job state (JSON), persisted across restarts
+      # Mount the baseline Configurator XML dump(s) READ-ONLY so reindex_baseline can read them.
+      # The orchestrator passes `source`/`roots` as paths INSIDE the container — keep host↔container
+      # paths in sync. A desync yields an empty-graph 'warning' (the pilot's #1 bug), not a crash.
+      - "${BASELINE_DUMP_DIR:-./data/dumps}:/dumps:ro"
+    restart: unless-stopped
+    # GPU: mirror the `deploy.resources` block from `app` (baseline vectorize is the GPU-heavy step).

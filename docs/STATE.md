@@ -193,10 +193,17 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 
 - `config.py` — Settings (pydantic-settings, .env).
 - `tenancy.py` — TenantContext, `resolve(ctx, settings)` (заголовки→tenant, require_tenant).
-- `cli.py` — Typer: version, health, serve, index, ls, show (+`--detail`), deps, usages, vectorize, search
-  (+`--kind/--chunk-kind/--subsystem/--source/--expand`), **handlers**, **metrics**, **ingest**, callgraph,
-  callers, callees, path, snapshot, snapshot-diff. `_flush_exit()`=os._exit (см. гочи).
-- `server.py` — FastMCP, 21 инструмент (см. п.8), stateless_http.
+- `cli.py` — Typer: version, health, serve, **serve-write**, **serve-admin**, index, ls, show (+`--detail`),
+  deps, usages, vectorize, search (+`--kind/--chunk-kind/--subsystem/--source/--expand`), **handlers**,
+  **metrics**, **ingest**, **index-overlay**, callgraph, callers, callees, path, snapshot, snapshot-diff.
+  `_flush_exit()`=os._exit (см. гочи).
+- `server.py` — FastMCP read-only, 21 инструмент (см. п.8), stateless_http.
+- `write_server.py` — FastMCP overlay-WRITE (opt-in, :8001), единств. тул `index_overlay`; `overlay.py`/
+  `overlay_index.py` — драйвер overlay-дельты; модель — `docs/OVERLAY.md`.
+- `admin_server.py` — FastMCP admin/baseline (opt-in, :8002): `reindex_baseline` (fire-and-poll) +
+  `index_job_status` + ping/neo4j_health/whoami. `baseline.py` — драйвер (обёртка index→callgraph→vectorize:
+  `validate_reindex_request`/`run_baseline_reindex`/`final_status`, детект `files_missing`/`empty_graph`).
+  `jobs.py` — job-store + single-flight FIFO runner (in-mem + опц. JSON-persist). Контракт — `docs/ORCHESTRATOR_CONTRACT.md §10`.
 - `indexer.py` — `index_dump(..., reset, incremental)` (полный/инкремент).
 - `vectorizer.py` — `vectorize(..., reset, incremental, code)`; `_iter_chunks` (+subsystem/role циклы)/`_iter_code_chunks`.
 - `callgrapher.py` — `build_call_graph(...)`; `_parse_modules` (+manager_index)/`_parse_form_modules`/`_resolve`
@@ -340,7 +347,9 @@ uv run onec-vecgraph callers "Модуль.Метод" --tenant-id demo
 # verify-харнес ролевых возможностей: uv run python scripts/verify_demo.py <tenant> → scripts/verify_<tenant>.out.json
 uv run onec-vecgraph snapshot "<путь>" --out snapshots/x.json               # слепок configVersion
 uv run onec-vecgraph snapshot-diff before.json after.json                   # дифф изменений
-uv run onec-vecgraph serve --transport http                                  # MCP по HTTP (:8000/mcp)
+uv run onec-vecgraph serve --transport http                                  # read MCP по HTTP (:8000/mcp)
+OVERLAY_WRITE_ENABLED=true uv run onec-vecgraph serve-write --transport http # overlay-write MCP (:8001/mcp)
+BASELINE_REINDEX_ENABLED=true uv run onec-vecgraph serve-admin --transport http # admin/baseline MCP (:8002/mcp)
 ```
 
 ## 13. Гочи (на чём спотыкались)

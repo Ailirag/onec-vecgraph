@@ -125,6 +125,31 @@ def serve_write(
         raise typer.BadParameter("transport must be 'http' or 'stdio'")
 
 
+@app.command(name="serve-admin")
+def serve_admin(
+    transport: str = typer.Option("http", help="Transport: 'http' (streamable) or 'stdio'."),
+) -> None:
+    """Run the admin/baseline-reindex MCP server (separate endpoint; needs BASELINE_REINDEX_ENABLED=true).
+
+    Exposes reindex_baseline (fire-and-poll full index→callgraph→vectorize of a baseline tenant) +
+    index_job_status, plus ping/neo4j_health/whoami for the orchestrator's readiness probe."""
+    from .admin_server import run
+
+    if transport == "http":
+        s = get_settings()
+        rprint(
+            f"[green]Starting admin/baseline MCP server[/] (streamable-http) on "
+            f"http://{s.mcp_host}:{s.admin_mcp_port}{s.mcp_path}"
+        )
+        if not s.baseline_reindex_enabled:
+            rprint("[yellow]Note:[/] BASELINE_REINDEX_ENABLED is false — reindex_baseline will refuse calls.")
+        run("streamable-http")
+    elif transport == "stdio":
+        run("stdio")
+    else:
+        raise typer.BadParameter("transport must be 'http' or 'stdio'")
+
+
 @app.command()
 def index(
     path: str = typer.Argument(..., help="Path to the 1C Configurator XML dump directory."),
