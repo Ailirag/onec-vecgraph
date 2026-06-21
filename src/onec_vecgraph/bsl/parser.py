@@ -129,7 +129,7 @@ def parse_module(text: str) -> list[Routine]:
                 continue
             decl = _DECL_RE.match(line)
             if decl:
-                keyword, name, rest = decl.group(1), decl.group(2), decl.group(3)
+                keyword, name = decl.group(1), decl.group(2)
                 kind = "Function" if keyword.lower() in ("функция", "function") else "Procedure"
                 export = bool(re.search(r"\)\s*(Экспорт|Export)\b", line, re.IGNORECASE))
                 current = Routine(name=name, kind=kind, export=export, start_line=idx + 1,

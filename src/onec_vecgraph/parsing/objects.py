@@ -6,7 +6,6 @@ from pathlib import Path
 
 from lxml import etree
 
-from . import ns
 from .model import (
     EnumValue,
     Field,
@@ -17,8 +16,8 @@ from .model import (
     RoleRight,
     TabularSection,
 )
-from .ns import MD, PREDEF, ROLES, V8, XR, ln, q, synonym, text
-from .types import TypeRef, parse_type
+from .ns import MD, PREDEF, ROLES, XR, ln, q, synonym, text
+from .types import parse_type
 
 # Object-module files that may sit next to an object as <ObjectDir>/Ext/*.bsl
 _FORM_MODULE = ("Ext", "Form", "Module.bsl")
