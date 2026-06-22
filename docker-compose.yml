@@ -73,7 +73,9 @@ services:
       neo4j:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8000:8000"   # MCP Streamable HTTP at /mcp
+      # Host bind. Default loopback-only; set BIND_HOST=0.0.0.0 (.env) to publish on the LAN
+      # — enable AUTH_ENABLED + AUTH_TOKENS first and open the host firewall. See DEPLOYMENT.md §4.3.
+      - "${BIND_HOST:-127.0.0.1}:8000:8000"   # MCP Streamable HTTP at /mcp
     environment:
       <<: *app-environment
       MCP_PORT: "8000"
@@ -104,7 +106,9 @@ services:
       neo4j:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8001:8001"   # overlay-write MCP Streamable HTTP at /mcp
+      # Independent of BIND_HOST: the write endpoint stays loopback-only unless you explicitly
+      # set WRITE_BIND_HOST=0.0.0.0 (e.g. the orchestrator writes overlays from another host).
+      - "${WRITE_BIND_HOST:-127.0.0.1}:8001:8001"   # overlay-write MCP Streamable HTTP at /mcp
     environment:
       <<: *app-environment
       MCP_PORT: "8000"

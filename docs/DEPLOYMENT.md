@@ -90,8 +90,8 @@ docker compose build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/wh
 ```
 **PowerShell** (если нужен env на одну команду): `$env:TORCH_INDEX_URL="…/cu128"; docker compose up -d --build`.
 
-MCP доступен на `http://127.0.0.1:8000/mcp`. Порт намеренно слушает только loopback —
-наружу публиковать через reverse-proxy с TLS (§8).
+MCP доступен на `http://127.0.0.1:8000/mcp`. Порт намеренно слушает только loopback — для доступа
+с другого ПК в локальной сети см. §4.3; наружу (в интернет) — через reverse-proxy с TLS (§8).
 
 ### 4.1. Overlay-write сервер (per-task дельта разработчика, opt-in)
 
@@ -145,6 +145,37 @@ loopback / за прокси. По умолчанию выключен.
 пилотный сигнал «пустой граф из-за неверного mount». baseline-джобы **сериализуются** на сервере (одна
 зараз — общий GPU). Полный контракт (аргументы, статус-схема, очередь, reset-guard) —
 [ORCHESTRATOR_CONTRACT.md](ORCHESTRATOR_CONTRACT.md). Эмбеддинг-модель/размерность — те же, что у read-сервера.
+
+### 4.3. Доступ по локальной сети (другой ПК как клиент)
+
+По умолчанию compose публикует порт **только на loopback** (`127.0.0.1:8000`) — с других машин сервер
+недоступен. Чтобы открыть его в LAN, нужно сделать три вещи: сменить host-привязку, включить
+аутентификацию и открыть порт в брандмауэре.
+
+1. **Привязать порт к сети.** Host-интерфейс параметризован — в `.env`:
+   ```
+   BIND_HOST=0.0.0.0
+   ```
+   (по умолчанию `127.0.0.1`; внутри контейнера сервер и так слушает `0.0.0.0`). Write-сервер 8001
+   управляется отдельно — `WRITE_BIND_HOST` (оставьте loopback, если overlay пишется локально).
+   **Neo4j (7474/7687) наружу не публикуется** — app ходит в него по внутренней docker-сети.
+2. **Включить bearer-аутентификацию** (обязательно для сети — иначе `X-Tenant-Id` подделывается):
+   ```
+   AUTH_ENABLED=true
+   AUTH_TOKENS=tok_xxx=erp,tok_yyy=ut
+   ```
+   Токен: `python -c "import secrets; print('tok_' + secrets.token_urlsafe(32))"`. Применить: `docker compose up -d`.
+3. **Открыть порт в брандмауэре Windows** (только частная сеть):
+   ```powershell
+   New-NetFirewallRule -DisplayName "onec-vecgraph MCP 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -Profile Private
+   ```
+
+**Подключение с другого ПК.** Узнать IP сервера (`ipconfig` → IPv4, напр. `192.168.1.50`); клиент
+указывает `http://192.168.1.50:8000/mcp` + заголовок `Authorization: Bearer tok_xxx`. Проверка
+доступности: `Test-NetConnection 192.168.1.50 -Port 8000`.
+
+> HTTP по LAN передаёт токены открыто — для недоверенной сети ставьте reverse-proxy с TLS перед `app`
+> и публикуйте только его (§8), оставив `BIND_HOST=127.0.0.1`.
 
 ---
 
