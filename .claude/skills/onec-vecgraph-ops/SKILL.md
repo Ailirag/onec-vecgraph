@@ -16,6 +16,14 @@ description: >-
 
 **Полный плейбук (все команды, edge-cases, reset-семантика):** [docs/OPERATOR_PLAYBOOK.md](../../../docs/OPERATOR_PLAYBOOK.md) — прочитай его перед операторскими действиями. Ниже — критичное инлайн.
 
+## Старт сессии (выполни ПЕРВЫМ — иначе типовые ошибки окружения)
+Свежая сессия PowerShell не настроена (uv не в PATH, консоль cp1251, кеш моделей не задан), а env между вызовами инструментов **не сохраняется** → добавляй префикс в **каждую** команду `uv …`:
+```powershell
+$env:Path="D:\tools\uv;$env:Path"; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $env:PYTHONUTF8='1'; $env:HF_HOME='D:\tools\hf-cache'
+```
+В **git-worktree** `.venv` свой и часто пуст → `program not found`; лечить `uv sync --frozen`. Интерактивно можно один раз прогнать предполёт: `. .\scripts\preflight.ps1 -StartNeo4j`.
+**Полная таблица «симптом → причина → фикс» (uv/кодировка/torch-exit/docker/pytest/VRAM):** [docs/SESSION_BOOTSTRAP.md](../../../docs/SESSION_BOOTSTRAP.md) — открой при любой непонятной ошибке старта.
+
 ## Золотые правила (не нарушать)
 1. **Одна модель/размерность на БД.** `EMBEDDING_PROVIDER`+`MODEL` при `vectorize`/`ingest` = как в `.env` сервера. Смена модели на существующей БД = полный реиндекс всех тенантов.
 2. **Tenant = организация × конфигурация.** Разные конфигурации → разные `--tenant-id`. `config_id` (`base`|`ext:…`) — не изоляция.

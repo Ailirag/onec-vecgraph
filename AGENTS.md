@@ -11,6 +11,14 @@
 - **Запись/управление (индексация, векторизация, загрузка справки) — только через CLI** `uv run onec-vecgraph …`.
 - Окружение: Windows + PowerShell; `uv` для запуска; Neo4j через `docker compose`.
 
+## Старт сессии (выполни ПЕРВЫМ — снимает типовые ошибки окружения)
+Свежая сессия не настроена (uv не в PATH, консоль cp1251, кеш моделей), env между вызовами не сохраняется → префикс в **каждую** команду `uv …`:
+```powershell
+$env:Path="D:\tools\uv;$env:Path"; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $env:PYTHONUTF8='1'; $env:HF_HOME='D:\tools\hf-cache'
+```
+В git-worktree `.venv` свой и часто пуст (`program not found`) → `uv sync --frozen`. Интерактивно: `. .\scripts\preflight.ps1 -StartNeo4j`.
+**Таблица «симптом → причина → фикс» — [docs/SESSION_BOOTSTRAP.md](docs/SESSION_BOOTSTRAP.md)** (открой при любой ошибке старта).
+
 ## Операторские задачи (управление векторизацией)
 **Полный плейбук — [docs/OPERATOR_PLAYBOOK.md](docs/OPERATOR_PLAYBOOK.md). Открой его перед действиями с записью.**
 Критичное инлайн:
