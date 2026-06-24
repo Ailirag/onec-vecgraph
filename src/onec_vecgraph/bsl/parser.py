@@ -18,7 +18,15 @@ _DECL_RE = re.compile(
 )
 _END_RE = re.compile(r"^\s*(КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)\b", re.IGNORECASE)
 _CALL_RE = re.compile(rf"(?:({_IDENT})\s*\.\s*)?({_IDENT})\s*\(")
-_DIRECTIVE_RE = re.compile(r"^\s*&([A-Za-zА-Яа-яЁё]+)")
+# &Directive, optionally with a quoted argument: &Вместо("БазовыйМетод").
+_DIRECTIVE_RE = re.compile(r'^\s*&([A-Za-zА-Яа-яЁё]+)\s*(?:\(\s*"([^"]*)"\s*\))?')
+
+# Extension override annotations (their argument is the borrowed base method they hook). The
+# rest (&НаКлиенте/&НаСервере/…) are compilation-context directives kept in Routine.directive.
+_OVERRIDE_MODES = {
+    "вместо": "Вместо", "перед": "Перед", "после": "После", "изменениеиконтроль": "ИзменениеИКонтроль",
+    "around": "Вместо", "before": "Перед", "after": "После", "changeandvalidate": "ИзменениеИКонтроль",
+}
 _REGION_RE = re.compile(rf"^\s*#(?:Область|Region)\s+({_IDENT})", re.IGNORECASE)
 _REGION_END_RE = re.compile(r"^\s*#(?:КонецОбласти|EndRegion)\b", re.IGNORECASE)
 
@@ -52,6 +60,10 @@ class Routine:
     end_line: int
     region: str | None = None
     directive: str | None = None  # &НаКлиенте / &НаСервере / ... (compilation context)
+    # Extension override annotation: mode (Вместо/Перед/После/ИзменениеИКонтроль) + the borrowed
+    # base method it hooks (e.g. &Вместо("ПередЗаписью") -> ("Вместо", "ПередЗаписью")).
+    override_mode: str | None = None
+    override_target: str | None = None
     calls: list[Call] = field(default_factory=list)
 
 
@@ -108,17 +120,26 @@ def _find_calls(body: str) -> list[Call]:
 def parse_module(text: str) -> list[Routine]:
     clean = strip_comments_strings(text)
     lines = clean.split("\n")
+    # Directives are matched on the RAW line: strip_comments_strings blanks string literals, which
+    # would erase an override annotation's argument (&Вместо("Метод")). Indices stay aligned because
+    # the cleaner preserves newlines. Declarations/calls still use the cleaned text.
+    raw_lines = text.split("\n")
     routines: list[Routine] = []
     current: Routine | None = None
     body_start = 0
     region: str | None = None
     pending_directive: str | None = None
+    pending_override: tuple[str, str | None] | None = None
 
     for idx, line in enumerate(lines):
         if current is None:
-            dm = _DIRECTIVE_RE.match(line)
+            dm = _DIRECTIVE_RE.match(raw_lines[idx])
             if dm:
-                pending_directive = dm.group(1)
+                mode = _OVERRIDE_MODES.get(dm.group(1).lower())
+                if mode:  # override annotation (keeps any compilation directive seen alongside)
+                    pending_override = (mode, dm.group(2))
+                else:
+                    pending_directive = dm.group(1)
                 continue
             rm = _REGION_RE.match(line)
             if rm:
@@ -133,8 +154,11 @@ def parse_module(text: str) -> list[Routine]:
                 kind = "Function" if keyword.lower() in ("функция", "function") else "Procedure"
                 export = bool(re.search(r"\)\s*(Экспорт|Export)\b", line, re.IGNORECASE))
                 current = Routine(name=name, kind=kind, export=export, start_line=idx + 1,
-                                  end_line=idx + 1, region=region, directive=pending_directive)
+                                  end_line=idx + 1, region=region, directive=pending_directive,
+                                  override_mode=pending_override[0] if pending_override else None,
+                                  override_target=pending_override[1] if pending_override else None)
                 pending_directive = None
+                pending_override = None
                 body_start = idx + 1
         else:
             if _END_RE.match(line):

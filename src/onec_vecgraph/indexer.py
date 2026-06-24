@@ -75,37 +75,47 @@ def _index_incremental(root: Path, tenant_id: str, settings: Settings, parts: li
         stored = store.object_versions(tenant_id)
         refs = enumerate_objects(parts)  # (fqn, xml, object_dir, config_id, config_version)
 
-        current_fqns = {ref[0] for ref in refs}
-        # Changed = new object, or configVersion differs. Hashless objects (no configVersion in
-        # ConfigDumpInfo, e.g. nested subsystems) are reindexed only when NEW — otherwise they would
-        # churn on every run (can't be diffed by hash anyway). Aligns with vectorize/callgraph.
-        changed = [
-            ref for ref in refs
-            if (ref[4] is None and ref[0] not in stored)
-            or (ref[4] is not None and stored.get(ref[0]) != ref[4])
-        ]
-        deleted = [fqn for fqn in stored if fqn not in current_fqns]
+        # Group refs by fqn: a borrowed (Adopted) object shares its fqn across parts (base +
+        # extension). If ANY part changed, the FULL object is rebuilt from ALL its parts — reparsing
+        # only the changed extension part would scoped-delete the merged object and lose the
+        # base-contributed sub-nodes (fields/forms/…). For single-part configs this is identical
+        # to the old per-ref behaviour.
+        refs_by_fqn: dict[str, list] = {}
+        for ref in refs:
+            refs_by_fqn.setdefault(ref[0], []).append(ref)
+        current_fqns = set(refs_by_fqn)
 
-        parsed = parse_objects(tenant_id, parts, changed,
-                               progress_label=f"index:{tenant_id} (incr)" if changed else None)
+        # An fqn is changed if any of its parts is new or its configVersion differs. Hashless parts
+        # (no configVersion, e.g. nested subsystems) are reindexed only when NEW (else they'd churn).
+        def _changed(fqn: str, group: list) -> bool:
+            return any(
+                (r[4] is None and fqn not in stored) or (r[4] is not None and stored.get(fqn) != r[4])
+                for r in group
+            )
+        changed_fqns = [fqn for fqn, group in refs_by_fqn.items() if _changed(fqn, group)]
+        deleted = [fqn for fqn in stored if fqn not in current_fqns]
+        changed_refs = [r for fqn in changed_fqns for r in refs_by_fqn[fqn]]
+
+        parsed = parse_objects(tenant_id, parts, changed_refs,
+                               progress_label=f"index:{tenant_id} (incr)" if changed_refs else None)
         graph = build_graph(parsed, config_release=config_release)
 
-        for ref in changed:
-            store.scoped_delete_object(tenant_id, ref[0])
+        for fqn in changed_fqns:
+            store.scoped_delete_object(tenant_id, fqn)
         for fqn in deleted:
             store.delete_object_full(tenant_id, fqn)
 
-        written = store.write_graph(graph) if changed else {"nodes": 0, "edges": 0}
+        written = store.write_graph(graph) if changed_refs else {"nodes": 0, "edges": 0}
         counts = store.counts(tenant_id)
 
     return {
         "mode": "incremental",
         "tenant_id": tenant_id,
         "parts": _parts_summary(parts),
-        "objects_total": len(refs),
-        "changed": len(changed),
+        "objects_total": len(current_fqns),
+        "changed": len(changed_fqns),
         "deleted": len(deleted),
-        "unchanged": len(refs) - len(changed),
+        "unchanged": len(current_fqns) - len(changed_fqns),
         "parse_errors": len(parsed.errors),
         "parse_error_sample": parsed.errors[:10],
         "written": written,

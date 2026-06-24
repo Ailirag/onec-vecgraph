@@ -37,3 +37,35 @@ def test_parse_module_extracts_routines_and_calls() -> None:
     helper = routines["Помощник"]
     assert helper.kind == "Function"
     assert helper.export is False
+
+
+_OVERRIDE_SRC = """
+&НаСервере
+&Вместо("ПередЗаписью")
+Процедура Расш_ПередЗаписью(Отказ)
+    ПроверитьЛимит();
+КонецПроцедуры
+
+&После("ОбработкаПроведения")
+Процедура Расш_ОбработкаПроведения(Отказ, Режим)
+КонецПроцедуры
+
+Процедура Обычная()
+КонецПроцедуры
+"""
+
+
+def test_parse_module_captures_override_annotations() -> None:
+    r = {x.name: x for x in parse_module(_OVERRIDE_SRC)}
+
+    # &Вместо("ПередЗаписью") with a compilation directive alongside: both kept.
+    rep = r["Расш_ПередЗаписью"]
+    assert rep.override_mode == "Вместо"
+    assert rep.override_target == "ПередЗаписью"
+    assert rep.directive == "НаСервере"
+
+    aft = r["Расш_ОбработкаПроведения"]
+    assert aft.override_mode == "После" and aft.override_target == "ОбработкаПроведения"
+
+    # An ordinary routine carries no override annotation.
+    assert r["Обычная"].override_mode is None and r["Обычная"].override_target is None

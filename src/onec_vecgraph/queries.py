@@ -469,6 +469,88 @@ def find_handlers(store, tenant_id: str, q: str) -> dict[str, Any]:
     }
 
 
+def find_overrides(store, tenant_id: str, q: str) -> dict[str, Any]:
+    """Extension overrides of an object's BSL: routines annotated &Вместо/&Перед/&После/
+    &ИзменениеИКонтроль in a borrowed (Adopted) object, each linked to the base method it hooks
+    (OVERRIDES edge). For reviewers/architects auditing how extensions alter base behavior."""
+    head = _resolve(store, tenant_id, q)
+    if head is None:
+        return {"found": False, "query": q}
+    fqn = head["fqn"]
+    rows = store.read(
+        "MATCH (over:Routine {tenant_id: $t})-[o:OVERRIDES]->(base:Routine {tenant_id: $t}) "
+        "WHERE over.object_fqn = $fqn OR base.object_fqn = $fqn "
+        "RETURN o.mode AS mode, over.fqn AS override_routine, over.name AS override_name, "
+        "       base.fqn AS base_routine, base.name AS base_method ORDER BY mode, override_name",
+        t=tenant_id, fqn=fqn,
+    )
+    return {"found": True, "fqn": fqn, "overrides": rows, "count": len(rows)}
+
+
+def _join_code_parts(rows: list[dict]) -> str:
+    """Reconstruct routine source from its code-chunk rows [{fqn, text}]: order by the `#code/N`
+    part index and drop each part's breadcrumb head line (everything up to the first newline).
+    cAST splits on whole lines without truncation, so the concatenation is the verbatim body."""
+    def _part_n(fqn: str) -> int:
+        suffix = fqn.split("#code", 1)[1]
+        return int(suffix[1:]) if suffix.startswith("/") and suffix[1:].isdigit() else 0
+
+    ordered = sorted(rows, key=lambda r: _part_n(r["fqn"]))
+    segments = [r["text"].split("\n", 1)[1] if "\n" in r["text"] else r["text"] for r in ordered]
+    return "\n".join(segments)
+
+
+def _reassemble_source(store, tenant_id: str, routine_fqn: str) -> str | None:
+    """Rebuild a routine's verbatim body from its stored code chunks (`…::Метод#code[/N]`).
+    Returns None if the routine has no code chunks (boilerplate below the threshold, or not vectorized)."""
+    rows = store.read(
+        "MATCH (c:Chunk {tenant_id: $t}) "
+        "WHERE c.chunk_kind = 'code' AND (c.fqn = $base OR c.fqn STARTS WITH $prefix) "
+        "RETURN c.fqn AS fqn, c.text AS text",
+        t=tenant_id, base=f"{routine_fqn}#code", prefix=f"{routine_fqn}#code/",
+    )
+    return _join_code_parts(rows) if rows else None
+
+
+def get_routine_source(store, tenant_id: str, q: str) -> dict[str, Any]:
+    """Source of a BSL routine for agent context, including how extensions alter it. Resolves a
+    routine (fqn | 'Module.Method' | name) and returns its base body PLUS every extension override
+    (&Вместо/&Перед/&После/&ИзменениеИКонтроль) with its mode and source. Reassembled from stored
+    code chunks (no dump files needed at query time). For partially-extended methods this gives the
+    full picture: the base method and each hook — the platform composes them at runtime."""
+    fqns = _resolve_routines(store, tenant_id, q)
+    if not fqns:
+        return {"found": False, "query": q}
+    routines = []
+    for fqn in fqns:
+        meta = store.read(
+            "MATCH (rt:Routine {tenant_id: $t, fqn: $f}) RETURN rt.name AS name, "
+            "rt.object_fqn AS object, rt.module_type AS module_type, rt.entry_point AS entry_point, "
+            "rt.override_mode AS override_mode, rt.override_target AS override_target LIMIT 1",
+            t=tenant_id, f=fqn,
+        )
+        info = meta[0] if meta else {}
+        ov = store.read(
+            "MATCH (over:Routine {tenant_id: $t})-[o:OVERRIDES]->(:Routine {tenant_id: $t, fqn: $f}) "
+            "RETURN o.mode AS mode, over.fqn AS fqn, over.object_fqn AS object ORDER BY o.mode",
+            t=tenant_id, f=fqn,
+        )
+        overrides = [
+            {"mode": r["mode"], "fqn": r["fqn"], "object": r["object"],
+             "extension": r["fqn"].split("@ext:", 1)[1].split("::", 1)[0] if "@ext:" in r["fqn"] else None,
+             "source": _reassemble_source(store, tenant_id, r["fqn"])}
+            for r in ov
+        ]
+        routines.append({
+            "fqn": fqn, "name": info.get("name"), "object": info.get("object"),
+            "module_type": info.get("module_type"), "entry_point": info.get("entry_point"),
+            "override_mode": info.get("override_mode"), "override_target": info.get("override_target"),
+            "source": _reassemble_source(store, tenant_id, fqn),
+            "overrides": overrides, "override_count": len(overrides),
+        })
+    return {"found": True, "query": q, "routines": routines, "count": len(routines)}
+
+
 def find_related_docs(store, tenant_id: str, q: str) -> dict[str, Any]:
     """Documentation (ITS / project artifacts) linked to an object via MENTIONS (explicit/scanned
     fqns) or RELATES_TO (semantic). Answers 'what docs/standards cover this object'."""
@@ -649,6 +731,16 @@ def metrics(store, tenant_id: str, subsystem: str | None = None) -> dict[str, An
         "RETURN rt.entry_point AS entry_point, count(*) AS n ORDER BY n DESC",
         t=tenant_id,
     )
+    by_config = store.read(
+        "MATCH (o:Object {tenant_id: $t}) WHERE coalesce(o.stub, false) = false "
+        "RETURN o.config_id AS config_id, count(*) AS n ORDER BY n DESC",
+        t=tenant_id,
+    )
+    overrides = store.read(  # extension overrides of borrowed objects' BSL (&Вместо/&Перед/…)
+        "MATCH (:Routine {tenant_id: $t})-[r:OVERRIDES]->() "
+        "RETURN r.mode AS mode, count(*) AS n ORDER BY n DESC",
+        t=tenant_id,
+    )
     top_fan_in = store.read(
         "MATCH (caller:Routine {tenant_id: $t})-[:CALLS]->(rt:Routine) "
         "RETURN rt.fqn AS routine, count(DISTINCT caller) AS fan_in ORDER BY fan_in DESC LIMIT 10",
@@ -668,6 +760,8 @@ def metrics(store, tenant_id: str, subsystem: str | None = None) -> dict[str, An
         "code_bytes": code_bytes[0]["b"] if code_bytes else 0,
         "calls_by_kind": calls_by_kind,
         "entry_points": entry_points,
+        "objects_by_config_id": by_config,
+        "extension_overrides": overrides,
         "hotspots": {"top_fan_in": top_fan_in, "top_fan_out": top_fan_out},
     }
 

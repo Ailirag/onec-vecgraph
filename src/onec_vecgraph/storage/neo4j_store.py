@@ -465,6 +465,23 @@ class Neo4jStore:
             written += len(chunk)
         return written
 
+    def write_overrides(self, tenant_id: str, rows: list[dict]) -> int:
+        """OVERRIDES edge: an extension override routine -> the borrowed base routine it hooks
+        (&Вместо/&Перед/&После/&ИзменениеИКонтроль). dst is MERGEd; if the targeted base method
+        wasn't parsed a stub Routine is created so the relationship is still recorded."""
+        query = (
+            "UNWIND $rows AS r "
+            "MATCH (a:Routine {tenant_id: $t, fqn: r.src}) "
+            "MERGE (b:Routine {tenant_id: $t, fqn: r.dst}) "
+            "  ON CREATE SET b.stub = true, b.name = r.target_name "
+            "MERGE (a)-[o:OVERRIDES]->(b) SET o.mode = r.mode"
+        )
+        written = 0
+        for chunk in _chunks(rows, 2000):
+            self.write(query, t=tenant_id, rows=chunk)
+            written += len(chunk)
+        return written
+
     def routine_modules(self, tenant_id: str, only: list[str] | None = None) -> list[dict[str, Any]]:
         return self.read(
             "MATCH (o:Object {tenant_id: $t})-[:HAS_MODULE]->(m:Module) "

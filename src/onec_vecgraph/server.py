@@ -47,7 +47,9 @@ WHICH TOOL (by need):
   Posting, CodeLength, Periodicity, lock mode, ...) → get_object_properties or get_object(detail=True).
 • Relationships → get_dependencies / impact_analysis (who breaks if it changes) / find_type_usages.
 • Behavior & code → find_handlers (what runs on posting/writing/validation + form events),
-  find_callers / find_callees / call_path (BSL call graph).
+  find_callers / find_callees / call_path (BSL call graph), find_overrides (how extensions alter
+  a borrowed object's BSL via &Вместо/&Перед/&После/&ИзменениеИКонтроль), get_routine_source
+  (full source of a method + its extension overrides, as agent context).
 • Documentation → search with source=['its'|'artifact'] (1C ITS / project docs, if ingested);
   find_related_docs (docs linked to an object) / get_document (full doc by fqn). Search hits carry
   a 'corpus' field; filter by source to keep config and docs separate.
@@ -398,6 +400,29 @@ def find_handlers(ctx: Context, query: str) -> dict[str, Any]:
     Answers 'what runs when this is posted/written/validated' and 'which form events exist'."""
     with Neo4jStore.from_settings(settings) as store:
         return queries.find_handlers(store, _tenant(ctx), query)
+
+
+@mcp.tool()
+def find_overrides(ctx: Context, query: str) -> dict[str, Any]:
+    """How extensions alter an object's BSL: routines annotated &Вместо/&Перед/&После/
+    &ИзменениеИКонтроль in a borrowed (Adopted) object, each linked to the base method it hooks.
+    Returns overrides:[{mode, override_routine, override_name, base_routine, base_method}]. For
+    reviewers/architects auditing extension impact on base behavior. Requires the call graph."""
+    with Neo4jStore.from_settings(settings) as store:
+        return queries.find_overrides(store, _tenant(ctx), query)
+
+
+@mcp.tool()
+def get_routine_source(ctx: Context, query: str) -> dict[str, Any]:
+    """Source code of a BSL routine for agent context — base body PLUS every extension override.
+    query = routine fqn | 'Module.Method' | 'Object.Method' | method name. Returns routines:[{fqn,
+    name, object, module_type, entry_point, source, overrides:[{mode, extension, fqn, source}]}],
+    where overrides are the extension hooks (&Вместо/&Перед/&После/&ИзменениеИКонтроль) that alter
+    this method — so a partially-extended method comes back with the base and all hooks together.
+    Reassembled from the indexed code chunks; requires the configuration to have been vectorized
+    with code (`vectorize --code`)."""
+    with Neo4jStore.from_settings(settings) as store:
+        return queries.get_routine_source(store, _tenant(ctx), query)
 
 
 def run(transport: str = "streamable-http") -> None:

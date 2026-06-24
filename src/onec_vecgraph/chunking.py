@@ -66,6 +66,7 @@ KIND_RU = {
     "Task": "Задача",
     "Subsystem": "Подсистема",
     "Role": "Роль",
+    "CommonForm": "Общая форма",
     "DocumentJournal": "Журнал документов",
     "DefinedType": "Определяемый тип",
     "EventSubscription": "Подписка на событие",
@@ -260,12 +261,20 @@ def code_chunks(routine: Any, raw_text: str, ctx: dict[str, Any]) -> list[Chunk]
 
     owner_syn = _clean(ctx.get("owner_syn")) or ctx["owner_name"]
     head = f"{kind_ru(ctx['owner_kind'])} «{owner_syn}»"
-    if ctx.get("form_name"):
+    if ctx.get("owner_kind") == "CommonForm":
+        pass  # standalone form: head already names it; no "▸ форма" / "▸ FormModule"
+    elif ctx.get("form_name"):
         head += f" ▸ форма «{ctx['form_name']}»"
     elif ctx.get("module_type"):
         head += f" ▸ {ctx['module_type']}"
+    # Extension override provenance: this routine lives in a borrowed object's @ext-qualified module.
+    mod_cfg = ctx.get("module_config_id") or ""
+    if mod_cfg.startswith("ext:"):
+        head += f" ▸ расширение «{mod_cfg[4:]}»"
     directive = f"{routine.directive} " if getattr(routine, "directive", None) else ""
     sig = f"{directive}{routine.kind} {routine.name}"
+    if getattr(routine, "override_mode", None):
+        sig += f" [{routine.override_mode} «{routine.override_target}»]"
     if handler:
         sig += f" (обработчик {handler['event']} элемента {handler.get('element') or 'формы'})"
     if entry_point:
@@ -298,7 +307,11 @@ def code_chunks(routine: Any, raw_text: str, ctx: dict[str, Any]) -> list[Chunk]
 
 def form_chunk(row: dict[str, Any]) -> Chunk:
     owner_syn = _clean(row.get("owner_syn")) or row["owner_name"]
-    text = f"{kind_ru(row['owner_kind'])} «{owner_syn}» ▸ форма «{row['form_name']}»"
+    if row["owner_kind"] == "CommonForm":
+        # Standalone form (no owning object): don't imply an owner ▸ subform relation.
+        text = f"{kind_ru('CommonForm')} «{owner_syn}» ({row['form_name']})"
+    else:
+        text = f"{kind_ru(row['owner_kind'])} «{owner_syn}» ▸ форма «{row['form_name']}»"
     ftext = _clean(row.get("form_text"))
     if ftext:
         text += f". {ftext}"

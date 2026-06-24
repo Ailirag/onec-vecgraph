@@ -317,6 +317,34 @@ find_type_usages, **find_related_docs** (доки по объекту), **get_do
 `docs/INCREMENTAL_TEST_PLAN.md` — РАУНД 1 (13 кейсов) ВЫПОЛНЕН и проверен (см. п.9, T-CODE-OBJ ✓,
 инкремент идемпотентен после фиксов). РАУНД 2 (added/deleted/rename — кейсы 15–17) НЕ проводился.
 
+### 11.3. Роадмап развития (`PLAN.md` §17)
+- **R1 — покрытие модификаций заимствованных объектов расширением**: переопределения модулей
+  (`&Вместо/&ИзменениеИКонтроль`), изменённые формы/свойства заимствованных объектов сейчас теряются
+  (схлопывание по `fqn`, база побеждает). План: квалифицировать `config_id`'ом `fqn` суб-артефактов
+  Adopted-объекта в `graph/builder.py` (один Object-узел, инвариант цел) + рёбра `OVERRIDES` из аннотаций.
+- **R2 — поддержка формата 1C:EDT**: иная сериализация той же модели → формат-агностичный ридер
+  (`configurator`|`edt`) → единый `ParsedConfig`. Полигон: УТ в EDT `H:\Гранд трейд\gitlab\ones\ut`
+  (`conf/` + расширения `ДИТ_*` с сотнями реальных override) — он же валидация R1. Ключевые отличия EDT:
+  `.mdo` (ns `g5.1c.ru/.../mdclass`), модули без `Ext/`, формы `.form`, **нет `ConfigDumpInfo`** (инкремент
+  по content-hash/git), расширения — отдельные EDT-проекты. R1↔R2 ведутся связанной итерацией.
+  **РЕАЛИЗОВАНО R1.1–R1.4 + R2.1–R2.5** (детали — `PLAN.md` §17): формат-агностичный шов
+  (`parsing/detect.py`+`parsing/dispatch.py`, `ConfigPart.fmt`, `indexer.py` не менялся) + пакет
+  `parsing/edt/` (`ns`/`objects`/`reader`/`forms`); R1.1 квалификация `@config_id` суб-артефактов
+  заимствованных в `graph/builder.py`; R1.2 рёбра `OVERRIDES` (bsl-парсер аннотаций + `find_overrides`)
+  + **`get_routine_source`** (исходник метода+override-хуков для контекста агента, из code-чанков) →
+  **23 MCP-инструмента**; R1.3 `metrics` base/ext + пометка origin в code-чанках; R1.4 инкремент по `fqn`
+  (фикс порчи: reparse только ext-части терял базовые суб-узлы); R2.4 формы `.form`; R2.5 Predefined +
+  инкремент. Тесты `tests/test_edt.py` (12)+`test_bsl`+`test_callgraph`+`test_chunking`+`test_common_forms`,
+  всего **123 зелёных**, Конфигуратор не сломан.
+  **Полный конвейер на тенанте `ut_edt`** (УТ-EDT: база `УправлениеТорговлей` + `ДИТ_ПретензииMMBI`/
+  `ДИТ_РасширениеАдаптацияУТ`): index 16 886 объектов→97 054 узла/211 450 рёбер (Detail 11 455, Predefined
+  3 481, +407 override-модулей); callgraph 121 868+127 821 рутин, calls 474 465, **OVERRIDES 1 441**,
+  **HANDLES 42 322**; vectorize **Qwen3 1024** (71 753 чанка). Симуляция 7 ролей оркестратора пройдена
+  (BA/SA/dev/architect/reviewer→`find_overrides`/teamlead/tester→719 form-handlers). **NB:** venv worktree
+  без torch/`.env` → dev-`hashing`(256); фикс `uv sync --extra local-embeddings --frozen`+явные
+  `EMBEDDING_*`; глобальный vector-индекс 1024 — заливать EDT той же моделью. Остатки: устранение «флика»
+  заимствованных fqn в инкременте (комбинированная версия на fqn, TODO #5; данные идемпотентны).
+
 ## 12. Базовые команды (PowerShell, с префиксом PATH)
 
 ```powershell

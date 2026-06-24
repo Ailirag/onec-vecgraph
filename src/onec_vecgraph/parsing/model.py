@@ -129,6 +129,7 @@ class ConfigPart:
     name_prefix: str = ""
     uuid: str | None = None
     synonym: str = ""
+    fmt: str = "configurator"  # source format: 'configurator' (XML dump) | 'edt'
 
 
 @dataclass
