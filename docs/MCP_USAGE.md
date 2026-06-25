@@ -65,8 +65,9 @@ onec-vecgraph serve --transport stdio
 | Слой | Чем строится | Нужен для инструментов |
 |---|---|---|
 | Граф метаданных + `:Detail` | `index` | list_metadata, get_object, get_object_properties, get_dependencies, impact_analysis, find_type_usages |
-| Векторы/чанки | `vectorize` (+`--code`) | semantic_search, hybrid_search |
-| Граф вызовов BSL | `callgraph` | find_callers, find_callees, call_path, find_handlers, и `entry_points`/`calls_by_kind` в metrics |
+| Векторы/чанки | `vectorize` | semantic_search, hybrid_search |
+| Код-чанки (исходники рутин) | `vectorize --code` | search по `chunk_kinds=['code']`, **`get_routine_source`** |
+| Граф вызовов BSL | `callgraph` | find_callers, find_callees, call_path, find_handlers, **find_overrides**, `entry_points`/`calls_by_kind` в metrics |
 | Doc-корпуса (ИТС / артефакты) | `ingest` | search с `source=['its'\|'artifact']`, find_related_docs, get_document |
 | Справка платформы (`.hbk`) | `ingest-help` (CLI оператора) | search с `source=['platform_help']`, **`docinfo`**, get_document; читается из общего тенанта |
 
@@ -121,9 +122,24 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 **Граф вызовов `CALLS`**: `kind` ∈ `local` / `common_module` / `manager`; `confidence` ∈ `high` / `medium`.
 Неразрешённые вызовы (платформенные, через переменную-объект) в граф НЕ пишутся.
 
+**Расширения конфигурации (`config_id` / заимствованные объекты / `OVERRIDES`).** База и её расширения
+живут в **одном тенанте** одной развёрнутой конфигурации; провенанс — поле `config_id` (`base` |
+`ext:<Имя>`), это **не** граница изоляции (изоляция — только тенант). Что важно знать потребителю:
+- **Заимствованный (Adopted) объект** расширения сохраняет базовый `fqn` (напр. `Catalog.Контрагенты`) —
+  это один объект-узел. Добавленные расширением реквизиты/формы прицепляются к нему (видны в `get_object`).
+- **Переопределения BSL** расширения — это **отдельные рутины** с fqn `<модуль>@ext:<config>::<Метод>`
+  (напр. `…Module@ext:ДИТ_РасширениеАдаптацияУТ::ДИТ_ПриЗаписи`), связанные с базовым методом ребром
+  `OVERRIDES` с полем **`mode`** ∈ `Вместо` / `Перед` / `После` / `ИзменениеИКонтроль`.
+- Спросить «что меняют расширения у объекта» → **`find_overrides`**; получить исходник метода с учётом
+  расширений → **`get_routine_source`**. Код переопределений индексируется и ищется как обычный код-чанк
+  (в тексте помечен «▸ расширение «<Имя>»» и `[<mode> «<БазовыйМетод>»]`).
+
+**Формат выгрузки прозрачен.** Инструменты, fqn и словари **одинаковы** для конфигураций из Конфигуратора
+(XML-выгрузка) и из **1С:EDT** — формат определяется при индексации; потребителю он не виден.
+
 ---
 
-## 4. Карта инструментов по потребности (19)
+## 4. Карта инструментов по потребности (23)
 
 ### Здоровье / контекст
 - **`ping`** — живость сервера (имя/версия).
@@ -183,6 +199,16 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 - **`find_callers(query)`** / **`find_callees(query)`** — кто вызывает рутину / что вызывает рутина.
 - **`call_graph(query)`** — объединённо `{callers, callees}` вокруг рутины.
 - **`call_path(from_routine, to_routine)`** — кратчайший путь вызовов между двумя рутинами.
+- **`find_overrides(query)`** — как **расширения** меняют BSL объекта: рутины-перехватчики
+  (`&Вместо`/`&Перед`/`&После`/`&ИзменениеИКонтроль` в заимствованном объекте), каждая связана с базовым
+  методом. Возврат `overrides:[{mode, override_routine, override_name, base_routine, base_method}]`.
+  Для ревью/архитектора: «что и как расширение меняет в базовом поведении».
+- **`get_routine_source(query)`** — **исходник метода как контекст для агента**: тело базовой рутины
+  **плюс все override-хуки расширений** (с режимом и исходником). `query` = fqn рутины / `Модуль.Метод` /
+  `Объект.Метод` / имя. Возврат `routines:[{fqn, name, object, module_type, entry_point, source,
+  overrides:[{mode, extension, fqn, source}]}]`. Для частично расширённого метода возвращает базу и все
+  хуки вместе (платформа собирает их в рантайме — «слитого» текста не существует).
+  **Требует `vectorize --code`** (исходник собирается из code-чанков; без них `source=null`).
 
 ### Overlay (baseline + рабочая копия задачи) — Phase 2
 Графовые инструменты `get_dependencies` / `impact_analysis` / `find_callers` / `find_callees` / `call_graph`
@@ -228,6 +254,16 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 **«Обзор подсистемы Продажи»**
 1. `metrics(subsystem="Продажи")` — состав/объём/хотспоты.
 2. `hybrid_search("…", subsystem="Продажи")` — поиск в пределах подсистемы.
+
+**«Дать агенту исходник метода как контекст (с учётом расширений)»**
+1. `get_routine_source("Документы.РеализацияТоваров.ПередЗаписью")` (или fqn рутины) → `source` базы +
+   `overrides:[{mode, extension, source}]` (хуки `&Вместо`/`&Перед`/`&После`/`&ИзменениеИКонтроль`).
+2. Передать агенту базу и хуки вместе — он видит, что делает метод и как его меняют расширения.
+   (Нужен `vectorize --code`; иначе `source=null` — постройте код-чанки.)
+
+**«Что меняют расширения в объекте/методе (ревью)»**
+1. `find_overrides("Catalog.Контрагенты")` → список перехватов (mode + базовый метод + рутина расширения).
+2. `get_routine_source(<base_routine из шага 1>)` → полные тексты базы и каждого хука.
 
 ---
 

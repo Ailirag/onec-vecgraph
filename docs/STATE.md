@@ -246,7 +246,7 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   runtime (кэш провайдера/реранкера).
 - `bsl/parser.py` — чистый Python BSL-парсер: процедуры/функции, export, region, **directive**, вызовы.
 
-## 8. MCP-инструменты (21)
+## 8. MCP-инструменты (23)
 
 > Консьюмер-гайд (подключение/заголовки/fqn/словари/карта инструментов/сценарии): `docs/MCP_USAGE.md`.
 > Сервер отдаёт тот же overview клиенту в `instructions` (FastMCP) при `initialize` — `server.INSTRUCTIONS`.
@@ -255,7 +255,10 @@ ping, neo4j_health, whoami, list_metadata, get_object (+`detail`), **get_object_
 (полный сырой набор `<Properties>` из `:Detail`), get_dependencies, impact_analysis,
 find_type_usages, **find_related_docs** (доки по объекту), **get_document** (документ по fqn),
 **docinfo** (синтаксис-помощник: точный лукап по имени, версионный), semantic_search, hybrid_search,
-**metrics** (инвентарь/хотспоты), find_callers, find_callees, call_path, **find_handlers** (обработчики форм+модулей),
+**metrics** (инвентарь/хотспоты; +base/ext разрез `objects_by_config_id`/`extension_overrides`),
+find_callers, find_callees, call_path, **find_handlers** (обработчики форм+модулей),
+**find_overrides** (переопределения расширений объекта: `&Вместо/&Перед/&После/&ИзменениеИКонтроль`→базовый метод),
+**get_routine_source** (исходник метода для контекста агента: тело базы + override-хуки расширений, из code-чанков),
 **search_standards** (поиск по стандартам разработки v8std) / **get_standard** (полный текст стандарта по номеру/id).
 `semantic_search`/`hybrid_search` принимают `source`/`platform_version`/`kinds`/`chunk_kinds`/`subsystem`/`doc_topic`/`corpus_version`/`help_kind`/`expand`.
 `search_standards`/`get_standard` — обёртки над `hybrid_search`/`get_document`, привязанные к `corpus_version="platform:v8std"` в общем тенанте (настройки `standards_corpus_version`/`standards_id_prefix`).
