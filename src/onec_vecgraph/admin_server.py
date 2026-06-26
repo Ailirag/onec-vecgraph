@@ -33,17 +33,18 @@ from .storage import Neo4jStore
 settings = get_settings()
 
 ADMIN_INSTRUCTIONS = """\
-onec-vecgraph ADMIN / BASELINE-REINDEX endpoint — separate from the read-only query server and the
-overlay-write server. Use it to (re)build a full BASELINE tenant from a Configurator XML dump.
+onec-vecgraph эндпоинт ADMIN / BASELINE-РЕИНДЕКСА — отдельный от read-only сервера запросов и сервера
+overlay-записи. Используется для (пере)сборки полного БАЗОВОГО арендатора из XML-выгрузки Конфигуратора.
 
-`reindex_baseline(tenant_id, source|roots, options?)` runs index → callgraph → vectorize in the
-background and returns a `job_id` immediately (fire-and-poll). Poll `index_job_status(job_id)` for
-phase/counts/summary until status is terminal (succeeded | warning | failed). A missing/empty dump
-path or a zero-object index comes back as `warning` with files_missing/empty_graph set — treat it as
-a failed mount, NOT a success. Baseline jobs are serialized (one runs at a time; others queue; a
-second job for the same tenant is rejected with the active job_id). `reset:true` (full wipe) requires
-options.confirm_reset:true. Requires BASELINE_REINDEX_ENABLED=true; the bearer token (ADMIN_TOKENS)
-authorizes one base tenant. Index OVERLAYS via the write server's index_overlay, not here."""
+`reindex_baseline(tenant_id, source|roots, options?)` запускает index → callgraph → vectorize в фоне и
+немедленно возвращает `job_id` (fire-and-poll). Опрашивайте `index_job_status(job_id)` на
+фазу/счётчики/сводку, пока статус не станет терминальным (succeeded | warning | failed).
+Отсутствующий/пустой путь выгрузки или индекс с нулём объектов возвращается как `warning` с
+установленными files_missing/empty_graph — трактуйте как несмонтированный том, НЕ как успех.
+Baseline-джобы сериализуются (одновременно выполняется одна; остальные в очереди; вторая джоба для того
+же арендатора отклоняется с активным job_id). `reset:true` (полная очистка) требует
+options.confirm_reset:true. Требует BASELINE_REINDEX_ENABLED=true; bearer-токен (ADMIN_TOKENS)
+авторизует один базовый арендатор. Индексируйте OVERLAY'и через index_overlay сервера записи, не здесь."""
 
 mcp = FastMCP(
     "onec-vecgraph-admin",
@@ -69,20 +70,23 @@ runner = BaselineRunner(JobStore(settings.baseline_jobs_path), execute=_execute,
 
 
 # ── health / introspection (readiness probe) ───────────────────────────
-@mcp.tool()
+@mcp.tool(description="""\
+Проверка живости сервера. Возвращает имя и версию сервера.""")
 def ping() -> dict[str, Any]:
     """Liveness check. Returns server name and version."""
     return {"status": "ok", "server": "onec-vecgraph-admin", "version": __version__}
 
 
-@mcp.tool()
+@mcp.tool(description="""\
+Проверка доступности Neo4j: возвращает редакцию сервера и число узлов.""")
 def neo4j_health() -> dict[str, Any]:
     """Check Neo4j connectivity and report server edition and node count."""
     with Neo4jStore.from_settings(settings) as store:
         return store.health()
 
 
-@mcp.tool()
+@mcp.tool(description="""\
+Сообщает базу, которую этот токен может реиндексировать (None в dev/без-токена режиме), и флаги сервера.""")
 def whoami(ctx: Context) -> dict[str, Any]:
     """Report the base this token may baseline-reindex (None in dev/no-token mode) and server flags."""
     base = tenancy.resolve_admin_base(ctx, settings)
@@ -94,7 +98,21 @@ def whoami(ctx: Context) -> dict[str, Any]:
 
 
 # ── baseline reindex (fire-and-poll) ────────────────────────────────────
-@mcp.tool()
+@mcp.tool(description="""\
+Запустить полный БАЗОВЫЙ (пере)индекс `tenant_id` и немедленно вернуть хэндл джобы.
+
+Выполняет index → callgraph → vectorize в фоне (часы на масштабе ERP) — опрашивайте возвращённый
+`job_id` через `index_job_status`. Укажите каталог выгрузки как `source` (предпочтительно) или `roots`
+(используется первый элемент; сама выгрузка обнаруживает базу + расширения). `options`:
+{steps:["index","callgraph","vectorize"], reset:false, confirm_reset:false, batch_size?,
+embedding_model?}.
+
+Возвращает {accepted:true, job_id, status, queue_position} при приёме, либо {accepted:false,
+rejected:true, active_job_id}, если у этого арендатора уже есть активная джоба (опрашивайте её).
+
+Требует BASELINE_REINDEX_ENABLED=true; bearer-токен (ADMIN_TOKENS) должен авторизовать базу `tenant_id`.
+`tenant_id` должен быть БАЗОВЫМ арендатором (overlay'и идут через index_overlay). `reset:true` требует
+options.confirm_reset:true. Ошибки возвращаются как MCP isError.""")
 def reindex_baseline(
     ctx: Context,
     tenant_id: str,
@@ -127,7 +145,13 @@ def reindex_baseline(
     return runner.submit(spec)
 
 
-@mcp.tool()
+@mcp.tool(description="""\
+Статус джобы базового (пере)индекса: {status, phase, counts{objects,nodes,edges,routines,chunks},
+percent, queue_position, started_at, finished_at, error, embedding_model, embedding_dim, files_missing,
+empty_graph, summary}. Опрашивайте, пока статус не станет терминальным (succeeded|warning|failed). Джоба
+в очереди сообщает свою позицию; warning означает files_missing/empty_graph (несмонтированный том).
+
+Admin-токен (если настроен) может читать только джобы под своей авторизованной базой.""")
 def index_job_status(ctx: Context, job_id: str) -> dict[str, Any]:
     """Status of a baseline (re)index job: {status, phase, counts{objects,nodes,edges,routines,
     chunks}, percent, queue_position, started_at, finished_at, error, embedding_model, embedding_dim,

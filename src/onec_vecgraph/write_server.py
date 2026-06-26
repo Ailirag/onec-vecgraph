@@ -20,13 +20,14 @@ from .overlay_index import index_overlay as _run_index_overlay
 settings = get_settings()
 
 WRITE_INSTRUCTIONS = """\
-onec-vecgraph OVERLAY-WRITE endpoint — separate from the read-only query server (hybrid_search etc).
+onec-vecgraph эндпоинт OVERLAY-ЗАПИСИ — отдельный от read-only сервера запросов (hybrid_search и т.д.).
 
-Single tool `index_overlay`: (re)index a per-task overlay delta — the touched objects of a developer's
-1C XML working tree — into an ephemeral overlay tenant '<base>@task/<task_id>', and tombstone deletions.
-The query server merges baseline ∪ overlay at query time (overlay wins per object; tombstones mask
-deletions). Writes are confined to overlay tenants; the bearer token authorizes one base namespace.
-Index/vectorize the BASELINE tenant via the CLI, not here."""
+Единственный инструмент `index_overlay`: (пере)индексировать дельту overlay-задачи — затронутые объекты
+рабочего дерева 1С XML разработчика — в эфемерный overlay-арендатор '<base>@task/<task_id>', и пометить
+удаления tombstone'ами. Сервер запросов сливает baseline ∪ overlay во время запроса (overlay выигрывает
+по объекту; tombstone'ы маскируют удаления). Запись ограничена overlay-арендаторами; bearer-токен
+авторизует одно базовое пространство имён. Индексируйте/векторизуйте БАЗОВЫЙ арендатор через CLI, а не
+здесь."""
 
 mcp = FastMCP(
     "onec-vecgraph-write",
@@ -38,7 +39,18 @@ mcp = FastMCP(
 )
 
 
-@mcp.tool()
+@mcp.tool(description="""\
+Инкрементально индексировать дельту overlay-задачи в overlay-арендатор ('<base>@task/<task_id>').
+
+Индексирует ТОЛЬКО `files` (затронутые объекты dev XML-дерева) — без сброса baseline — обновляя
+граф/код-чанки и эмбеддинги той же моделью, что и baseline, и пишет tombstone'ы для `deleted`, чтобы
+граф-запросы Phase-2 могли маскировать удалённые объекты baseline. `files`: [{key, path, kind?, name?}];
+`deleted`: ключи объектов; `options`: {build_graph, vectorize} (по умолчанию оба true). Возвращает
+структурированную сводку (indexed_objects, deleted, chunks, embedding_model/dim, unresolved).
+
+Требует OVERLAY_WRITE_ENABLED=true; bearer-токен должен авторизовать базовое пространство имён
+`tenant_id`. Ошибки (выключено, не авторизовано, не-overlay арендатор, проблемы парсинга/размерности)
+возвращаются как MCP isError.""")
 def index_overlay(
     ctx: Context,
     tenant_id: str,
