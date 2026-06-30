@@ -469,33 +469,37 @@ def find_handlers(store, tenant_id: str, q: str) -> dict[str, Any]:
     }
 
 
-def find_related_docs(store, tenant_id: str, q: str) -> dict[str, Any]:
+def find_related_docs(store, tenant_id: str, q: str, source: str | None = None) -> dict[str, Any]:
     """Documentation (ITS / project artifacts) linked to an object via MENTIONS (explicit/scanned
-    fqns) or RELATES_TO (semantic). Answers 'what docs/standards cover this object'."""
+    fqns) or RELATES_TO (semantic). Answers 'what docs/standards cover this object'.
+    Optional `source` ('its' | 'artifact') restricts results to one corpus."""
     head = _resolve(store, tenant_id, q)
     if head is None:
         return {"found": False, "query": q}
     docs = store.read(
         "MATCH (d)-[r:MENTIONS|RELATES_TO]->(o:Object {tenant_id: $t, fqn: $fqn}) "
-        "WHERE d:Document OR d:Artifact "
+        "WHERE (d:Document OR d:Artifact) AND ($src IS NULL OR d.source = $src) "
         "RETURN d.fqn AS fqn, labels(d)[0] AS label, d.source AS source, d.title AS title, "
         "       d.source_url AS source_url, type(r) AS rel, r.confidence AS confidence "
         "ORDER BY rel, confidence DESC, title",
-        t=tenant_id, fqn=head["fqn"],
+        t=tenant_id, fqn=head["fqn"], src=source,
     )
     return {"found": True, "fqn": head["fqn"], "docs": docs, "count": len(docs)}
 
 
-def get_document(store, tenant_id: str, fqn: str, shared_tenant_id: str | None = None) -> dict[str, Any]:
+def get_document(store, tenant_id: str, fqn: str, shared_tenant_id: str | None = None,
+                 source: str | None = None) -> dict[str, Any]:
     """Full document by owner fqn (e.g. 'its:art-1' / 'platform_help:8.3.27|Массив.Найти'):
     metadata, full text (chunks rejoined), and the config objects it links to. Resolves in the
-    caller tenant + the shared public tenant (so platform/BSP help docs are reachable)."""
+    caller tenant + the shared public tenant (so platform/BSP help docs are reachable).
+    Optional `source` ('its' | 'artifact' | 'platform_help') guards the lookup to one corpus."""
     tenants = [tenant_id] + ([shared_tenant_id] if shared_tenant_id and shared_tenant_id != tenant_id else [])
     rows = store.read(
         "MATCH (d {fqn: $fqn}) WHERE d.tenant_id IN $tenants AND (d:Document OR d:Artifact) "
+        "  AND ($src IS NULL OR d.source = $src) "
         "RETURN d.tenant_id AS tenant, labels(d)[0] AS label, properties(d) AS props "
         "ORDER BY CASE WHEN d.tenant_id = $caller THEN 0 ELSE 1 END LIMIT 1",  # caller wins on fqn clash
-        tenants=tenants, fqn=fqn, caller=tenant_id,
+        tenants=tenants, fqn=fqn, caller=tenant_id, src=source,
     )
     if not rows:
         return {"found": False, "fqn": fqn}

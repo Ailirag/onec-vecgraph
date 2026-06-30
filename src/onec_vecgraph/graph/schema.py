@@ -26,7 +26,7 @@ def schema_statements() -> list[str]:
     stmts.append(
         "CREATE INDEX object_name IF NOT EXISTS FOR (n:Object) ON (n.tenant_id, n.name)"
     )
-    # docinfo exact lookup over platform/BSP help topics (Document owners).
+    # platform_docinfo exact lookup over platform/BSP help topics (Document owners).
     stmts.append(
         "CREATE INDEX document_name IF NOT EXISTS FOR (n:Document) ON (n.tenant_id, n.full_name_norm)"
     )

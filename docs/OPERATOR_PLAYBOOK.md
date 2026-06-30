@@ -80,7 +80,7 @@ uv run onec-vecgraph ingest-help --tenant-id __shared__ --file "<...>\shcntx_ru.
 - `--domain`: `shcntx` (контекст/объекты), `shlang` (язык), `shquery` (запросы). Дефолт — `shcntx`+`shlang`.
 - `--limit N` — смоук-загрузка; `--reset` — пересобрать эту версию справки.
 - Если путь не указан / `.hbk` не найден — команда падает с явной ошибкой (не делает «тихо ничего»).
-- Проверка: `uv run onec-vecgraph docinfo "Массив.Найти" --tenant-id acme_erp` (читает `__shared__` аддитивно).
+- Проверка: `uv run onec-vecgraph platform-docinfo "Массив.Найти" --tenant-id acme_erp` (читает `__shared__` аддитивно).
 
 ## 5a. Overlay (baseline + per-task дельта разработчика; см. docs/OVERLAY.md)
 ```

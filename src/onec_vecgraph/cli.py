@@ -313,8 +313,8 @@ def metrics(
         rprint(queries.metrics(store, tenant_id, subsystem))
 
 
-@app.command()
-def docinfo(
+@app.command(name="platform-docinfo")
+def platform_docinfo(
     name: str = typer.Argument(..., help="Canonical name: 'ТаблицаЗначений', 'Массив.Найти', 'QuerySchema'."),
     tenant_id: str = typer.Option("default"),
     platform_version: str = typer.Option(None, help="Platform build, e.g. 8.3.27.1989 (default: latest indexed)."),

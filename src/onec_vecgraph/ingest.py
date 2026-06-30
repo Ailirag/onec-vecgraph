@@ -56,7 +56,7 @@ def ingest_source(store: Neo4jStore, tenant_id: str, settings: Settings, src: So
             "external_id": u.external_id, "section_path": u.section_path,
             "source_url": u.source_url, "config_id": ""}
         # adapter extras (platform_version, help_kind, name_norm, full_name_norm, ...) become
-        # owner-node properties — drives version filtering and docinfo exact lookup.
+        # owner-node properties — drives version filtering and platform_docinfo exact lookup.
         props.update({k: v for k, v in (u.extra or {}).items() if v is not None})
         owner_rows.append({"fqn": f, "props": props})
         chunks += chunking.doc_chunks(u.title, u.text, source=src.source, owner_fqn=f,

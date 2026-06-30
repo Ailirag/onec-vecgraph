@@ -243,7 +243,7 @@ docker compose run --rm app onec-vecgraph ingest /m.yaml --tenant-id erp --link-
   `docs/ITS_PARSER_REQUIREMENTS.md`. Контент ИТS проприетарный — репозиторий приватный.
 - `config_dump` в манифесте делегирует существующему конвейеру (index + callgraph + vectorize).
 - Связи с объектами: `MENTIONS` (упоминания fqn) всегда; `RELATES_TO` (семантика) — по `--link-semantic`.
-- Потребитель ищет по корпусам: `hybrid_search(source=["its"])`, `find_related_docs(object)`, `get_document(fqn)`.
+- Потребитель ищет по корпусам: `hybrid_search(source=["its"])`, `its_find_related_docs(object)` / `artifact_find_related_docs(object)`, `its_get_document(fqn)` / `artifact_get_document(fqn)`.
 
 ---
 
@@ -255,7 +255,7 @@ docker compose run --rm app onec-vecgraph ingest /m.yaml --tenant-id erp --link-
 docker compose run --rm -v /path/to/public-sources.yaml:/m.yaml:ro app \
   onec-vecgraph ingest /m.yaml --tenant-id __shared__
 ```
-Поиск/`get_document`/`docinfo` любого арендатора **автоматически** читают `__shared__` дополнительно к его
+Поиск/`*_get_document`/`platform_docinfo` любого арендатора **автоматически** читают `__shared__` дополнительно к его
 данным (сервер добавляет общий тенант в скоуп; клиент шлёт только свой `X-Tenant-Id`). Управление —
 `INCLUDE_SHARED_TENANT=true|false`. Различение корпусов — `source` (`platform_help`/`bsp_help`/…).
 
@@ -277,7 +277,7 @@ docker compose run --rm -v /path/to/public-sources.yaml:/m.yaml:ro app \
    ```
    Запись `hbk` принимает `bin` / `bins`-glob (все сборки) / `files` / `domains` / `platform_version` / `limit`.
 
-Версия пишется на `:Document` → фильтр `platform_version` в поиске и `docinfo`. Контент справки
+Версия пишется на `:Document` → фильтр `platform_version` в поиске и `platform_docinfo`. Контент справки
 **проприетарный** (лицензия платформы 1С) — общий тенант/репо держать приватными.
 
 > **Инвариант:** общий тенант **обязан** эмбеддиться той же моделью/размерностью, что и потребители —

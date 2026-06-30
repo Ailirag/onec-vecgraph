@@ -171,8 +171,8 @@ namespace `tenant_id`; `tenant_id` не overlay (нет `@task/`); ошибки 
 для кросс-слойного анализа вызовов используйте `call_graph`.
 
 **Стандарты разработки 1С (v8std).** Роль-агенты получают рекомендации «как писать по стандартам 1С»
-через выделенные инструменты `search_standards(query)` → `get_standard(<номер>)` (обёртки над
-`hybrid_search`/`get_document`, привязанные к корпусу `corpus_version="platform:v8std"` в общем тенанте).
+через выделенные инструменты `dev_standards_search(query)` → `dev_standards_get(<номер>)` (обёртки над
+`hybrid_search`/document-fetch, привязанные к корпусу `corpus_version="platform:v8std"` в общем тенанте).
 Стандарты непроектные — читаются для **любого** тенанта автоматически, отдельного токена/overlay не требуют.
 Загрузка корпуса — `ingest type: its` в `__shared__` (см. [DEPLOYMENT.md §5.3](DEPLOYMENT.md)).
 

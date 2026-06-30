@@ -84,7 +84,7 @@ DEFAULT_TENANT_ID=default # tenant по умолчанию (stdio/CLI и при 
 DEFAULT_CONFIG_ID=base    # config по умолчанию (base | ext:<имя расширения>).
 
 # ── Общий публичный тенант (справка платформы/БСП — общая для всех) ─────────
-SHARED_TENANT_ID=__shared__   # зарезервированный tenant с публичными корпусами. Поиск/docinfo читают его
+SHARED_TENANT_ID=__shared__   # зарезервированный tenant с публичными корпусами. Поиск/platform_docinfo читают его
                               # АДДИТИВНО к tenant клиента; список тенантов формирует сервер (не клиент).
 INCLUDE_SHARED_TENANT=true    # false — отключить аддитивное чтение общего тенанта.
 
@@ -262,9 +262,9 @@ Tenant **только из заголовка/токена** (не из аргу
 ```bash
 docker compose run --rm app onec-vecgraph metrics --tenant-id erp     # инвентарь: объекты/рутины/чанки
 docker compose run --rm app onec-vecgraph search "проведение реализации" --tenant-id erp --mode hybrid
-docker compose run --rm app onec-vecgraph docinfo "Массив.Найти" --tenant-id erp   # справка платформы (из __shared__)
+docker compose run --rm app onec-vecgraph platform-docinfo "Массив.Найти" --tenant-id erp   # справка платформы (из __shared__)
 ```
-Через MCP: `whoami` (tenant), `hybrid_search`, `docinfo`. **Пустой результат поиска/графа** обычно значит
+Через MCP: `whoami` (tenant), `hybrid_search`, `platform_docinfo`. **Пустой результат поиска/графа** обычно значит
 «слой не построен для этого tenant» (не проиндексирован), а не «не найдено» — вернитесь к Шагам 6–7.
 
 ---

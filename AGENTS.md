@@ -56,5 +56,5 @@ reset (безопасно); `--no-reset --code` доливает код без �
 
 ## Прочее
 - Тесты: `uv run pytest tests/` (bare `pytest` соберёт 0 — нет testpaths).
-- Как роли-потребители читают данные (read-only API из 21 инструмента) — [docs/MCP_USAGE.md](docs/MCP_USAGE.md).
+- Как роли-потребители читают данные (read-only API из 25 инструментов) — [docs/MCP_USAGE.md](docs/MCP_USAGE.md).
 - Снимок состояния проекта и инварианты — [docs/STATE.md](docs/STATE.md).

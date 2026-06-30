@@ -131,7 +131,7 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   пакет `sources/` (контракт `Source`/`DocUnit`, реестр, YAML/JSON-манифест, адаптеры `its` и `git_artifacts`,
   Markdown-сплиттер, линковка); драйвер `ingest.py` (инкремент по `version_hash`; `config_dump`→index+callgraph+
   vectorize); рёбра `MENTIONS` (явные/сканированные fqn) + `RELATES_TO` (семантика, opt-in `--link-semantic`);
-  инструменты `find_related_docs`/`get_document`; doc-`expand`. Все источники — подключаемые git-репо (клон
+  инструменты `its_find_related_docs`/`its_get_document` + `artifact_find_related_docs`/`artifact_get_document` (раздельно по source); doc-`expand`. Все источники — подключаемые git-репо (клон
   системным `git`) или локальный `path` (для тестов/офлайна). Проверено e2e на demo (its+artifact: ингест,
   инкремент идемпотентен, фильтр `source`, MENTIONS/RELATES_TO, поиск по корпусам не протекает в config).
 
@@ -142,17 +142,17 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   `files`/`domains`/`platform_version`/`help_kind`/`limit`; имя из `<h1>` = `РусИмя (EngName)`, HTML→текст
   через `lxml`). **Версионность:** `platform_version` (из пути `bin`) пишется на `:Document`-владельца;
   фильтр поиска `o.platform_version` в `_CHUNK_FILTER` (проброшен в 4 метода + search-функции); версионно-
-  квалиф. fqn `platform_help:<ver>|<Имя>`. Инструмент **`docinfo(name, platform_version?)`** — точный лукап
+  квалиф. fqn `platform_help:<ver>|<Имя>`. Инструмент **`platform_docinfo(name, platform_version?)`** — точный лукап
   по канон. имени (RU/EN/`Объект.Метод`) с дизамбигуацией; индексы `document_name`/`document_pv` (schema).
   Грузится в общий тенант: `ingest <m> --tenant-id __shared__ --only hbk` ИЛИ отдельной командой
   **`ingest-help --bin <…> [--domain shcntx …] [--platform-version …]`** с **валидацией пути**
   (`HbkSource.validate()` — понятная ошибка + exit 1, если путь не задан/файл не найден; не тихий 0).
   Запуск векторизации — ТОЛЬКО CLI; MCP read-only (инструмента ингеста нет by design). e2e на реальном файле пройден
-  (ingest 60 стр., docinfo, docsearch аддитивно, версионный фильтр, изоляция, очистка). Лицензия: контент
+  (ingest 60 стр., platform_docinfo, docsearch аддитивно, версионный фильтр, изоляция, очистка). Лицензия: контент
   справки проприетарный → общий tenant/репо приватный. БСП-справка — тот же механизм (`source='bsp_help'`).
 - **Общий публичный тенант (2026-06-08)**: зарезервированный tenant (`SHARED_TENANT_ID=__shared__`,
   `INCLUDE_SHARED_TENANT`) под **общедоступные корпуса** (справка платформы, БСП/SSL, будущие). Поиск и
-  `get_document` читают его **аддитивно** к тенанту вызывающего: `WHERE c.tenant_id IN $tenants`, где
+  `*_get_document` читают его **аддитивно** к тенанту вызывающего: `WHERE c.tenant_id IN $tenants`, где
   `tenants=[caller]` или `[caller,__shared__]` — список формируется **сервером** (`server._shared`,
   `Settings.search_scope`, `store._scope`), не из аргументов/заголовков клиента → утечки между реальными
   арендаторами нет (адверсариально проверено: изоляция PASS). Агент шлёт один `X-Tenant-Id`; публичные
@@ -197,7 +197,7 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   deps, usages, vectorize, search (+`--kind/--chunk-kind/--subsystem/--source/--expand`), **handlers**,
   **metrics**, **ingest**, **index-overlay**, callgraph, callers, callees, path, snapshot, snapshot-diff.
   `_flush_exit()`=os._exit (см. гочи).
-- `server.py` — FastMCP read-only, 21 инструмент (см. п.8), stateless_http.
+- `server.py` — FastMCP read-only, 25 инструментов (см. п.8), stateless_http.
 - `write_server.py` — FastMCP overlay-WRITE (opt-in, :8001), единств. тул `index_overlay`; `overlay.py`/
   `overlay_index.py` — драйвер overlay-дельты; модель — `docs/OVERLAY.md`.
 - `admin_server.py` — FastMCP admin/baseline (opt-in, :8002): `reindex_baseline` (fire-and-poll) +
@@ -215,7 +215,7 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 - `queries.py` — list_metadata, get_object (+`detail`), **get_object_properties**/`_object_details` (из `:Detail`),
   get_dependencies (+WRITES_TO), impact_analysis, find_type_usages, semantic_search/hybrid_search (фильтры+expand;
   `_vector_retrievers` exact/index, `_dedup`/`_unit`/`_rrf_fuse`, `_fts_query`, `_expand`, `_rerank`),
-  find_callers/callees, **find_handlers**, call_path, **metrics**, **find_related_docs**/**get_document** (doc-корпуса),
+  find_callers/callees, **find_handlers**, call_path, **metrics**, **its_/artifact_find_related_docs**/**its_/artifact_get_document** (doc-корпуса),
   `semantic_search`/`hybrid_search` (+`source`-фильтр; `_expand` имеет doc-ветку с `links`).
 - `sources/` — мультиисточник: `base` (`Source` ABC, `DocUnit`, `owner_fqn`, `sha1_text`), `git_repo`
   (`materialize` — локальный path / `git clone --depth 1` системным git; `iter_files`), `markdown`
@@ -253,12 +253,13 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 
 ping, neo4j_health, whoami, list_metadata, get_object (+`detail`), **get_object_properties**
 (полный сырой набор `<Properties>` из `:Detail`), get_dependencies, impact_analysis,
-find_type_usages, **find_related_docs** (доки по объекту), **get_document** (документ по fqn),
-**docinfo** (синтаксис-помощник: точный лукап по имени, версионный), semantic_search, hybrid_search,
+find_type_usages, **its_find_related_docs**/**artifact_find_related_docs** (доки/артефакты по объекту),
+**its_get_document**/**artifact_get_document**/**platform_get_document** (документ по fqn),
+**platform_docinfo** (синтаксис-помощник: точный лукап по имени, версионный), semantic_search, hybrid_search,
 **metrics** (инвентарь/хотспоты), find_callers, find_callees, call_path, **find_handlers** (обработчики форм+модулей),
-**search_standards** (поиск по стандартам разработки v8std) / **get_standard** (полный текст стандарта по номеру/id).
+**dev_standards_search** (поиск по стандартам разработки v8std) / **dev_standards_get** (полный текст стандарта по номеру/id).
 `semantic_search`/`hybrid_search` принимают `source`/`platform_version`/`kinds`/`chunk_kinds`/`subsystem`/`doc_topic`/`corpus_version`/`help_kind`/`expand`.
-`search_standards`/`get_standard` — обёртки над `hybrid_search`/`get_document`, привязанные к `corpus_version="platform:v8std"` в общем тенанте (настройки `standards_corpus_version`/`standards_id_prefix`).
+`dev_standards_search`/`dev_standards_get` — обёртки над `hybrid_search`/document-fetch, привязанные к `corpus_version="platform:v8std"` в общем тенанте (настройки `standards_corpus_version`/`standards_id_prefix`).
 
 ## 9. Ключевые решённые вопросы / находки
 
@@ -339,7 +340,7 @@ uv run onec-vecgraph metrics --tenant-id demo [--subsystem Имя]              
 uv run onec-vecgraph ingest sources.yaml --tenant-id demo [--only its|git_artifacts|hbk|config_dump] [--reset] [--link-semantic]
 uv run onec-vecgraph ingest sources.yaml --tenant-id __shared__ --only hbk   # справка платформы → общий тенант
 uv run onec-vecgraph ingest-help --tenant-id __shared__ --bin "C:\Program Files\1cv8\8.3.27.1989\bin" --domain shcntx --domain shlang [--reset]   # запуск векторизации справки с проверкой пути
-uv run onec-vecgraph docinfo "Массив.Найти" --tenant-id demo [--platform-version 8.3.27.1989]
+uv run onec-vecgraph platform-docinfo "Массив.Найти" --tenant-id demo [--platform-version 8.3.27.1989]
 uv run onec-vecgraph search "схема запроса" --tenant-id demo --source platform_help --platform-version 8.3.27.1989
 uv run onec-vecgraph search "проведение" --tenant-id demo --source its --source artifact  # поиск по корпусам доков
 uv run onec-vecgraph show Catalog.Имя --tenant-id demo [--detail]            # --detail = + полные <Properties> из :Detail

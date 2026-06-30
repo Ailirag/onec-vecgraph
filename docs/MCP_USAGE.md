@@ -67,8 +67,8 @@ onec-vecgraph serve --transport stdio
 | Граф метаданных + `:Detail` | `index` | list_metadata, get_object, get_object_properties, get_dependencies, impact_analysis, find_type_usages |
 | Векторы/чанки | `vectorize` (+`--code`) | semantic_search, hybrid_search |
 | Граф вызовов BSL | `callgraph` | find_callers, find_callees, call_path, find_handlers, и `entry_points`/`calls_by_kind` в metrics |
-| Doc-корпуса (ИТС / артефакты) | `ingest` | search с `source=['its'\|'artifact']`, find_related_docs, get_document |
-| Справка платформы (`.hbk`) | `ingest-help` (CLI оператора) | search с `source=['platform_help']`, **`docinfo`**, get_document; читается из общего тенанта |
+| Doc-корпуса (ИТС / артефакты) | `ingest` | search с `source=['its'\|'artifact']`, its_find_related_docs / its_get_document, artifact_find_related_docs / artifact_get_document |
+| Справка платформы (`.hbk`) | `ingest-help` (CLI оператора) | search с `source=['platform_help']`, **`platform_docinfo`**, platform_get_document; читается из общего тенанта |
 
 > Загрузка/векторизация корпусов — операция **оператора через CLI** (`ingest` / `ingest-help`); сам MCP
 > **read-only** и индексацию не запускает. Если справка/доки не отвечают — их ещё не заингестили.
@@ -102,9 +102,9 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 Правила:
 - **`platform_version` — это фильтр релевантности, не граница изоляции** (изоляция — только тенант, его задаёт сервер). Версию передаёт клиент/оркестратор как аргумент запроса.
 - **Передавать `platform_version` только вместе с `source=['platform_help']`** (или `bsp_help`). Фильтр идёт по версии **документа-владельца**; у объектов конфигурации версии нет, поэтому при заданной версии они **выпадут** из выдачи. Для запросов к конфигурации/коду/графу `platform_version` **не указывать**.
-- **Без `platform_version`**: поиск охватывает все загруженные версии; `docinfo` при нескольких совпадениях вернёт `candidates` (по версии у каждого) для выбора, при одном — сразу статью.
-- **Адресная выборка** конкретной версии: `get_document("platform_help:<версия>|<Имя>")` — версия в `fqn`.
-- **Мультиверсионный оркестратор**: держите маппинг `проект → platform_version` у себя и инжектьте версию в help-вызовы (`docinfo`, поиск с `source=['platform_help']`); если точной версии нет — фолбэк на ближайшую (наибольшую ≤ запрошенной в той же `major.minor`).
+- **Без `platform_version`**: поиск охватывает все загруженные версии; `platform_docinfo` при нескольких совпадениях вернёт `candidates` (по версии у каждого) для выбора, при одном — сразу статью.
+- **Адресная выборка** конкретной версии: `platform_get_document("platform_help:<версия>|<Имя>")` — версия в `fqn`.
+- **Мультиверсионный оркестратор**: держите маппинг `проект → platform_version` у себя и инжектьте версию в help-вызовы (`platform_docinfo`, поиск с `source=['platform_help']`); если точной версии нет — фолбэк на ближайшую (наибольшую ≤ запрошенной в той же `major.minor`).
 
 **Классификация документов (`doc_topic` / `corpus_version` / `help_kind`) — фасеты владельца, ортогональные `source`:**
 - **`doc_topic`** — о чём документ: `platform` (справка/методика платформы) · `config` (документация по конфигурации) · `task` (проектная/задачная). Разделяет, например, платформенную и конфигурационную части ИТС.
@@ -156,13 +156,17 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 - **`find_type_usages(query)`** — где объект используется как тип реквизита/измерения/ресурса.
 
 ### Документация по объекту (нужен ingest корпусов ИТС/артефактов)
-- **`find_related_docs(query)`** — доки (ИТС/артефакты), связанные с объектом через `MENTIONS`
-  (явные/сканированные fqn) или `RELATES_TO` (семантика, с `confidence`). «Какие стандарты/доки покрывают объект».
-- **`get_document(fqn)`** — документ по fqn-владельца (`its:<id>` / `platform_help:<ver>|<Имя>`, напр. из `fqn` хита):
+Инструменты разделены по источнику — ИТС (`its_`), проектные артефакты (`artifact_`), справка платформы (`platform_`).
+- **`its_find_related_docs(query)`** — доки **ИТС**, связанные с объектом через `MENTIONS`
+  (явные/сканированные fqn) или `RELATES_TO` (семантика, с `confidence`). «Какие ИТС-доки покрывают объект».
+- **`its_get_document(fqn)`** — ИТС-документ по fqn-владельца (`its:<id>`, напр. из `fqn` хита):
   метаданные, полный текст (чанки склеены), связанные объекты.
-- **`docinfo(name, platform_version?)`** — синтаксис-помощник платформы: точный лукап справки по
+- **`artifact_find_related_docs(query)`** — то же для **проектных артефактов** (корпус `artifact`).
+- **`artifact_get_document(fqn)`** — проектный артефакт по fqn-владельца (`artifact:<path>#<n>`).
+- **`platform_docinfo(name, platform_version?)`** — синтаксис-помощник платформы: точный лукап справки по
   каноническому имени (RU / English / `Объект.Метод`, напр. `ТаблицаЗначений`, `Массив.Найти`, `QuerySchema`).
   Одно совпадение → полная статья; несколько → список `candidates`. Версия опц. (иначе последняя проиндексированная).
+- **`platform_get_document(fqn)`** — статья справки по fqn-владельца (`platform_help:<ver>|<Имя>`).
 - Поиск по докам: `hybrid_search(query, source=["its"|"artifact"|"platform_help"], platform_version="8.3.27.1989")`;
   `expand=True` добавит `context.links`. Публичная справка (platform_help/bsp_help) читается из общего тенанта автоматически.
 
@@ -170,12 +174,12 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 Готовые обёртки для корпуса «Система стандартов и методик разработки конфигураций» (ИТС v8std). Не
 нужно знать про фильтры — модель зовёт напрямую. Стандарты лежат в общем тенанте и читаются для **любого**
 арендатора.
-- **`search_standards(query, top_k=8, expand=False)`** — ранжированный поиск по стандартам
+- **`dev_standards_search(query, top_k=8, expand=False)`** — ранжированный поиск по стандартам
   («как делать по стандартам 1С»: именование, обработчики событий, запросы, структура модулей). Каждый
   хит несёт `fqn` (`its:<id>`), `title`, `section_path`, `source_url`. Эквивалент
   `hybrid_search(query, source=["its"], corpus_version="platform:v8std")`, но без лишних аргументов.
-- **`get_standard(standard)`** — полный текст одного стандарта по номеру/id. Принимает `"396"`,
-  `"std396"`, `"#std396"`, `"v8std_396"` или fqn `"its:v8std_396"`. Зовите после `search_standards`.
+- **`dev_standards_get(standard)`** — полный текст одного стандарта по номеру/id. Принимает `"396"`,
+  `"std396"`, `"#std396"`, `"v8std_396"` или fqn `"its:v8std_396"`. Зовите после `dev_standards_search`.
 
 ### Поведение / код (нужен граф вызовов)
 - **`find_handlers(query)`** — точки входа объекта: обработчики событий форм (event→рутина) + стандартные

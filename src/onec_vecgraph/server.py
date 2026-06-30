@@ -48,18 +48,20 @@ WHICH TOOL (by need):
 • Relationships → get_dependencies / impact_analysis (who breaks if it changes) / find_type_usages.
 • Behavior & code → find_handlers (what runs on posting/writing/validation + form events),
   find_callers / find_callees / call_path (BSL call graph).
-• Documentation → search with source=['its'|'artifact'] (1C ITS / project docs, if ingested);
-  find_related_docs (docs linked to an object) / get_document (full doc by fqn). Search hits carry
-  a 'corpus' field; filter by source to keep config and docs separate.
+• Documentation → search with source=['its'|'artifact'] (1C ITS / project docs, if ingested).
+  ITS docs linked to an object → its_find_related_docs; full ITS doc by fqn → its_get_document.
+  Project artifacts linked to an object → artifact_find_related_docs; full artifact by fqn →
+  artifact_get_document. Search hits carry a 'corpus' field; filter by source to keep config and docs separate.
 • 1C development STANDARDS ("как писать по стандартам 1С": naming/coding conventions, event handlers,
-  query rules) → search_standards (ranked search over the v8std corpus) then get_standard(<number>)
+  query rules) → dev_standards_search (ranked search over the v8std corpus) then dev_standards_get(<number>)
   for one standard's full text. Always available — the standards live in the shared public tenant.
-• Platform/BSP help (syntax assistant) → docinfo (exact name lookup, e.g. 'Массив.Найти' / 'Array.Find')
-  or search with source=['platform_help']. These live in the shared public tenant and are VERSION-AWARE:
-  pass platform_version (e.g. '8.3.27.2130') to pin a build — use it ONLY together with
+• Platform/BSP help (syntax assistant) → platform_docinfo (exact name lookup, e.g. 'Массив.Найти' /
+  'Array.Find') or search with source=['platform_help']. These live in the shared public tenant and are
+  VERSION-AWARE: pass platform_version (e.g. '8.3.27.2130') to pin a build — use it ONLY together with
   source=['platform_help'] (it filters by the doc's version, so it would drop config results, which have
-  none). Omit it to span all loaded versions (docinfo then returns per-version 'candidates' when several
-  match; a single match returns the article). get_document fqn encodes the version: 'platform_help:<ver>|<Name>'.
+  none). Omit it to span all loaded versions (platform_docinfo then returns per-version 'candidates' when
+  several match; a single match returns the article). Full article by fqn → platform_get_document; the
+  fqn encodes the version: 'platform_help:<ver>|<Name>'.
 • Doc-classification facets (search filters on the owner node — pair with the matching source, else config
   drops out): doc_topic ('platform' | 'config' | 'task') separates platform vs configuration vs task docs;
   corpus_version (typed, e.g. 'config:ERP_2.5.18') pins a configuration release; help_kind ('context' |
@@ -198,28 +200,51 @@ def find_type_usages(ctx: Context, query: str) -> dict[str, Any]:
         return queries.find_type_usages(store, _tenant(ctx), query)
 
 
+# ── ITS documentation (1C ITS knowledge base) ─────────────────────────
 @mcp.tool()
-def find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
-    """Documentation (ITS / project artifacts) linked to an object (by fqn or name) via MENTIONS
-    (explicit/scanned fqns) or RELATES_TO (semantic, with confidence). Answers 'what standards/docs
-    cover this object'. Returns docs:[{fqn, label, source, title, source_url, rel, confidence}].
-    Requires the corresponding corpus to have been ingested (see the `ingest` pipeline)."""
+def its_find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
+    """1C ITS documentation linked to an object (by fqn or name) via MENTIONS (explicit/scanned
+    fqns) or RELATES_TO (semantic, with confidence). Answers 'what ITS docs cover this object'.
+    Returns docs:[{fqn, label, source, title, source_url, rel, confidence}] from the ITS corpus
+    only. Requires the ITS corpus to have been ingested (see the `ingest` pipeline)."""
     with Neo4jStore.from_settings(settings) as store:
-        return queries.find_related_docs(store, _tenant(ctx), query)
+        return queries.find_related_docs(store, _tenant(ctx), query, source="its")
 
 
 @mcp.tool()
-def get_document(ctx: Context, fqn: str) -> dict[str, Any]:
-    """Full document by owner fqn ('its:<id>' / 'artifact:<path>#<n>', e.g. from a search hit's fqn):
-    metadata, full text (chunks rejoined) and the config objects it links to. Resolves in the
-    caller tenant and the shared public tenant (platform/BSP help)."""
+def its_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
+    """Full ITS document by owner fqn ('its:<id>', e.g. from a search hit's fqn): metadata, full
+    text (chunks rejoined) and the config objects it links to. Resolves in the caller tenant and
+    the shared public tenant."""
     with Neo4jStore.from_settings(settings) as store:
         t = _tenant(ctx)
-        return queries.get_document(store, t, fqn, shared_tenant_id=_shared(t))
+        return queries.get_document(store, t, fqn, shared_tenant_id=_shared(t), source="its")
+
+
+# ── project artifacts (task docs / repo artifacts) ────────────────────
+@mcp.tool()
+def artifact_find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
+    """Project artifacts (task docs / repo artifacts) linked to an object (by fqn or name) via
+    MENTIONS (explicit/scanned fqns) or RELATES_TO (semantic, with confidence). Answers 'what
+    project docs cover this object'. Returns docs:[{fqn, label, source, title, source_url, rel,
+    confidence}] from the artifact corpus only. Requires the artifact corpus to have been ingested."""
+    with Neo4jStore.from_settings(settings) as store:
+        return queries.find_related_docs(store, _tenant(ctx), query, source="artifact")
 
 
 @mcp.tool()
-def docinfo(ctx: Context, name: str, platform_version: str | None = None) -> dict[str, Any]:
+def artifact_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
+    """Full project artifact by owner fqn ('artifact:<path>#<n>', e.g. from a search hit's fqn):
+    metadata, full text (chunks rejoined) and the config objects it links to. Resolves in the
+    caller tenant and the shared public tenant."""
+    with Neo4jStore.from_settings(settings) as store:
+        t = _tenant(ctx)
+        return queries.get_document(store, t, fqn, shared_tenant_id=_shared(t), source="artifact")
+
+
+# ── 1C platform help (syntax assistant) ───────────────────────────────
+@mcp.tool()
+def platform_docinfo(ctx: Context, name: str, platform_version: str | None = None) -> dict[str, Any]:
     """Exact 1C platform-help lookup by canonical name — the syntax assistant. Accepts a Russian
     name, the English name, or the dotted 'Object.Method'/'Object.Property' form (e.g.
     'ТаблицаЗначений', 'Массив.Найти', 'QuerySchema'). Optional platform_version (e.g. '8.3.27.1989')
@@ -228,6 +253,16 @@ def docinfo(ctx: Context, name: str, platform_version: str | None = None) -> dic
     with Neo4jStore.from_settings(settings) as store:
         t = _tenant(ctx)
         return queries.docinfo(store, t, name, platform_version=platform_version, shared_tenant_id=_shared(t))
+
+
+@mcp.tool()
+def platform_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
+    """Full platform-help article by owner fqn ('platform_help:<ver>|<Name>', e.g. from a search
+    hit's fqn or a platform_docinfo candidate): metadata, full text (chunks rejoined) and the config
+    objects it links to. Resolves in the caller tenant and the shared public tenant."""
+    with Neo4jStore.from_settings(settings) as store:
+        t = _tenant(ctx)
+        return queries.get_document(store, t, fqn, shared_tenant_id=_shared(t), source="platform_help")
 
 
 # ── 1C development standards (v8std) ───────────────────────────────────
@@ -249,14 +284,14 @@ def _standard_fqn(standard: str) -> str:
 
 
 @mcp.tool()
-def search_standards(ctx: Context, query: str, top_k: int = 8, expand: bool = False) -> dict[str, Any]:
+def dev_standards_search(ctx: Context, query: str, top_k: int = 8, expand: bool = False) -> dict[str, Any]:
     """Search the 1C:Enterprise DEVELOPMENT STANDARDS (official «Система стандартов и методик разработки
     конфигураций», ITS v8std) by meaning or keywords: naming/coding conventions, event-handler rules,
     query standards, module structure, common-module usage, etc. Use this whenever you need "how should
     this be done per 1C standards" guidance for writing or reviewing configuration code.
 
-    Returns ranked hits; each carries the standard's fqn ('its:<id>' — feed it to get_standard for the
-    full text), title, section_path and source_url (its.1c.ru). expand=True attaches a graph
+    Returns ranked hits; each carries the standard's fqn ('its:<id>' — feed it to dev_standards_get for
+    the full text), title, section_path and source_url (its.1c.ru). expand=True attaches a graph
     neighborhood. The standards live in the shared public tenant and are read for EVERY tenant — no
     special access needed. (Thin wrapper over hybrid_search pinned to the standards corpus.)"""
     from .embeddings.runtime import provider, reranker
@@ -271,11 +306,11 @@ def search_standards(ctx: Context, query: str, top_k: int = 8, expand: bool = Fa
 
 
 @mcp.tool()
-def get_standard(ctx: Context, standard: str) -> dict[str, Any]:
+def dev_standards_get(ctx: Context, standard: str) -> dict[str, Any]:
     """Full text of ONE 1C development standard by its number or id. Accepts a bare number ('396'),
     an anchor ('std396' / '#std396'), the id ('v8std_396'), or a search hit's fqn ('its:v8std_396').
     Returns the standard's title, full text (chunks rejoined), section_path and source_url. Use after
-    search_standards to read a specific standard end-to-end."""
+    dev_standards_search to read a specific standard end-to-end."""
     with Neo4jStore.from_settings(settings) as store:
         t = _tenant(ctx)
         return queries.get_document(store, t, _standard_fqn(standard), shared_tenant_id=_shared(t))
