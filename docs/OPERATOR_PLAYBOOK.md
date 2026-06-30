@@ -66,6 +66,20 @@ uv run onec-vecgraph ingest <manifest.yaml> --tenant-id acme_erp --link-semantic
 ```
 `--only` ∈ `config_dump | its | git_artifacts`. Контракт парсера ИТС — [ITS_PARSER_REQUIREMENTS.md](ITS_PARSER_REQUIREMENTS.md).
 
+> **Целевые рецепты по корпусам знаний** (ИТС по конфигурации / стандарты разработки / справка платформы по версии),
+> с пошаговым agent-runnable планом, верификацией и разбором ошибки «владельцы без чанков» —
+> [VECTORIZATION_GUIDE.md](VECTORIZATION_GUIDE.md).
+
+### 4b. Стандарты разработки 1С (v8std) → `__shared__`
+Непроектный корпус «как писать по стандартам 1С». Грузится в общий тенант, читается всеми; манифест —
+[`manifests/its-v8std.yaml`](../manifests/its-v8std.yaml). Инструменты чтения: `dev_standards_search` / `dev_standards_get`.
+```
+uv run onec-vecgraph ingest manifests/its-v8std.yaml --tenant-id __shared__ --reset
+```
+- `--reset` здесь удаляет ТОЛЬКО `source='its'` (`delete_source('its')`) — справка платформы не затрагивается.
+- Гоча: владельцы-стандарты с тем же `version_hash` инкрементом ПРОПУСКАЮТСЯ → если чанков нет, нужен `--reset`.
+- Проверка: `dev_standards_search("…")` непуст; `dev_standards_get("396")` отдаёт непустой `text`. Детали — [VECTORIZATION_GUIDE.md §B](VECTORIZATION_GUIDE.md).
+
 **Классификация (owner-фасеты для фильтрованного поиска).** В записи источника манифеста можно задать `doc_topic`
 (`platform`/`config`/`task`) и `corpus_version` (напр. `config:ERP_2.5.18`, `task:JIRA-1234`); для ИТС их также может
 проставлять парсер по-записям (см. контракт). Дефолты: ИТС → `doc_topic=config`, артефакты git → `doc_topic=task`.
@@ -121,6 +135,7 @@ uv run onec-vecgraph ls --tenant-id acme_erp --kind Catalog
 - Не коммитить `.env`/токены; не пушить без явной просьбы.
 
 ## Глубже
+- **Рецепты векторизации корпусов знаний (agent-runnable)** — [VECTORIZATION_GUIDE.md](VECTORIZATION_GUIDE.md).
 - Настройки и деплой — [DEPLOY_DETAILED.md](DEPLOY_DETAILED.md), [DEPLOYMENT.md](DEPLOYMENT.md), `.env.example`.
 - Как РОЛИ-потребители читают данные (read-only) — [MCP_USAGE.md](MCP_USAGE.md).
 - Снимок состояния и инварианты — [STATE.md](STATE.md).

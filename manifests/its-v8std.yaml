@@ -1,0 +1,18 @@
+# Стандарты разработки 1С (ИТС v8std) → общий тенант __shared__.
+#
+# Корпус НЕпроектный (правила «как писать по стандартам 1С»), поэтому грузится в __shared__ и
+# читается аддитивно для ЛЮБОГО тенанта. Данные уже в контракт-формате ИТС-парсера
+# (id=v8std_<n>, doc_topic/corpus_version по-записям) — значения ниже это дефолты-fallback,
+# per-record значения из JSON выигрывают.
+#
+# Запуск (см. docs/VECTORIZATION_GUIDE.md §B):
+#   uv run onec-vecgraph ingest manifests/its-v8std.yaml --tenant-id __shared__ --reset
+#
+# `path` — окружение-специфичный каталог с выгрузкой ИТС-парсера (один JSON на стандарт).
+# Поправьте под свою машину; в деплой-контейнере данные кладутся через docker cp (см. гайд).
+sources:
+  - type: its
+    path: "D:/Claude/onec-its-parser/its-out/v8std"
+    globs: ["*.json"]          # нерекурсивно: один уровень, по одному стандарту на файл
+    doc_topic: platform
+    corpus_version: "platform:v8std"

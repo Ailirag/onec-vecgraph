@@ -47,6 +47,7 @@ MCP-сервер, который векторизует конфигурации
 2. Поднять Neo4j: `docker compose up -d neo4j`; проверить `uv run onec-vecgraph health`.
 3. Понять задачу:
    - **управление данными** (индексация/векторизация/справка) → [OPERATOR_PLAYBOOK.md](OPERATOR_PLAYBOOK.md);
+     рецепты векторизации корпусов знаний (agent-runnable) → [VECTORIZATION_GUIDE.md](VECTORIZATION_GUIDE.md);
    - **потребление данных** агентом/ролью → [MCP_USAGE.md](MCP_USAGE.md);
    - **деплой/докер** → [DEPLOY_DETAILED.md](DEPLOY_DETAILED.md) / [DEPLOYMENT.md](DEPLOYMENT.md).
 4. Поднять сервер: `uv run onec-vecgraph serve --transport http` (→ `http://127.0.0.1:8000/mcp`).
@@ -56,6 +57,7 @@ MCP-сервер, который векторизует конфигурации
 |---|---|
 | [STATE.md](STATE.md) | Снимок состояния: окружение, что готово, данные в Neo4j, ограничения (читать первым по сути) |
 | [OPERATOR_PLAYBOOK.md](OPERATOR_PLAYBOOK.md) | Управление: index / callgraph / vectorize / ingest / ingest-help |
+| [VECTORIZATION_GUIDE.md](VECTORIZATION_GUIDE.md) | Рецепты векторизации корпусов (ИТС по конфигурации / стандарты v8std / справка платформы по версии), agent-runnable |
 | [MCP_USAGE.md](MCP_USAGE.md) | Гайд для агентов-потребителей (подключение, словари, инструменты, сценарии) |
 | [OVERLAY.md](OVERLAY.md) | Overlay-тенанты: baseline + per-task дельта, write-эндпоинт `index_overlay`, union-граф (Phase 2) |
 | [DEPLOY_DETAILED.md](DEPLOY_DETAILED.md) · [DEPLOYMENT.md](DEPLOYMENT.md) | Деплой, докер (CPU/GPU), настройки, auth |
