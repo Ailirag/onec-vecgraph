@@ -66,6 +66,10 @@ class HbkSource(Source):
 
     def __init__(self, entry: dict) -> None:
         self.entry = entry
+        source = entry.get("source") or self.source
+        if source not in {"platform_help", "bsp_help"}:
+            raise ValueError("hbk source must be 'platform_help' or 'bsp_help'")
+        self.source = source
         self.domains = tuple(entry.get("domains") or _DEFAULT_DOMAINS)
         self.limit = entry.get("limit")
         self.pv_override = entry.get("platform_version")

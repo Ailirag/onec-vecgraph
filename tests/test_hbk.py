@@ -36,6 +36,16 @@ def test_validate_requires_a_path() -> None:
         HbkSource({}).validate()
 
 
+def test_hbk_source_can_target_bsp_help() -> None:
+    src = HbkSource({"source": "bsp_help", "files": ["missing.hbk"]})
+    assert src.source == "bsp_help"
+
+
+def test_hbk_source_rejects_unknown_source() -> None:
+    with pytest.raises(ValueError):
+        HbkSource({"source": "other_help"})
+
+
 def test_validate_errors_when_path_not_found(tmp_path) -> None:
     with pytest.raises(FileNotFoundError):
         HbkSource({"bin": str(tmp_path / "no-such-bin")}).validate()

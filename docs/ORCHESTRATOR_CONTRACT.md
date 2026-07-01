@@ -15,7 +15,7 @@ overlay — [OVERLAY.md](OVERLAY.md); развёртывание write-серв�
 |---|---|---|---|
 | **Чтение** (поиск, граф) | `serve` / `app` | `http://host:8000/mcp` | MCP Streamable HTTP, stateless, **read-only** |
 | **Запись overlay** | `serve-write` / `app-write` | `http://host:8001/mcp` | MCP Streamable HTTP, stateless, единственный tool `index_overlay` |
-| **Baseline-реиндекс** | `serve-admin` / `app-admin` | `http://host:8002/mcp` | MCP Streamable HTTP, stateless, тулы `reindex_baseline` / `index_job_status` (+`ping`/`whoami`) |
+| **Baseline/корпусный индекс** | `serve-admin` / `app-admin` | `http://host:8002/mcp` | MCP Streamable HTTP, stateless, тулы `baseline_index_tool` / `index_corpus_tool` / `index_job_status` (+`index_capabilities`, `ping`, `whoami`) |
 
 Write-сервис **opt-in**: в Docker — compose-профиль `overlay-write`
 (`docker compose --profile overlay-write up -d`), либо CLI
@@ -40,10 +40,12 @@ Admin/baseline-сервис **opt-in**: compose-профиль `baseline-admin`
 - Без write-токенов — dev-режим: запись разрешена, но всё равно только в overlay-тенант (`@task/` обязателен).
 - Заголовок: `Authorization: Bearer <wtok>`.
 
-**Baseline-реиндекс** (`app-admin`):
-- `ADMIN_TOKENS="atok=<base>"` → токен авторизует **запуск baseline-реиндекса тенанта `<base>`** —
-  это запись ВСЕЙ базы (семантика ≠ `WRITE_AUTH_TOKENS`: тот разрешает overlay и **запрещает** base).
-  `tenant_id` в запросе должен совпадать с `<base>` токена (owner-of-base); overlay через этот тул нельзя.
+**Baseline/корпусный индекс** (`app-admin`):
+- `ADMIN_TOKENS="atok=<tenant>"` → токен авторизует **запуск индексации ровно этого tenant**:
+  baseline-тенанта `<base>` для `baseline_index_tool` или общего `__shared__` для публичных корпусов
+  (`platform_help`, `bsp_help`, `dev_standards`). Это запись ВСЕЙ базы/корпуса (семантика ≠
+  `WRITE_AUTH_TOKENS`: тот разрешает overlay и **запрещает** base).
+  `tenant_id` в запросе должен совпадать с target токена; overlay через этот тул нельзя.
 - Без admin-токенов — dev-режим (запись baseline разрешена; всё равно только baseline-тенант, не overlay).
 - Заголовок: `Authorization: Bearer <atok>`. (Принимается и написание `ADMIN_AUTH_TOKENS`.)
 
@@ -193,14 +195,32 @@ namespace `tenant_id`; `tenant_id` не overlay (нет `@task/`); ошибки 
 
 ---
 
-## 10. Baseline-реиндекс (admin-эндпоинт): `reindex_baseline` + `index_job_status`
+## 10. Baseline/корпусная индексация (admin-эндпоинт)
 
 Полная (пере)индексация baseline-тенанта (`index` → `callgraph` → `vectorize`) на ERP-масштабе идёт
-**часами**, поэтому запуск **асинхронный** (fire-and-poll), а статус — **поллингом**. Эндпоинт — `app-admin`
+**часами**; корпусные загрузки справки/документов тоже могут быть долгими. Поэтому запуск
+**асинхронный** (fire-and-poll), а статус — **поллингом**. Эндпоинт — `app-admin`
 (порт **8002**, opt-in `BASELINE_REINDEX_ENABLED=true`, auth `ADMIN_TOKENS` — см. §1–§2). Сверено с
 кодом: `admin_server.py`, `baseline.py`, `jobs.py`.
 
-### 10.1. Запуск: `reindex_baseline`
+### 10.1. Discovery: `index_capabilities`
+
+Перед показом кнопок UI оркестратор вызывает `index_capabilities()`:
+
+```json
+{
+  "enabled": true,
+  "tools": ["baseline_index_tool", "reindex_baseline", "index_corpus_tool", "index_job_status", "index_capabilities"],
+  "corpora": ["platform_help", "bsp_help", "its", "dev_standards", "artifact"],
+  "job_status_tool": "index_job_status",
+  "shared_tenant_id": "__shared__",
+  "authorized_base": "__shared__"
+}
+```
+
+`reindex_baseline` оставлен как legacy-алиас; новое имя для оркестратора — `baseline_index_tool`.
+
+### 10.2. Запуск baseline: `baseline_index_tool`
 
 **Аргументы:**
 
@@ -226,11 +246,36 @@ namespace `tenant_id`; `tenant_id` не overlay (нет `@task/`); ошибки 
 **Ответ (отклонено, single-flight):** `{accepted:false, rejected:true, active_job_id, reason}` — у тенанта
 уже есть активная джоба; поллите её `active_job_id`.
 
-### 10.2. Статус: `index_job_status(job_id)`
+### 10.3. Запуск корпуса: `index_corpus_tool`
+
+**Аргументы:**
+
+| Поле | Тип | Обяз. | Описание |
+|---|---|---|---|
+| `tenant_id` | string | да | target tenant. Для публичных корпусов обычно `__shared__` |
+| `corpus` | string | да | `platform_help` / `bsp_help` / `its` / `dev_standards` / `artifact` |
+| `source` | string | да* | для `platform_help`/`bsp_help`: platform `bin` dir или `.hbk`; для doc-корпусов: manifest path |
+| `manifest` | string | да* | manifest path для `its` / `dev_standards` / `artifact` |
+| `roots` | string[] | нет | дополнительные platform `bin` dirs для `.hbk` |
+| `files` | string[] | нет | явные `.hbk` файлы |
+| `options` | object | нет | `{reset|refresh, domains, platform_version, help_kind, limit, link_semantic}` |
+
+\* Для `.hbk` нужен `source`, `roots` или `files`; для doc-корпусов нужен `manifest` или `source`.
+
+Поведение:
+- `platform_help`/`bsp_help` используют `.hbk` pipeline (`HbkSource`) и пишут `source` соответственно
+  `platform_help` или `bsp_help`;
+- `its` и `dev_standards` используют manifest `type: its`;
+- `artifact` использует manifest `type: git_artifacts`;
+- `reset`/`refresh` пересобирает соответствующий `source` внутри tenant;
+- статус всегда поллится через `index_job_status`.
+
+### 10.4. Статус: `index_job_status(job_id)`
 
 ```json
 {
-  "job_id": "bl-3e582d727cfd", "tenant_id": "grand-dev-mdm@release", "base_tenant_id": null,
+  "job_id": "bl-3e582d727cfd", "tenant_id": "grand-dev-mdm@release", "job_type": "baseline",
+  "corpus": null, "base_tenant_id": null,
   "status": "running", "phase": "vectorize", "percent": 66, "queue_position": 0,
   "counts": {"objects": 12450, "nodes": 98230, "edges": 41120, "routines": 8800, "chunks": null},
   "started_at": "2026-06-21T08:00:00+00:00", "finished_at": null, "error": null,

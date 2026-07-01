@@ -237,6 +237,29 @@ def test_runner_snapshot_has_contract_keys() -> None:
     runner.shutdown()
 
 
+def test_runner_snapshot_includes_index_job_metadata() -> None:
+    runner = BaselineRunner(
+        JobStore(),
+        execute=lambda job, on_progress: {"chunks": 1, "embedding_model": "m", "embedding_dim": 8},
+        classify=final_status,
+    )
+    job = runner.submit(JobSpec(
+        tenant_id="__shared__",
+        job_type="corpus",
+        corpus="platform_help",
+        payload={"source": "/opt/1cv8/bin"},
+    ))
+    assert runner.wait_idle(timeout=3.0)
+    snap = runner.store.get(job["job_id"]).snapshot()
+    assert job["job_id"].startswith("cp-")
+    assert snap["job_type"] == "corpus"
+    assert snap["corpus"] == "platform_help"
+    assert snap["payload"]["source"] == "/opt/1cv8/bin"
+    for key in ("units", "changed", "deleted"):
+        assert key in snap["counts"]
+    runner.shutdown()
+
+
 def test_runner_classifies_warning_and_failure() -> None:
     # warning: execute returns empty_graph
     r1 = BaselineRunner(JobStore(),

@@ -49,7 +49,16 @@ def _now() -> str:
 
 def _empty_counts() -> dict[str, int | None]:
     # The status contract counts; None until the producing phase fills them.
-    return {"objects": None, "nodes": None, "edges": None, "routines": None, "chunks": None}
+    return {
+        "objects": None,
+        "nodes": None,
+        "edges": None,
+        "routines": None,
+        "chunks": None,
+        "units": None,
+        "changed": None,
+        "deleted": None,
+    }
 
 
 @dataclass
@@ -58,8 +67,11 @@ class BaselineJob:
 
     job_id: str
     tenant_id: str
+    job_type: str = "baseline"
+    corpus: str | None = None
     base_tenant_id: str | None = None
     path: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
     status: str = STATUS_QUEUED
     phase: str = PHASE_QUEUED
@@ -81,7 +93,11 @@ class BaselineJob:
         return {
             "job_id": self.job_id,
             "tenant_id": self.tenant_id,
+            "job_type": self.job_type,
+            "corpus": self.corpus,
             "base_tenant_id": self.base_tenant_id,
+            "path": self.path,
+            "payload": dict(self.payload),
             "status": self.status,
             "phase": self.phase,
             "counts": dict(self.counts),
@@ -188,8 +204,11 @@ class JobSpec:
     """A baseline-reindex request validated and accepted by the runner."""
 
     tenant_id: str
-    path: str
+    path: str = ""
+    job_type: str = "baseline"
+    corpus: str | None = None
     base_tenant_id: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
 
 
@@ -245,10 +264,13 @@ class BaselineRunner:
                     "status": active.status,
                 }
             job = BaselineJob(
-                job_id=f"bl-{uuid.uuid4().hex[:12]}",
+                job_id=f"{'cp' if spec.job_type == 'corpus' else 'bl'}-{uuid.uuid4().hex[:12]}",
                 tenant_id=spec.tenant_id,
+                job_type=spec.job_type,
+                corpus=spec.corpus,
                 base_tenant_id=spec.base_tenant_id,
                 path=spec.path,
+                payload=dict(spec.payload or {}),
                 options=dict(spec.options or {}),
                 queue_position=self._store.count_active(),  # jobs ahead of this one
             )

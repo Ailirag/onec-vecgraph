@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -34,6 +35,13 @@ from .storage import Neo4jStore
 
 settings = get_settings()
 
+SUPPORTED_CORPORA = ("platform_help", "bsp_help", "its", "dev_standards", "artifact")
+CORPUS_DOC_TYPES = {
+    "its": "its",
+    "dev_standards": "its",
+    "artifact": "git_artifacts",
+}
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -48,14 +56,17 @@ ADMIN_INSTRUCTIONS = """\
 onec-vecgraph ADMIN / BASELINE-REINDEX endpoint — separate from the read-only query server and the
 overlay-write server. Use it to (re)build a full BASELINE tenant from a Configurator XML dump.
 
-`reindex_baseline(tenant_id, source|roots, options?)` runs index → callgraph → vectorize in the
-background and returns a `job_id` immediately (fire-and-poll). Poll `index_job_status(job_id)` for
-phase/counts/summary until status is terminal (succeeded | warning | failed). A missing/empty dump
-path or a zero-object index comes back as `warning` with files_missing/empty_graph set — treat it as
-a failed mount, NOT a success. Baseline jobs are serialized (one runs at a time; others queue; a
-second job for the same tenant is rejected with the active job_id). `reset:true` (full wipe) requires
-options.confirm_reset:true. Requires BASELINE_REINDEX_ENABLED=true; the bearer token (ADMIN_TOKENS)
-authorizes one base tenant. Index OVERLAYS via the write server's index_overlay, not here.
+`baseline_index_tool(tenant_id, source|roots, options?)` (also exposed as legacy
+`reindex_baseline`) runs index → callgraph → vectorize in the background and returns a `job_id`
+immediately (fire-and-poll). `index_corpus_tool(...)` does the same for document/help corpora.
+Poll `index_job_status(job_id)` for phase/counts/summary until status is terminal
+(succeeded | warning | failed). A missing/empty dump path or a zero-object index comes back as
+`warning` with files_missing/empty_graph set — treat it as a failed mount, NOT a success. Jobs are
+serialized (one runs at a time; others queue; a second job for the same tenant is rejected with the
+active job_id). `reset:true` (full wipe) requires options.confirm_reset:true for baseline jobs.
+Requires BASELINE_REINDEX_ENABLED=true; the bearer token (ADMIN_TOKENS) authorizes one writable
+tenant/base, including `__shared__` for public corpora. Index OVERLAYS via the write server's
+index_overlay, not here.
 
 PROVISIONING (opt-in, PROVISIONING_ENABLED=true; control plane = ADMIN_TOKENS): `provision_tenant(
 tenant_id, config_id?, display_name?, rotate?)` create-or-returns a tenant and issues a bearer token
@@ -77,10 +88,122 @@ mcp = FastMCP(
 
 def _execute(job: BaselineJob, on_progress: Any) -> dict[str, Any]:
     """Bridge a queued job to the reindex driver (runs in the runner's worker thread)."""
+    if job.job_type == "corpus":
+        return _run_corpus_index(job, on_progress)
     return run_baseline_reindex(
         settings, tenant_id=job.tenant_id, path=job.path or "",
         base_tenant_id=job.base_tenant_id, options=job.options, on_progress=on_progress,
     )
+
+
+def _authorize_tenant(ctx: Context, tenant_id: str) -> str | None:
+    # env admin token wins; a runtime-provisioned token is self-scoped (its own tenant is the base),
+    # so a project may (re)index ITS OWN baseline/corpus but not another tenant's.
+    authorized = tenancy.resolve_admin_base(ctx, settings, token_lookup=_self_admin_lookup())
+    if authorized is not None and tenant_id != authorized:
+        raise ValueError(
+            f"admin token is not authorized to index {tenant_id!r} "
+            f"(authorized for {authorized!r})"
+        )
+    return authorized
+
+
+def _hbk_entry(corpus: str, payload: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
+    entry: dict[str, Any] = {"type": "hbk", "source": corpus}
+    source = payload.get("source")
+    if source:
+        if str(source).lower().endswith(".hbk"):
+            entry["files"] = [source]
+        else:
+            entry["bin"] = source
+    if payload.get("roots"):
+        entry["bins"] = list(payload["roots"])
+    if payload.get("files"):
+        entry["files"] = list(payload["files"])
+    for key in ("domains", "platform_version", "help_kind", "limit"):
+        if options.get(key) is not None:
+            entry[key] = options[key]
+    return entry
+
+
+def _run_corpus_index(job: BaselineJob, on_progress: Any) -> dict[str, Any]:
+    report = on_progress or (lambda **_kw: None)
+    corpus = job.corpus or ""
+    options = job.options or {}
+    payload = job.payload or {}
+    reset = bool(options.get("reset") or options.get("refresh"))
+    link_semantic = bool(options.get("link_semantic"))
+
+    summary: dict[str, Any] = {
+        "tenant_id": job.tenant_id,
+        "job_type": "corpus",
+        "corpus": corpus,
+        "reset": reset,
+        "embedding_model": settings.embedding_model,
+        "embedding_dim": None,
+        "units": None,
+        "changed": None,
+        "deleted": None,
+        "chunks": None,
+        "empty_graph": False,
+    }
+
+    report(phase="validate_source", percent=5)
+    if corpus in {"platform_help", "bsp_help"}:
+        from .embeddings.runtime import provider
+        from .ingest import ingest_source
+        from .sources.hbk import HbkSource
+
+        src = HbkSource(_hbk_entry(corpus, payload, options))
+        src.validate()
+        report(phase="ingest", percent=15)
+        embedder = provider(settings)
+        with Neo4jStore.from_settings(settings) as store:
+            store.ensure_schema()
+            res = ingest_source(store, job.tenant_id, settings, src, embedder, reset=reset,
+                                link_semantic=link_semantic)
+        summary.update(res)
+    elif corpus in CORPUS_DOC_TYPES:
+        from .ingest import ingest_manifest
+
+        manifest = payload.get("manifest") or payload.get("source") or job.path
+        if not manifest:
+            raise ValueError(f"corpus {corpus!r} requires a manifest/source path")
+        if not Path(str(manifest)).exists():
+            raise ValueError(f"manifest/source path does not exist: {manifest}")
+        report(phase="ingest", percent=15)
+        res = ingest_manifest(
+            str(manifest), settings, tenant_id=job.tenant_id,
+            only_type=CORPUS_DOC_TYPES[corpus], reset=reset, link_semantic=link_semantic,
+        )
+        summary["results"] = res.get("results", [])
+        if summary["results"]:
+            merged = {"units": 0, "changed": 0, "deleted": 0, "chunks_written": 0}
+            for item in summary["results"]:
+                for key in merged:
+                    merged[key] += int(item.get(key) or 0)
+            summary.update(merged)
+    else:
+        raise ValueError(f"unsupported corpus: {corpus!r}")
+
+    chunks = summary.get("chunks_written") or summary.get("chunks") or 0
+    units = summary.get("units") or 0
+    summary["chunks"] = chunks
+    if units == 0:
+        summary["empty_graph"] = True
+    report(
+        phase="vectorize",
+        percent=90,
+        counts={
+            "units": units,
+            "changed": summary.get("changed"),
+            "deleted": summary.get("deleted"),
+            "chunks": chunks,
+        },
+    )
+    report(phase="done", percent=100, embedding_model=summary["embedding_model"],
+           embedding_dim=summary.get("embedding_dim"), empty_graph=summary["empty_graph"])
+    return summary
 
 
 # Module-level singleton: survives across stateless MCP calls within one running server, so polling
@@ -115,7 +238,57 @@ def whoami(ctx: Context) -> dict[str, Any]:
     }
 
 
+@mcp.tool()
+def index_capabilities(ctx: Context) -> dict[str, Any]:
+    """Discover admin indexing capabilities for an orchestrator UI/gate."""
+    authorized = tenancy.resolve_admin_base(ctx, settings)
+    return {
+        "server": "onec-vecgraph-admin",
+        "version": __version__,
+        "enabled": settings.baseline_reindex_enabled,
+        "authorized_base": authorized,
+        "shared_tenant_id": settings.shared_tenant_id,
+        "tools": ["baseline_index_tool", "reindex_baseline", "index_corpus_tool",
+                  "index_job_status", "index_capabilities"],
+        "corpora": list(SUPPORTED_CORPORA),
+        "job_status_tool": "index_job_status",
+        "active_jobs": runner.store.count_active(),
+    }
+
+
 # ── baseline reindex (fire-and-poll) ────────────────────────────────────
+def _submit_baseline(
+    ctx: Context,
+    tenant_id: str,
+    source: str | None = None,
+    roots: list[str] | None = None,
+    base_tenant_id: str | None = None,
+    options: dict | None = None,
+) -> dict[str, Any]:
+    if not settings.baseline_reindex_enabled:
+        raise ValueError("baseline reindex is disabled on this server (set BASELINE_REINDEX_ENABLED=true)")
+    authorized = _authorize_tenant(ctx, tenant_id)  # env admin OR self-admin (provisioned own tenant)
+    path = validate_reindex_request(
+        settings, tenant_id=tenant_id, source=source, roots=roots,
+        options=options, authorized_base=authorized,
+    )
+    spec = JobSpec(tenant_id=tenant_id, path=path, base_tenant_id=base_tenant_id, options=options or {})
+    return runner.submit(spec)
+
+
+@mcp.tool()
+def baseline_index_tool(
+    ctx: Context,
+    tenant_id: str,
+    source: str | None = None,
+    roots: list[str] | None = None,
+    base_tenant_id: str | None = None,
+    options: dict | None = None,
+) -> dict[str, Any]:
+    """Start a full BASELINE index job for orchestrators; poll with index_job_status."""
+    return _submit_baseline(ctx, tenant_id, source, roots, base_tenant_id, options)
+
+
 @mcp.tool()
 def reindex_baseline(
     ctx: Context,
@@ -125,28 +298,52 @@ def reindex_baseline(
     base_tenant_id: str | None = None,
     options: dict | None = None,
 ) -> dict[str, Any]:
-    """Start a full BASELINE (re)index of `tenant_id` and return a job handle immediately.
+    """Legacy name for baseline_index_tool."""
+    return _submit_baseline(ctx, tenant_id, source, roots, base_tenant_id, options)
 
-    Runs index → callgraph → vectorize in the background (hours on ERP scale) — poll the returned
-    `job_id` via `index_job_status`. Provide the dump directory as `source` (preferred) or `roots`
-    (first entry used; the dump itself discovers base + extensions). `options`: {steps:["index",
-    "callgraph","vectorize"], reset:false, confirm_reset:false, batch_size?, embedding_model?}.
 
-    Returns {accepted:true, job_id, status, queue_position} on acceptance, or {accepted:false,
-    rejected:true, active_job_id} if this tenant already has an active job (poll that one instead).
+@mcp.tool()
+def index_corpus_tool(
+    ctx: Context,
+    tenant_id: str,
+    corpus: str,
+    source: str | None = None,
+    manifest: str | None = None,
+    roots: list[str] | None = None,
+    files: list[str] | None = None,
+    options: dict | None = None,
+) -> dict[str, Any]:
+    """Start an indexing/vectorization job for a document/help corpus.
 
-    Requires BASELINE_REINDEX_ENABLED=true; the bearer token (ADMIN_TOKENS) must authorize
-    `tenant_id`'s base. `tenant_id` must be a BASELINE tenant (overlays go through index_overlay).
-    `reset:true` requires options.confirm_reset:true. Errors come back as MCP isError."""
+    Supported corpus values: platform_help, bsp_help, its, dev_standards, artifact. For
+    platform_help/bsp_help pass `source` as a 1C platform bin dir or .hbk file, or pass `files`.
+    For its/dev_standards/artifact pass `manifest` or `source` as the manifest path.
+    Public corpora normally target tenant_id='__shared__'; authorize that by mapping the admin token
+    to __shared__ in ADMIN_TOKENS. Poll the returned job_id with index_job_status."""
     if not settings.baseline_reindex_enabled:
-        raise ValueError("baseline reindex is disabled on this server (set BASELINE_REINDEX_ENABLED=true)")
-    # self-admin: a provisioned token may reindex ITS OWN baseline (authorized base = its tenant).
-    authorized = tenancy.resolve_admin_base(ctx, settings, token_lookup=_self_admin_lookup())
-    path = validate_reindex_request(
-        settings, tenant_id=tenant_id, source=source, roots=roots,
-        options=options, authorized_base=authorized,
+        raise ValueError("admin indexing is disabled on this server (set BASELINE_REINDEX_ENABLED=true)")
+    corpus = (corpus or "").strip()
+    if corpus not in SUPPORTED_CORPORA:
+        raise ValueError(f"unsupported corpus {corpus!r}; valid values: {list(SUPPORTED_CORPORA)}")
+    _authorize_tenant(ctx, tenant_id)
+    payload = {
+        "source": source,
+        "manifest": manifest,
+        "roots": roots or [],
+        "files": files or [],
+    }
+    if corpus in {"platform_help", "bsp_help"} and not (source or roots or files):
+        raise ValueError(f"corpus {corpus!r} requires source/bin, roots, or files")
+    if corpus in CORPUS_DOC_TYPES and not (manifest or source):
+        raise ValueError(f"corpus {corpus!r} requires manifest or source")
+    spec = JobSpec(
+        tenant_id=tenant_id,
+        path=manifest or source or "",
+        job_type="corpus",
+        corpus=corpus,
+        payload=payload,
+        options=options or {},
     )
-    spec = JobSpec(tenant_id=tenant_id, path=path, base_tenant_id=base_tenant_id, options=options or {})
     return runner.submit(spec)
 
 
@@ -162,7 +359,7 @@ def index_job_status(ctx: Context, job_id: str) -> dict[str, Any]:
     job = runner.store.get(job_id)
     if job is None:
         raise ValueError(f"unknown job_id: {job_id!r}")
-    if authorized is not None and base_tenant_of(job.tenant_id) != authorized:
+    if authorized is not None and job.tenant_id != authorized and base_tenant_of(job.tenant_id) != authorized:
         raise ValueError(f"job {job_id!r} is not under the authorized base")
     return job.snapshot()
 
