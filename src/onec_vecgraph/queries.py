@@ -31,6 +31,27 @@ def list_metadata(
     )
 
 
+def list_configurations(store: Neo4jStore, tenant_id: str) -> dict[str, Any]:
+    """Configurations present within a tenant: the config_id layers (base + extensions 'ext:<name>')
+    with object counts, plus any pinned config release(s) (corpus_version 'config:<release>')."""
+    layers = store.read(
+        "MATCH (o:Object {tenant_id: $t}) WHERE coalesce(o.stub, false) = false "
+        "RETURN o.config_id AS config_id, count(*) AS objects ORDER BY objects DESC",
+        t=tenant_id,
+    )
+    releases = store.read(
+        "MATCH (o:Object {tenant_id: $t}) WHERE o.corpus_version IS NOT NULL "
+        "RETURN DISTINCT o.corpus_version AS corpus_version ORDER BY corpus_version",
+        t=tenant_id,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "configurations": layers,
+        "config_releases": [r["corpus_version"] for r in releases],
+        "count": len(layers),
+    }
+
+
 def _resolve(store: Neo4jStore, tenant_id: str, q: str) -> dict[str, Any] | None:
     rows = store.read(
         "MATCH (o:Object {tenant_id: $t}) WHERE o.fqn = $q OR o.name = $q "
@@ -556,6 +577,26 @@ def docinfo(store, tenant_id: str, name: str, platform_version: str | None = Non
     return {"found": True, "name": name, "ambiguous": True,
             "candidates": [{"fqn": c["fqn"], "title": c["title"], "platform_version": c["platform_version"],
                             "help_kind": c["help_kind"]} for c in cands]}
+
+
+def platform_versions(store, tenant_id: str, shared_tenant_id: str | None = None) -> dict[str, Any]:
+    """Available 1C platform-help builds (syntax assistant): distinct platform_version with topic
+    counts per help_kind. Reads the caller tenant + the shared public tenant (help lives there)."""
+    tenants = [tenant_id] + ([shared_tenant_id] if shared_tenant_id and shared_tenant_id != tenant_id else [])
+    rows = store.read(
+        "MATCH (d:Document) WHERE d.tenant_id IN $tenants AND d.source = 'platform_help' "
+        "RETURN d.platform_version AS pv, d.help_kind AS hk, count(*) AS n",
+        tenants=tenants,
+    )
+    agg: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        pv = r["pv"]
+        e = agg.setdefault(pv, {"platform_version": pv, "topics": 0, "by_help_kind": {}})
+        e["topics"] += r["n"]
+        if r["hk"]:
+            e["by_help_kind"][r["hk"]] = e["by_help_kind"].get(r["hk"], 0) + r["n"]
+    versions = sorted(agg.values(), key=lambda x: (x["platform_version"] or ""), reverse=True)
+    return {"versions": versions, "count": len(versions)}
 
 
 def call_path(store, tenant_id: str, src: str, dst: str, max_hops: int = 8) -> dict[str, Any]:

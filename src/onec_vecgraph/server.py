@@ -42,7 +42,8 @@ WHICH TOOL (by need):
 • Find by meaning/keywords → hybrid_search (default; also matches identifiers like 'ПродажиТоваров')
   or semantic_search. Narrow with kinds / chunk_kinds / subsystem; expand=True adds a graph
   neighborhood per hit. Code hits carry `routine_fqn` (feed it to find_callers/callees).
-• Browse/list → list_metadata. Inventory & hotspots → metrics.
+• Browse/list → list_metadata. Inventory & hotspots → metrics. What a tenant holds (config_id layers
+  base + 'ext:<name>' extensions, and any pinned config release) → list_configurations.
 • Object structure (light, semantic) → get_object. Full raw config/UI properties (Hierarchical,
   Posting, CodeLength, Periodicity, lock mode, ...) → get_object_properties or get_object(detail=True).
 • Relationships → get_dependencies / impact_analysis (who breaks if it changes) / find_type_usages.
@@ -56,7 +57,8 @@ WHICH TOOL (by need):
   query rules) → dev_standards_search (ranked search over the v8std corpus) then dev_standards_get(<number>)
   for one standard's full text. Always available — the standards live in the shared public tenant.
 • Platform/BSP help (syntax assistant) → platform_docinfo (exact name lookup, e.g. 'Массив.Найти' /
-  'Array.Find') or search with source=['platform_help']. These live in the shared public tenant and are
+  'Array.Find') or search with source=['platform_help']. Which platform builds are loaded → platform_versions
+  (distinct platform_version + per-help_kind counts). These live in the shared public tenant and are
   VERSION-AWARE: pass platform_version (e.g. '8.3.27.2130') to pin a build — use it ONLY together with
   source=['platform_help'] (it filters by the doc's version, so it would drop config results, which have
   none). Omit it to span all loaded versions (platform_docinfo then returns per-version 'candidates' when
@@ -144,6 +146,16 @@ def list_metadata(
     config_id}]. For semantic discovery use hybrid_search instead."""
     with Neo4jStore.from_settings(settings) as store:
         return queries.list_metadata(store, _tenant(ctx), kind, name_contains, limit)
+
+
+@mcp.tool()
+def list_configurations(ctx: Context) -> dict[str, Any]:
+    """Configurations available in the caller's tenant: the config_id layers present — 'base' plus any
+    extensions 'ext:<name>' — each with its object count, plus any pinned config release(s)
+    (corpus_version 'config:<release>'). A tenant holds ONE configuration (base + its extensions);
+    use this to discover which layers/release are loaded before querying. Reads the caller tenant only."""
+    with Neo4jStore.from_settings(settings) as store:
+        return queries.list_configurations(store, _tenant(ctx))
 
 
 @mcp.tool()
@@ -263,6 +275,17 @@ def platform_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
     with Neo4jStore.from_settings(settings) as store:
         t = _tenant(ctx)
         return queries.get_document(store, t, fqn, shared_tenant_id=_shared(t), source="platform_help")
+
+
+@mcp.tool()
+def platform_versions(ctx: Context) -> dict[str, Any]:
+    """List the 1C platform-help builds available for the syntax assistant: each distinct
+    platform_version with its topic count and a per-help_kind breakdown (context / language / query).
+    Feed a returned version to platform_docinfo(platform_version=…) or semantic_search(source=
+    ['platform_help'], platform_version=…) to pin a build. Reads the shared public tenant (no args)."""
+    with Neo4jStore.from_settings(settings) as store:
+        t = _tenant(ctx)
+        return queries.platform_versions(store, t, shared_tenant_id=_shared(t))
 
 
 # ── 1C development standards (v8std) ───────────────────────────────────

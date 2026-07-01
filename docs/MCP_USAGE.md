@@ -64,11 +64,11 @@ onec-vecgraph serve --transport stdio
 
 | Слой | Чем строится | Нужен для инструментов |
 |---|---|---|
-| Граф метаданных + `:Detail` | `index` | list_metadata, get_object, get_object_properties, get_dependencies, impact_analysis, find_type_usages |
+| Граф метаданных + `:Detail` | `index` | list_configurations, list_metadata, get_object, get_object_properties, get_dependencies, impact_analysis, find_type_usages |
 | Векторы/чанки | `vectorize` (+`--code`) | semantic_search, hybrid_search |
 | Граф вызовов BSL | `callgraph` | find_callers, find_callees, call_path, find_handlers, и `entry_points`/`calls_by_kind` в metrics |
 | Doc-корпуса (ИТС / артефакты) | `ingest` | search с `source=['its'\|'artifact']`, its_find_related_docs / its_get_document, artifact_find_related_docs / artifact_get_document |
-| Справка платформы (`.hbk`) | `ingest-help` (CLI оператора) | search с `source=['platform_help']`, **`platform_docinfo`**, platform_get_document; читается из общего тенанта |
+| Справка платформы (`.hbk`) | `ingest-help` (CLI оператора) | search с `source=['platform_help']`, **`platform_docinfo`**, platform_get_document, **`platform_versions`** (список сборок); читается из общего тенанта |
 
 > Загрузка/векторизация корпусов — операция **оператора через CLI** (`ingest` / `ingest-help`); сам MCP
 > **read-only** и индексацию не запускает. Если справка/доки не отвечают — их ещё не заингестили.
@@ -143,6 +143,9 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 - Результат: `{query, mode, results:[{fqn, kind, synonym, via, corpus, matched, rrf_score, routine_fqn?, routine?, context?}]}`.
 
 ### Структура объекта (граф метаданных)
+- **`list_configurations()`** — какие конфигурации есть в тенанте: слои `config_id` (`base` + расширения
+  `ext:<имя>`) с числом объектов + зафиксированные релизы (`config_releases`, `config:<релиз>`). Читает только
+  тенант вызывающего. Результат: `{tenant_id, configurations:[{config_id, objects}], config_releases:[…], count}`.
 - **`list_metadata(kind?, name_contains?, limit=200)`** — список объектов (точный фильтр, не семантика).
 - **`get_object(query, detail=False)`** — карточка: реквизиты+типы, ТЧ, значения перечислений,
   предопределённые, формы, модули, владельцы, подсистемы. `detail=True` добавляет полный сырой набор свойств.
@@ -167,6 +170,10 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
   каноническому имени (RU / English / `Объект.Метод`, напр. `ТаблицаЗначений`, `Массив.Найти`, `QuerySchema`).
   Одно совпадение → полная статья; несколько → список `candidates`. Версия опц. (иначе последняя проиндексированная).
 - **`platform_get_document(fqn)`** — статья справки по fqn-владельца (`platform_help:<ver>|<Имя>`).
+- **`platform_versions()`** — какие сборки платформы загружены для синтаксис-помощника: список
+  `platform_version` с числом статей и разбивкой по `help_kind` (`context`/`language`/`query`). Значение
+  версии передавайте в `platform_docinfo`/поиск для пина сборки. Читает `__shared__`. Результат:
+  `{versions:[{platform_version, topics, by_help_kind}], count}`.
 - Поиск по докам: `hybrid_search(query, source=["its"|"artifact"|"platform_help"], platform_version="8.3.27.1989")`;
   `expand=True` добавит `context.links`. Публичная справка (platform_help/bsp_help) читается из общего тенанта автоматически.
 

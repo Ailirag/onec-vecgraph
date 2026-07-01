@@ -197,7 +197,7 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   deps, usages, vectorize, search (+`--kind/--chunk-kind/--subsystem/--source/--expand`), **handlers**,
   **metrics**, **ingest**, **index-overlay**, callgraph, callers, callees, path, snapshot, snapshot-diff.
   `_flush_exit()`=os._exit (см. гочи).
-- `server.py` — FastMCP read-only, 25 инструментов (см. п.8), stateless_http.
+- `server.py` — FastMCP read-only, 27 инструментов (см. п.8), stateless_http.
 - `write_server.py` — FastMCP overlay-WRITE (opt-in, :8001), единств. тул `index_overlay`; `overlay.py`/
   `overlay_index.py` — драйвер overlay-дельты; модель — `docs/OVERLAY.md`.
 - `admin_server.py` — FastMCP admin/baseline (opt-in, :8002): `reindex_baseline` (fire-and-poll) +
@@ -251,11 +251,13 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 > Консьюмер-гайд (подключение/заголовки/fqn/словари/карта инструментов/сценарии): `docs/MCP_USAGE.md`.
 > Сервер отдаёт тот же overview клиенту в `instructions` (FastMCP) при `initialize` — `server.INSTRUCTIONS`.
 
-ping, neo4j_health, whoami, list_metadata, get_object (+`detail`), **get_object_properties**
+ping, neo4j_health, whoami, **list_configurations** (слои config_id тенанта: base+ext:<имя>+релизы),
+list_metadata, get_object (+`detail`), **get_object_properties**
 (полный сырой набор `<Properties>` из `:Detail`), get_dependencies, impact_analysis,
 find_type_usages, **its_find_related_docs**/**artifact_find_related_docs** (доки/артефакты по объекту),
 **its_get_document**/**artifact_get_document**/**platform_get_document** (документ по fqn),
-**platform_docinfo** (синтаксис-помощник: точный лукап по имени, версионный), semantic_search, hybrid_search,
+**platform_docinfo** (синтаксис-помощник: точный лукап по имени, версионный),
+**platform_versions** (список загруженных сборок платформы + разбивка по help_kind), semantic_search, hybrid_search,
 **metrics** (инвентарь/хотспоты), find_callers, find_callees, call_path, **find_handlers** (обработчики форм+модулей),
 **dev_standards_search** (поиск по стандартам разработки v8std) / **dev_standards_get** (полный текст стандарта по номеру/id).
 `semantic_search`/`hybrid_search` принимают `source`/`platform_version`/`kinds`/`chunk_kinds`/`subsystem`/`doc_topic`/`corpus_version`/`help_kind`/`expand`.
