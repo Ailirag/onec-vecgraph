@@ -49,4 +49,16 @@ def schema_statements() -> list[str]:
     stmts.append(
         "CREATE INDEX object_corpusv IF NOT EXISTS FOR (n:Object) ON (n.tenant_id, n.corpus_version)"
     )
+    # ── Runtime tenant provisioning (control-plane nodes; deliberately NOT in NODE_LABELS: no
+    #    (tenant_id, fqn) constraint, and excluded from delete_tenant graph wipes). ──
+    stmts.append(
+        "CREATE CONSTRAINT tenant_key IF NOT EXISTS FOR (n:Tenant) REQUIRE n.tenant_id IS UNIQUE"
+    )
+    stmts.append(  # token_hash is GLOBALLY unique — a hash must never map to two tenants.
+        "CREATE CONSTRAINT tenant_token_hash IF NOT EXISTS "
+        "FOR (n:TenantToken) REQUIRE n.token_hash IS UNIQUE"
+    )
+    stmts.append(
+        "CREATE INDEX tenant_token_tenant IF NOT EXISTS FOR (n:TenantToken) ON (n.tenant_id)"
+    )
     return stmts

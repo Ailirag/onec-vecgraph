@@ -64,7 +64,12 @@ def index_overlay(
     Errors (disabled, unauthorized, non-overlay tenant, parse/dim issues) come back as MCP isError."""
     if not settings.overlay_write_enabled:
         raise ValueError("overlay write is disabled on this server (set OVERLAY_WRITE_ENABLED=true)")
-    authorized = tenancy.resolve_write_base(ctx, settings)  # raises if write-auth set but token bad
+    from . import token_store
+
+    # env write-token map wins; a runtime-provisioned token may write overlays under its own tenant.
+    authorized = tenancy.resolve_write_base(
+        ctx, settings, token_lookup=lambda tok: token_store.lookup_token(tok, settings)
+    )  # raises if write-auth in force but token bad
     if not is_overlay_tenant(tenant_id):
         raise ValueError(f"tenant_id must be an overlay tenant (contain '@task/'): {tenant_id!r}")
     if authorized is not None and not in_namespace(tenant_id, authorized):

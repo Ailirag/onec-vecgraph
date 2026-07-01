@@ -72,12 +72,14 @@ def _bearer_token(headers: object) -> str | None:
     return None
 
 
-def resolve(ctx: object, settings: Settings) -> TenantContext:
+def resolve(ctx: object, settings: Settings, *, token_lookup=None) -> TenantContext:
     """Resolve the tenant/config for an MCP call.
 
     HTTP, auth_enabled: require `Authorization: Bearer <token>`; tenant/config come from the
     token map (a client cannot spoof tenant via X-Tenant-Id). X-Config-Id may still override
-    config when the token doesn't pin one.
+    config when the token doesn't pin one. `token_lookup(token) -> {tenant_id, config_id} | None`
+    (optional) is consulted ONLY on an env-map miss — this is the runtime-provisioned token store;
+    env tokens always win.
     HTTP, legacy (auth disabled): read X-Tenant-Id / X-Config-Id; if tenant absent and
     require_tenant is set, raise (no silent fallback -> no cross-company leakage).
     stdio (no HTTP request): use configured defaults.
@@ -89,14 +91,22 @@ def resolve(ctx: object, settings: Settings) -> TenantContext:
         if settings.auth_enabled:
             token = _bearer_token(headers)
             mapping = settings.auth_token_map()
-            if not token or token not in mapping:
-                raise TenantResolutionError(
-                    "Missing or invalid 'Authorization: Bearer <token>' for this request."
+            if token and token in mapping:  # env token map wins
+                tenant_id, pinned_config = mapping[token]
+                return TenantContext(
+                    tenant_id=tenant_id,
+                    config_id=pinned_config or headers.get(CONFIG_HEADER) or settings.default_config_id,
                 )
-            tenant_id, pinned_config = mapping[token]
-            return TenantContext(
-                tenant_id=tenant_id,
-                config_id=pinned_config or headers.get(CONFIG_HEADER) or settings.default_config_id,
+            if token and token_lookup is not None:  # runtime-provisioned token store (env-miss)
+                rec = token_lookup(token)
+                if rec:
+                    return TenantContext(
+                        tenant_id=rec["tenant_id"],
+                        config_id=rec.get("config_id") or headers.get(CONFIG_HEADER)
+                        or settings.default_config_id,
+                    )
+            raise TenantResolutionError(
+                "Missing or invalid 'Authorization: Bearer <token>' for this request."
             )
 
         tenant_id = headers.get(TENANT_HEADER)
@@ -113,37 +123,46 @@ def resolve(ctx: object, settings: Settings) -> TenantContext:
     return default_context(settings)
 
 
-def _resolve_base(ctx: object, mapping: dict[str, str], what: str) -> str | None:
+def _resolve_base(ctx: object, mapping: dict[str, str], what: str, *, token_lookup=None) -> str | None:
     """Resolve the authorized base namespace for a privileged call from a {token: base} map.
 
-    Returns None when the map is empty (trusted/dev mode); raises if the map is configured but the
-    request carries no matching bearer token. Shared by overlay-write and admin/baseline auth.
+    Returns None when the map is empty AND no token_lookup is supplied (trusted/dev mode). When a
+    token_lookup is supplied it is consulted on an env-map miss — a runtime-provisioned token's own
+    `tenant_id` IS the base it may act under (self-scoped). Env map always wins. Raises if auth is in
+    force (map set or lookup supplied) but the request carries no matching token.
     """
-    if not mapping:
-        return None
     request = _http_request(ctx)
     headers = getattr(request, "headers", None) if request is not None else None
     token = _bearer_token(headers) if headers is not None else None
-    if not token or token not in mapping:
-        raise TenantResolutionError(f"Missing or invalid {what} 'Authorization: Bearer <token>'.")
-    return mapping[token]
+    if mapping and token and token in mapping:  # env map wins
+        return mapping[token]
+    if token_lookup is not None and token:  # runtime-provisioned token store (self-scoped base)
+        rec = token_lookup(token)
+        if rec:
+            return rec["tenant_id"]
+    if not mapping and token_lookup is None:
+        return None  # trusted/dev mode (unchanged contract)
+    raise TenantResolutionError(f"Missing or invalid {what} 'Authorization: Bearer <token>'.")
 
 
-def resolve_write_base(ctx: object, settings: Settings) -> str | None:
+def resolve_write_base(ctx: object, settings: Settings, *, token_lookup=None) -> str | None:
     """Authorized base namespace for an overlay WRITE call (from the write bearer-token map).
 
     Returns the base tenant the token may write overlays under ('<base>@task/*'), or None when no
     write tokens are configured (trusted/dev mode — the caller still confines writes to an overlay
-    tenant). Raises if write tokens ARE configured but the request carries no matching one.
+    tenant). Raises if write tokens ARE configured but the request carries no matching one. When
+    token_lookup is supplied, a runtime-provisioned token may write overlays under its own tenant.
     """
-    return _resolve_base(ctx, settings.write_auth_token_map(), "write")
+    return _resolve_base(ctx, settings.write_auth_token_map(), "write", token_lookup=token_lookup)
 
 
-def resolve_admin_base(ctx: object, settings: Settings) -> str | None:
+def resolve_admin_base(ctx: object, settings: Settings, *, token_lookup=None) -> str | None:
     """Authorized base namespace for an ADMIN/baseline-reindex call (from the admin bearer-token map).
 
     Returns the base tenant the token may baseline-reindex ('<base>' itself — owner-of-base), or None
     when no admin tokens are configured (trusted/dev mode). Raises if admin tokens ARE configured but
-    the request carries no matching one. Unlike write tokens, this authorizes writing the baseline.
+    the request carries no matching one. When token_lookup is supplied (self-admin), a runtime-
+    provisioned token resolves to its own tenant as base. Provisioning tools deliberately DO NOT pass
+    token_lookup, so a provisioned data-plane token can never provision — control plane is env-only.
     """
-    return _resolve_base(ctx, settings.admin_auth_token_map(), "admin")
+    return _resolve_base(ctx, settings.admin_auth_token_map(), "admin", token_lookup=token_lookup)

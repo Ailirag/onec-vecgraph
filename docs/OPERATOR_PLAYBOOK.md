@@ -109,6 +109,23 @@ uv run onec-vecgraph index-overlay payload.json
 - Запись разрешена только в overlay-тенант (`@task/`); `WRITE_AUTH_TOKENS="token=base"` ограничивает namespace.
 - Чтение со слиянием: графовые инструменты принимают `overlay_tenant_id` (Phase 2); поиск сливает оркестратор.
 
+## 5b. Онбординг тенанта (провижининг токенов, admin :8002)
+Атомарная связка «оркестратор ↔ векторная БД»: завести тенанта и выдать bearer-токен одним вызовом (без ручного
+вписывания токенов в env, без плейсхолдер-`tenant_id`). Требует `PROVISIONING_ENABLED=true` + `AUTH_ENABLED=true`
+(иначе токен на :8000 не применится) + admin-токен (`ADMIN_TOKENS`) как контрол-плейн. Инструменты admin-сервера:
+- **`provision_tenant({tenant_id, config_id?, display_name?, rotate?})`** → `{tenant_id, config_id, token, created}`.
+  Идемпотентно: `created=false` если уже был; `rotate:true` — перевыпуск (старый инвалидируется). **Секрет-токен
+  возвращается ОДИН раз** (в Neo4j хранится только sha256): при `created=true`/`rotate=true` — новый токен, иначе `token:null`.
+- **`list_tenants()`** → `{tenants:[{tenant_id, config_ids, has_token}]}` — аудит.
+- **`revoke_tenant_token({tenant_id})`** → деактивация (вступает в силу на read/write в пределах `TOKEN_CACHE_TTL_SECONDS`).
+
+Выданный токен пригоден как `Authorization: Bearer` на :8000 (read своего тенанта + аддитивно `__shared__`),
+:8001 (overlay-write своего base) и :8002 (self-admin: reindex своего baseline / whoami). **Провижинить чужие
+тенанты проектный токен не может** — это только контрол-плейн (env `ADMIN_TOKENS`). Персистентные узлы
+`:Tenant`/`:TenantToken` НЕ трогаются `delete_tenant` (baseline-reset не отзовёт токен).
+> **Включение `AUTH_ENABLED=true` на живом инстансе** делает токены обязательными: сначала провижинь токены
+> действующим тенантам (`erp/erp_test/ut/demo`), иначе клиенты без токена «тихо увидят пустоту».
+
 ## 6. Поднять сервер / проверка / диагностика
 ```
 uv run onec-vecgraph serve --transport http          # http://127.0.0.1:8000/mcp (read-only)

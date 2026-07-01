@@ -67,22 +67,93 @@ class Neo4jStore:
         # Batched delete: a single DETACH DELETE of a large graph exceeds Neo4j's
         # per-transaction memory limit. Drop relationships first, then nodes, each
         # batch in its own auto-commit transaction.
+        # Control-plane auth nodes (:Tenant/:TenantToken) carry tenant_id but are NOT graph data —
+        # exclude them so a baseline reset / graph wipe never silently revokes the tenant's token.
         while True:
             rows = self.read(
-                "MATCH (n {tenant_id: $tenant})-[r]->() WITH r LIMIT $batch "
-                "DELETE r RETURN count(r) AS c",
+                "MATCH (n {tenant_id: $tenant})-[r]->() "
+                "WHERE NOT n:Tenant AND NOT n:TenantToken "
+                "WITH r LIMIT $batch DELETE r RETURN count(r) AS c",
                 tenant=tenant_id, batch=batch,
             )
             if not rows or rows[0]["c"] == 0:
                 break
         while True:
             rows = self.read(
-                "MATCH (n {tenant_id: $tenant}) WITH n LIMIT $batch "
-                "DELETE n RETURN count(n) AS c",
+                "MATCH (n {tenant_id: $tenant}) "
+                "WHERE NOT n:Tenant AND NOT n:TenantToken "
+                "WITH n LIMIT $batch DELETE n RETURN count(n) AS c",
                 tenant=tenant_id, batch=batch,
             )
             if not rows or rows[0]["c"] == 0:
                 break
+
+    # ── runtime tenant provisioning (control-plane; hashed bearer tokens) ──
+    def resolve_token(self, token_hash: str) -> dict[str, Any] | None:
+        """Active provisioned token lookup by sha256 hex → {tenant_id, config_id} or None."""
+        rows = self.read(
+            "MATCH (tk:TenantToken {token_hash: $h}) WHERE tk.active = true "
+            "RETURN tk.tenant_id AS tenant_id, tk.config_id AS config_id",
+            h=token_hash,
+        )
+        return rows[0] if rows else None
+
+    def provision_tenant(self, tenant_id: str, config_id: str, display_name: str | None,
+                         new_token_hash: str | None, now_iso: str) -> dict[str, Any]:
+        """Idempotent create-or-return a :Tenant; optionally (re)issue its bearer token.
+
+        Returns {created, config_id, had_active_token}. When new_token_hash is given, any prior
+        active token for the tenant is deactivated first (rotate/first-issue), then the new hash is
+        stored active. The plaintext token is never seen here — only its hash."""
+        trow = self.read(
+            "MERGE (t:Tenant {tenant_id: $tid}) "
+            "ON CREATE SET t.created_at = $now, t.config_id = $cfg, t.display_name = $dn, "
+            "              t._created = true "
+            "ON MATCH SET t._created = false, "
+            "             t.display_name = coalesce($dn, t.display_name), "
+            "             t.config_id = coalesce(t.config_id, $cfg) "
+            "WITH t, coalesce(t._created, false) AS created REMOVE t._created "
+            "RETURN created AS created, t.config_id AS config_id",
+            tid=tenant_id, cfg=config_id, dn=display_name, now=now_iso,
+        )[0]
+        had = self.read(
+            "OPTIONAL MATCH (tk:TenantToken {tenant_id: $tid, active: true}) RETURN count(tk) AS n",
+            tid=tenant_id,
+        )[0]["n"] > 0
+        if new_token_hash is not None:
+            self.write(
+                "MATCH (tk:TenantToken {tenant_id: $tid, active: true}) "
+                "SET tk.active = false, tk.updated_at = $now",
+                tid=tenant_id, now=now_iso,
+            )
+            self.write(
+                "MERGE (tk:TenantToken {token_hash: $h}) ON CREATE SET tk.created_at = $now "
+                "SET tk.tenant_id = $tid, tk.config_id = $cfg, tk.active = true, tk.updated_at = $now",
+                h=new_token_hash, tid=tenant_id, cfg=trow["config_id"], now=now_iso,
+            )
+        return {"created": trow["created"], "config_id": trow["config_id"], "had_active_token": had}
+
+    def list_tenants(self) -> list[dict[str, Any]]:
+        """Audit: every provisioned :Tenant with its config_ids and whether an active token exists."""
+        return self.read(
+            "MATCH (t:Tenant) "
+            "OPTIONAL MATCH (tk:TenantToken {tenant_id: t.tenant_id, active: true}) "
+            "WITH t, count(tk) AS active_tokens, collect(DISTINCT tk.config_id) AS cfgs "
+            "RETURN t.tenant_id AS tenant_id, "
+            "       [c IN cfgs WHERE c IS NOT NULL] + "
+            "         CASE WHEN t.config_id IS NULL THEN [] ELSE [t.config_id] END AS config_ids_raw, "
+            "       (active_tokens > 0) AS has_token "
+            "ORDER BY t.tenant_id",
+        )
+
+    def revoke_tenant_token(self, tenant_id: str, now_iso: str) -> int:
+        """Deactivate all active tokens for a tenant. Returns the count deactivated."""
+        rows = self.read(
+            "MATCH (tk:TenantToken {tenant_id: $tid, active: true}) "
+            "SET tk.active = false, tk.updated_at = $now RETURN count(tk) AS n",
+            tid=tenant_id, now=now_iso,
+        )
+        return rows[0]["n"] if rows else 0
 
     def write_graph(self, graph: GraphData) -> dict[str, int]:
         tenant = graph.tenant_id

@@ -121,6 +121,14 @@ class Settings(BaseSettings):
     # behind an authenticating proxy. Off by default; the API tools stay token-scoped regardless.
     admin_dashboard_enabled: bool = False
 
+    # ── Runtime tenant provisioning (admin :8002, opt-in) ────────────────
+    # provision_tenant / list_tenants / revoke_tenant_token issue & persist bearer tokens in Neo4j
+    # (hashed). Reuses the admin bearer auth (ADMIN_TOKENS) as the control plane. Off by default.
+    provisioning_enabled: bool = False
+    # In-process TTL (seconds) for the Neo4j-backed token cache on the read/write servers. A revoked
+    # or rotated token keeps working on already-running processes for at most this long.
+    token_cache_ttl_seconds: int = 30
+
     # Empty env strings (e.g. compose `VAR: "${VAR:-}"`) → None for optional fields, so an
     # unset cloud var doesn't break parsing (e.g. "" is not a valid int for embedding_dimensions).
     @field_validator(

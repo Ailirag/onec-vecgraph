@@ -83,9 +83,18 @@ mcp = FastMCP(
 )
 
 
+def _token_lookup():
+    """Runtime-provisioned token resolver (env-miss fallback), only when auth is enabled."""
+    if not settings.auth_enabled:
+        return None
+    from . import token_store
+
+    return lambda tok: token_store.lookup_token(tok, settings)
+
+
 def _tenant(ctx: Context) -> str:
     """Resolve and return the caller's tenant id (raises if missing over HTTP)."""
-    return tenancy.resolve(ctx, settings).tenant_id
+    return tenancy.resolve(ctx, settings, token_lookup=_token_lookup()).tenant_id
 
 
 def _shared(tenant_id: str) -> str | None:
@@ -129,7 +138,7 @@ def neo4j_health() -> dict[str, Any]:
 @mcp.tool()
 def whoami(ctx: Context) -> dict[str, Any]:
     """Return the tenant/config resolved for this request (to verify header wiring)."""
-    scope = tenancy.resolve(ctx, settings)
+    scope = tenancy.resolve(ctx, settings, token_lookup=_token_lookup())
     return {"tenant_id": scope.tenant_id, "config_id": scope.config_id}
 
 

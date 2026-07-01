@@ -201,7 +201,12 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 - `write_server.py` — FastMCP overlay-WRITE (opt-in, :8001), единств. тул `index_overlay`; `overlay.py`/
   `overlay_index.py` — драйвер overlay-дельты; модель — `docs/OVERLAY.md`.
 - `admin_server.py` — FastMCP admin/baseline (opt-in, :8002): `reindex_baseline` (fire-and-poll) +
-  `index_job_status` + ping/neo4j_health/whoami. `baseline.py` — драйвер (обёртка index→callgraph→vectorize:
+  `index_job_status` + ping/neo4j_health/whoami + **провижининг тенантов** (`provisioning_enabled`):
+  `provision_tenant`/`list_tenants`/`revoke_tenant_token` — заводят тенанта и выдают bearer-токен (в Neo4j
+  узлы `:Tenant`/`:TenantToken`, хранится sha256-хеш; секрет отдаётся один раз). Резолв токена: `tenancy.resolve`/
+  `resolve_write_base`/`resolve_admin_base` принимают `token_lookup` (env-карта выигрывает → фолбэк в
+  `token_store.lookup_token` c TTL-кэшем); контрол-плейн (provision) — только env `ADMIN_TOKENS`. `delete_tenant`
+  исключает auth-узлы. `baseline.py` — драйвер (обёртка index→callgraph→vectorize:
   `validate_reindex_request`/`run_baseline_reindex`/`final_status`, детект `files_missing`/`empty_graph`).
   `jobs.py` — job-store + single-flight FIFO runner (in-mem + опц. JSON-persist). `dashboard.py` —
   read-only веб-дашборд джоб (`GET /jobs` HTML + `/jobs.json`, opt-in `ADMIN_DASHBOARD_ENABLED`, чистые
