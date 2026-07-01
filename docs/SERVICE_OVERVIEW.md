@@ -31,20 +31,22 @@ MCP-сервер, который векторизует конфигурации
 - `chunking.py` — построение чанков; `vectorizer.py` — эмбеддинги; `ingest.py` + `sources/` — мультиисточник.
 - `embeddings/` — провайдеры (`hashing`/`local`/`cloud`) + реранкер + runtime.
 - `storage/neo4j_store.py` — доступ к Neo4j; `queries.py` — поиск/граф/документы.
-- `server.py` — FastMCP-сервер (21 read-only инструмент + `instructions`); `cli.py` — CLI.
+- `server.py` — FastMCP-сервер (23 read-only инструмента + `instructions`); `cli.py` — CLI.
 - `config.py` — настройки; `tenancy.py` — резолв арендатора; `progress.py` — лог прогресса (скорость/%/ETA).
 
-## MCP умеет (read-only, 27 инструментов; детально — [MCP_USAGE.md](MCP_USAGE.md))
+## MCP умеет (read-only, 29 инструментов; детально — [MCP_USAGE.md](MCP_USAGE.md))
 здоровье/контекст (`ping`/`neo4j_health`/`whoami`) · поиск (`hybrid_search`/`semantic_search`) ·
 структура (`list_configurations`/`list_metadata`/`get_object`/`get_object_properties`) · зависимости (`get_dependencies`/
-`impact_analysis`/`find_type_usages`) · код (`find_handlers`/`find_callers`/`find_callees`/`call_path`) ·
+`impact_analysis`/`find_type_usages`) · код (`find_handlers`/`find_callers`/`find_callees`/`call_path`/`find_overrides`/`get_routine_source`) ·
 документация ИТС (`its_find_related_docs`/`its_get_document`) · артефакты (`artifact_find_related_docs`/
 `artifact_get_document`) · справка платформы (`platform_docinfo`/`platform_get_document`/`platform_versions`) ·
 стандарты разработки 1С (`dev_standards_search`/`dev_standards_get`) · обзор (`metrics`).
 
 ## Как начать сессию (чеклист)
 1. Прочитать [STATE.md](STATE.md) — актуальное состояние, что в Neo4j, ограничения, гочи.
-2. Поднять Neo4j: `docker compose up -d neo4j`; проверить `uv run onec-vecgraph health`.
+2. **Предполёт окружения** (снимает типовые ошибки старта): [SESSION_BOOTSTRAP.md](SESSION_BOOTSTRAP.md) —
+   интерактивно `. .\scripts\preflight.ps1 -StartNeo4j` (поднимет Neo4j + health), либо вручную поднять
+   Neo4j `docker compose up -d neo4j` и проверить `uv run onec-vecgraph health` с префиксом окружения.
 3. Понять задачу:
    - **управление данными** (индексация/векторизация/справка) → [OPERATOR_PLAYBOOK.md](OPERATOR_PLAYBOOK.md);
      рецепты векторизации корпусов знаний (agent-runnable) → [VECTORIZATION_GUIDE.md](VECTORIZATION_GUIDE.md);
@@ -56,6 +58,7 @@ MCP-сервер, который векторизует конфигурации
 | Документ | О чём |
 |---|---|
 | [STATE.md](STATE.md) | Снимок состояния: окружение, что готово, данные в Neo4j, ограничения (читать первым по сути) |
+| [SESSION_BOOTSTRAP.md](SESSION_BOOTSTRAP.md) | Старт сессии: префикс окружения, `scripts/preflight.ps1`, таблица «ошибка → фикс» |
 | [OPERATOR_PLAYBOOK.md](OPERATOR_PLAYBOOK.md) | Управление: index / callgraph / vectorize / ingest / ingest-help |
 | [VECTORIZATION_GUIDE.md](VECTORIZATION_GUIDE.md) | Рецепты векторизации корпусов (ИТС по конфигурации / стандарты v8std / справка платформы по версии), agent-runnable |
 | [MCP_USAGE.md](MCP_USAGE.md) | Гайд для агентов-потребителей (подключение, словари, инструменты, сценарии) |

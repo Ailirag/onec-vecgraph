@@ -18,6 +18,14 @@ description: >-
 
 **Рецепты векторизации корпусов знаний** (ИТС по конфигурации / стандарты разработки v8std / справка платформы по версии) — agent-runnable план, запуск в контейнере, верификация, ошибка «владельцы без чанков»: [docs/VECTORIZATION_GUIDE.md](../../../docs/VECTORIZATION_GUIDE.md).
 
+## Старт сессии (выполни ПЕРВЫМ — иначе типовые ошибки окружения)
+Свежая сессия PowerShell не настроена (uv не в PATH, консоль cp1251, кеш моделей не задан), а env между вызовами инструментов **не сохраняется** → добавляй префикс в **каждую** команду `uv …`:
+```powershell
+$env:Path="D:\tools\uv;$env:Path"; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $env:PYTHONUTF8='1'; $env:HF_HOME='D:\tools\hf-cache'
+```
+В **git-worktree** `.venv` свой и часто пуст → `program not found`; лечить `uv sync --frozen`. Интерактивно можно один раз прогнать предполёт: `. .\scripts\preflight.ps1 -StartNeo4j`.
+**Полная таблица «симптом → причина → фикс» (uv/кодировка/torch-exit/docker/pytest/VRAM):** [docs/SESSION_BOOTSTRAP.md](../../../docs/SESSION_BOOTSTRAP.md) — открой при любой непонятной ошибке старта.
+
 ## Золотые правила (не нарушать)
 1. **Одна модель/размерность на БД.** `EMBEDDING_PROVIDER`+`MODEL` при `vectorize`/`ingest` = как в `.env` сервера. Смена модели на существующей БД = полный реиндекс всех тенантов.
 2. **Tenant = организация × конфигурация.** Разные конфигурации → разные `--tenant-id`. `config_id` (`base`|`ext:…`) — не изоляция.

@@ -37,6 +37,20 @@ def test_code_chunks_drops_short_non_entry_routine() -> None:
     assert chunking.code_chunks(_rt("Мелочь"), "Процедура Мелочь()\nКонецПроцедуры", _ctx()) == []
 
 
+def test_code_chunks_marks_extension_override() -> None:
+    rt = SimpleNamespace(name="Расш_ПередЗаписью", kind="Procedure", directive="НаСервере",
+                         override_mode="Вместо", override_target="ПередЗаписью")
+    ctx = _ctx(module_config_id="ext:ДИТ_РасширениеАдаптацияУТ",
+               module_fqn="Document.РеализацияТоваров.Module.ObjectModule@ext:ДИТ_РасширениеАдаптацияУТ")
+    body = ("Процедура Расш_ПередЗаписью(Отказ)\n    ПроверитьЛимитКредита(Объект);\n"
+            "    ЗаписатьВЖурналРегистрации(Объект.Ссылка);\n    ОбновитьСвязанныеДанные();\nКонецПроцедуры")
+    chunks = chunking.code_chunks(rt, body, ctx)
+    assert chunks, "override routine must produce a code chunk"
+    text = chunks[0].text
+    assert "расширение «ДИТ_РасширениеАдаптацияУТ»" in text  # provenance in the head
+    assert "[Вместо «ПередЗаписью»]" in text                 # which base method it hooks
+
+
 def test_code_chunks_splits_large_routine_without_truncation() -> None:
     body = "Процедура Большая()\n" + "\n".join(f"  Перем П{i} = Вычислить{i}();" for i in range(400)) + "\nКонецПроцедуры"
     chunks = chunking.code_chunks(_rt("Большая"), body, _ctx())

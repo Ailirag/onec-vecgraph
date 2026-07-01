@@ -123,17 +123,19 @@ def _scan_modules(object_dir: Path | None, obj_fqn: str) -> list[ModuleRef]:
     return modules
 
 
-def _form_module_path(object_dir: Path | None, form_name: str) -> str | None:
-    if object_dir is None:
+def _form_module_path(form_dir: Path | None) -> str | None:
+    """Managed-form module path for a form directory (<form_dir>/Ext/Form/Module.bsl)."""
+    if form_dir is None:
         return None
-    candidate = object_dir / "Forms" / form_name / Path(*_FORM_MODULE)
+    candidate = form_dir / Path(*_FORM_MODULE)
     return str(candidate) if candidate.is_file() else None
 
 
-def _form_xml_path(object_dir: Path | None, form_name: str) -> str | None:
-    if object_dir is None:
+def _form_xml_path(form_dir: Path | None) -> str | None:
+    """Managed-form layout path for a form directory (<form_dir>/Ext/Form.xml)."""
+    if form_dir is None:
         return None
-    candidate = object_dir / "Forms" / form_name / "Ext" / "Form.xml"
+    candidate = form_dir / "Ext" / "Form.xml"
     return str(candidate) if candidate.is_file() else None
 
 
@@ -222,14 +224,32 @@ def parse_object(
                 )
             elif tag == "Form" and el.text:
                 form_name = el.text.strip()
+                form_dir = object_dir / "Forms" / form_name if object_dir is not None else None
                 obj.forms.append(
                     FormRef(
                         name=form_name,
                         fqn=f"{fqn}.Form.{form_name}",
-                        module_path=_form_module_path(object_dir, form_name),
-                        form_path=_form_xml_path(object_dir, form_name),
+                        module_path=_form_module_path(form_dir),
+                        form_path=_form_xml_path(form_dir),
                     )
                 )
+
+    # A CommonForm IS a managed form (it has no owning object and no <Form> child): its
+    # layout/module live directly in the object's own dir (CommonForms/<Name>/Ext/...).
+    # Synthesize a self-form so the form pipeline (text/handlers/code chunks/callgraph/
+    # HANDLES) treats it like any object-owned form.
+    if kind == "CommonForm" and object_dir is not None:
+        form_path = _form_xml_path(object_dir)
+        module_path = _form_module_path(object_dir)
+        if form_path or module_path:
+            obj.forms.append(
+                FormRef(
+                    name=name,
+                    fqn=f"{fqn}.Form",
+                    module_path=module_path,
+                    form_path=form_path,
+                )
+            )
 
     obj.modules = _scan_modules(object_dir, fqn)
     return obj

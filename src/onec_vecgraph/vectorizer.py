@@ -47,7 +47,7 @@ def _iter_code_chunks(store: Neo4jStore, tenant_id: str, only: list[str] | None 
         "WHERE ($only IS NULL OR o.fqn IN $only) "
         "RETURN o.fqn AS owner_fqn, o.kind AS owner_kind, o.name AS owner_name, o.synonym AS owner_syn, "
         "       o.config_version AS config_version, o.config_id AS config_id, mod.fqn AS module_fqn, "
-        "       mod.module_type AS module_type, mod.path AS path",
+        "       mod.module_type AS module_type, mod.path AS path, mod.config_id AS module_config_id",
         t=tenant_id, only=only,
     ):
         text = _read_bsl(m["path"])

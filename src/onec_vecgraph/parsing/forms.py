@@ -11,7 +11,11 @@ def parse_form_handlers(path: str) -> list[dict]:
     """Map managed-form events to handler procedure names: [{event, handler, element}].
 
     In Ext/Form.xml: <Event name="OnChange">ИмяОбработчика</Event> inside an item's <Events>.
+    EDT forms (.form) use a different schema — delegated to the EDT reader.
     """
+    if str(path).endswith(".form"):
+        from .edt.forms import parse_form_handlers as _edt
+        return _edt(path)
     try:
         root = etree.parse(str(path)).getroot()
     except (OSError, etree.XMLSyntaxError):
@@ -32,7 +36,11 @@ def parse_form_handlers(path: str) -> list[dict]:
 
 
 def extract_form_text(path: str, max_items: int = 60, max_len: int = 2000) -> str:
-    """Collect human-readable <v8:content> texts (form title + item captions) from a form."""
+    """Collect human-readable <v8:content> texts (form title + item captions) from a form.
+    EDT forms (.form) use a different schema — delegated to the EDT reader."""
+    if str(path).endswith(".form"):
+        from .edt.forms import extract_form_text as _edt
+        return _edt(path, max_items=max_items, max_len=max_len)
     try:
         root = etree.parse(str(path)).getroot()
     except (OSError, etree.XMLSyntaxError):

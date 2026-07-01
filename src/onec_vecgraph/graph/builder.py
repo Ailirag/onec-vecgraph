@@ -112,10 +112,20 @@ class _Builder:
             props["corpus_version"] = self.corpus_version
         self.node("Object", obj.fqn, props)
 
+        # A borrowed (Adopted) object shares the base object's fqn. Its module/form/detail
+        # would otherwise collapse onto the base node (base wins) and the extension's
+        # overrides/changed forms/properties would be lost. Qualify those sub-artifacts with
+        # the extension's config_id so they attach ALONGSIDE the base ones on the same Object
+        # node (one logical object preserved; overrides become searchable + callgraph-visible).
+        adopted = obj.belonging == "Adopted" and obj.config_id != "base"
+
+        def _q(fqn: str) -> str:
+            return f"{fqn}@{obj.config_id}" if adopted else fqn
+
         # Sidecar detail node: full property set for dev/analyst lookup (not vectorized).
         if obj.details:
-            self.node("Detail", obj.fqn, {"config_id": obj.config_id, **obj.details})
-            self.edge("HAS_DETAIL", "Object", obj.fqn, "Detail", obj.fqn, soft=False)
+            self.node("Detail", _q(obj.fqn), {"config_id": obj.config_id, **obj.details})
+            self.edge("HAS_DETAIL", "Object", obj.fqn, "Detail", _q(obj.fqn), soft=False)
 
         for fld in obj.fields:
             self._field("Object", obj.fqn, fld, obj.config_id)
@@ -144,16 +154,16 @@ class _Builder:
             self.edge("HAS_PREDEFINED", "Object", obj.fqn, "Predefined", pd.fqn, soft=False)
 
         for fm in obj.forms:
-            self.node("Form", fm.fqn,
+            self.node("Form", _q(fm.fqn),
                       {"name": fm.name, "module_path": fm.module_path, "form_path": fm.form_path,
                        "config_id": obj.config_id})
-            self.edge("HAS_FORM", "Object", obj.fqn, "Form", fm.fqn, soft=False)
+            self.edge("HAS_FORM", "Object", obj.fqn, "Form", _q(fm.fqn), soft=False)
 
         for md in obj.modules:
-            self.node("Module", md.fqn,
+            self.node("Module", _q(md.fqn),
                       {"module_type": md.module_type, "path": md.path, "size": md.size,
                        "config_id": obj.config_id})
-            self.edge("HAS_MODULE", "Object", obj.fqn, "Module", md.fqn, soft=False)
+            self.edge("HAS_MODULE", "Object", obj.fqn, "Module", _q(md.fqn), soft=False)
 
         for owner_fqn in obj.owners:
             self.edge("OWNED_BY", "Object", obj.fqn, "Object", owner_fqn, soft=True)

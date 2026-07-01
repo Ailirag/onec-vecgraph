@@ -28,13 +28,30 @@ def _read(path: str) -> str | None:
         return None
 
 
-def _parse_modules(modules: list[dict],
-                   progress_label: str | None = None) -> tuple[list[dict], list[tuple], dict, dict, dict, dict]:
-    """Parse module files -> (routine_rows, parsed, local_index, common_index, manager_index, stats)."""
+def _override_edge(rfqn: str, module_fqn: str, rt, props: dict) -> list[dict]:
+    """If `rt` is an extension override (&Вместо/&Перед/&После/&ИзменениеИКонтроль) in a
+    config-qualified module ('…@ext:<cfg>'), record props + an OVERRIDES edge to the borrowed
+    base routine (same module, base config). Returns [] for ordinary routines."""
+    if not rt.override_mode or "@ext:" not in module_fqn:
+        return []
+    props["override_mode"] = rt.override_mode
+    props["override_target"] = rt.override_target
+    if not rt.override_target:
+        return []
+    base_module = module_fqn.split("@ext:", 1)[0]
+    return [{"src": rfqn, "dst": f"{base_module}::{rt.override_target}",
+             "mode": rt.override_mode, "target_name": rt.override_target}]
+
+
+def _parse_modules(modules: list[dict], progress_label: str | None = None) -> tuple[
+        list[dict], list[tuple], dict, dict, dict, list[dict], dict]:
+    """Parse module files -> (routine_rows, parsed, local_index, common_index, manager_index,
+    override_rows, stats)."""
     routine_rows: list[dict] = []
     local_index: dict[str, dict[str, str]] = {}
     common_index: dict[str, dict[str, str]] = {}
     manager_index: dict[str, dict[str, str]] = {}  # object name -> {method: fqn} for ManagerModule
+    override_rows: list[dict] = []
     parsed: list[tuple[str, list]] = []
     modules_parsed = files_missing = total_routines = 0
     prog = Progress(len(modules), progress_label, unit="модулей", rate_word="модуль/с") if progress_label else None
@@ -54,15 +71,14 @@ def _parse_modules(modules: list[dict],
         for rt in routines:
             rfqn = f"{mf}::{rt.name}"
             local[rt.name] = rfqn
-            routine_rows.append({
-                "fqn": rfqn, "module_fqn": mf,
-                "props": {
-                    "name": rt.name, "routine_kind": rt.kind, "export": rt.export,
-                    "region": rt.region, "object_fqn": m["obj_fqn"], "object_kind": m["obj_kind"],
-                    "module_type": m["mtype"], "config_version": m.get("config_version"),
-                    "entry_point": classify_entry_point(rt.name),
-                },
-            })
+            props = {
+                "name": rt.name, "routine_kind": rt.kind, "export": rt.export,
+                "region": rt.region, "object_fqn": m["obj_fqn"], "object_kind": m["obj_kind"],
+                "module_type": m["mtype"], "config_version": m.get("config_version"),
+                "entry_point": classify_entry_point(rt.name),
+            }
+            override_rows.extend(_override_edge(rfqn, mf, rt, props))
+            routine_rows.append({"fqn": rfqn, "module_fqn": mf, "props": props})
         if m["obj_kind"] == "CommonModule":
             ci = common_index.setdefault(m["obj_name"], {})
             for rt in routines:
@@ -79,16 +95,17 @@ def _parse_modules(modules: list[dict],
         prog.finish()
     stats = {"modules_parsed": modules_parsed, "files_missing": files_missing,
              "routines": total_routines}
-    return routine_rows, parsed, local_index, common_index, manager_index, stats
+    return routine_rows, parsed, local_index, common_index, manager_index, override_rows, stats
 
 
-def _parse_form_modules(forms: list[dict],
-                        progress_label: str | None = None) -> tuple[list[dict], list[tuple], dict, list[dict], dict]:
-    """Parse form modules -> (routine_rows, parsed, local_index, handles_rows, stats)."""
+def _parse_form_modules(forms: list[dict], progress_label: str | None = None) -> tuple[
+        list[dict], list[tuple], dict, list[dict], list[dict], dict]:
+    """Parse form modules -> (routine_rows, parsed, local_index, handles_rows, override_rows, stats)."""
     routine_rows: list[dict] = []
     local_index: dict[str, dict[str, str]] = {}
     parsed: list[tuple[str, list]] = []
     handles_rows: list[dict] = []
+    override_rows: list[dict] = []
     parsed_cnt = missing = total = 0
     prog = Progress(len(forms), progress_label, unit="форм", rate_word="форма/с") if progress_label else None
 
@@ -111,15 +128,14 @@ def _parse_form_modules(forms: list[dict],
             rfqn = f"{ff}::{rt.name}"
             local[rt.name] = rfqn
             ev = handlers.get(rt.name)
-            routine_rows.append({
-                "fqn": rfqn, "form_fqn": ff,
-                "props": {
-                    "name": rt.name, "routine_kind": rt.kind, "export": rt.export,
-                    "region": rt.region, "directive": rt.directive, "object_fqn": f["owner_fqn"],
-                    "object_kind": f["owner_kind"], "module_type": "FormModule",
-                    "entry_point": classify_entry_point(rt.name, form_event=ev["event"] if ev else None),
-                },
-            })
+            props = {
+                "name": rt.name, "routine_kind": rt.kind, "export": rt.export,
+                "region": rt.region, "directive": rt.directive, "object_fqn": f["owner_fqn"],
+                "object_kind": f["owner_kind"], "module_type": "FormModule",
+                "entry_point": classify_entry_point(rt.name, form_event=ev["event"] if ev else None),
+            }
+            override_rows.extend(_override_edge(rfqn, ff, rt, props))
+            routine_rows.append({"fqn": rfqn, "form_fqn": ff, "props": props})
         parsed.append((ff, routines))
         for h in handlers.values():
             target = local.get(h["handler"])
@@ -130,7 +146,7 @@ def _parse_form_modules(forms: list[dict],
     if prog:
         prog.finish()
     stats = {"form_modules_parsed": parsed_cnt, "form_routines": total, "form_files_missing": missing}
-    return routine_rows, parsed, local_index, handles_rows, stats
+    return routine_rows, parsed, local_index, handles_rows, override_rows, stats
 
 
 def _resolve(parsed: list[tuple], local_index: dict, common_index: dict,
@@ -171,9 +187,9 @@ def _resolve(parsed: list[tuple], local_index: dict, common_index: dict,
 
 def _full(tenant_id: str, store: Neo4jStore, reason: str | None = None) -> dict[str, Any]:
     modules = store.routine_modules(tenant_id)
-    routine_rows, parsed, local_index, common_index, manager_index, pstats = _parse_modules(
+    routine_rows, parsed, local_index, common_index, manager_index, override_rows, pstats = _parse_modules(
         modules, progress_label=f"callgraph:{tenant_id} модули")
-    f_rows, f_parsed, f_local, handles_rows, fstats = _parse_form_modules(
+    f_rows, f_parsed, f_local, handles_rows, f_override_rows, fstats = _parse_form_modules(
         store.form_modules(tenant_id), progress_label=f"callgraph:{tenant_id} формы")
     local_index.update(f_local)
 
@@ -183,8 +199,10 @@ def _full(tenant_id: str, store: Neo4jStore, reason: str | None = None) -> dict[
     call_rows, rstats = _resolve(parsed + f_parsed, local_index, common_index, manager_index)
     written = store.write_calls(tenant_id, call_rows)
     handles = store.write_handles(tenant_id, handles_rows)
+    overrides = store.write_overrides(tenant_id, override_rows + f_override_rows)
     return {"mode": "full", "tenant_id": tenant_id, "fallback_reason": reason,
-            **pstats, **fstats, **rstats, "calls_written": written, "handles_written": handles}
+            **pstats, **fstats, **rstats, "calls_written": written, "handles_written": handles,
+            "overrides_written": overrides}
 
 
 def build_call_graph(
@@ -206,7 +224,7 @@ def build_call_graph(
 
         stale_fqns = [fqn for fqn, _ in stale]
         modules = store.routine_modules(tenant_id, only=stale_fqns)
-        routine_rows, parsed, local_index, _common, _manager, pstats = _parse_modules(
+        routine_rows, parsed, local_index, _common, _manager, override_rows, pstats = _parse_modules(
             modules, progress_label=f"callgraph:{tenant_id} модули (incr)")
         common_index = store.common_module_routine_index(tenant_id)  # from graph (unchanged)
         manager_index = store.manager_module_routine_index(tenant_id)  # from graph (unchanged)
@@ -214,5 +232,6 @@ def build_call_graph(
         store.write_routines(tenant_id, routine_rows)
         call_rows, rstats = _resolve(parsed, local_index, common_index, manager_index)
         written = store.write_calls(tenant_id, call_rows)
+        overrides = store.write_overrides(tenant_id, override_rows)
         return {"mode": "incremental", "tenant_id": tenant_id, "stale_objects": len(stale),
-                **pstats, **rstats, "calls_written": written}
+                **pstats, **rstats, "calls_written": written, "overrides_written": overrides}

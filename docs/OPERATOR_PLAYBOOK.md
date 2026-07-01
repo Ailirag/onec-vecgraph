@@ -17,6 +17,10 @@
 4. **Секреты.** `.env` в `.gitignore` — не коммитить, токены/пароли не светить. Коммит/пуш — **только по явной просьбе пользователя**.
 
 ## Предусловия
+- **Окружение сессии:** перед любыми командами — [SESSION_BOOTSTRAP.md](SESSION_BOOTSTRAP.md) (uv в PATH,
+  UTF-8, кеш моделей, `.venv` в git-worktree) + таблица «симптом → фикс». Префикс в каждую команду:
+  `$env:Path="D:\tools\uv;$env:Path"; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $env:PYTHONUTF8='1'; $env:HF_HOME='D:\tools\hf-cache'`.
+  Быстрый предполёт (интерактивно): `. .\scripts\preflight.ps1 -StartNeo4j`.
 - Neo4j поднят: `docker compose up -d neo4j`; проверка — `uv run onec-vecgraph health`.
 - `.env` настроен (`EMBEDDING_PROVIDER/MODEL/DEVICE`, `NEO4J_*`). Для GPU: `EMBEDDING_DEVICE=cuda` + torch cu128 + `--gpus`.
 - **Инвокация:** `uv run onec-vecgraph <cmd>`.

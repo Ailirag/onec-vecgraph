@@ -1,11 +1,35 @@
 from onec_vecgraph.bsl.parser import Call, Routine
-from onec_vecgraph.callgrapher import _resolve
+from onec_vecgraph.callgrapher import _override_edge, _resolve
 
 
 def _rt(name, calls):
     rt = Routine(name=name, kind="Procedure", export=False, start_line=1, end_line=2)
     rt.calls = calls
     return rt
+
+
+def test_override_edge_targets_base_routine_in_qualified_module() -> None:
+    mf = "Catalog.Контрагенты.Module.ObjectModule@ext:ДИТ"
+    rt = Routine(name="Расш_ПередЗаписью", kind="Procedure", export=False, start_line=1, end_line=2,
+                 override_mode="Вместо", override_target="ПередЗаписью")
+    props = {}
+    rows = _override_edge(f"{mf}::{rt.name}", mf, rt, props)
+    assert props["override_mode"] == "Вместо"  # also recorded on the routine node
+    assert rows == [{
+        "src": "Catalog.Контрагенты.Module.ObjectModule@ext:ДИТ::Расш_ПередЗаписью",
+        "dst": "Catalog.Контрагенты.Module.ObjectModule::ПередЗаписью",  # base config, @ext stripped
+        "mode": "Вместо", "target_name": "ПередЗаписью",
+    }]
+
+
+def test_override_edge_skipped_for_base_module_and_plain_routines() -> None:
+    base_mf = "Catalog.Контрагенты.Module.ObjectModule"
+    over = Routine(name="X", kind="Procedure", export=False, start_line=1, end_line=2,
+                   override_mode="Вместо", override_target="ПередЗаписью")
+    # override annotation but NOT in an @ext module → not an extension override, skip
+    assert _override_edge(f"{base_mf}::X", base_mf, over, {}) == []
+    plain = Routine(name="Y", kind="Procedure", export=False, start_line=1, end_line=2)
+    assert _override_edge(f"{base_mf}@ext:Z::Y", f"{base_mf}@ext:Z", plain, {}) == []
 
 
 def test_resolve_manager_call_medium_confidence() -> None:
