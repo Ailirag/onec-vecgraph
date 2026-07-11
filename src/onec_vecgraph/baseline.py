@@ -31,6 +31,12 @@ from .overlay import is_overlay_tenant
 VALID_STEPS = ("index", "callgraph", "vectorize")
 
 
+def _stage_of(label: str) -> str:
+    """Map a Progress label ('vectorize:ut', 'callgraph:ut формы', 'index:ut') to its VALID_STEPS key."""
+    tok = (label or "").split(":", 1)[0].strip().lower()
+    return tok if tok in VALID_STEPS else ""
+
+
 def _resolve_steps(options: dict[str, Any]) -> list[str]:
     """Ordered, validated subset of VALID_STEPS (default: all three, in pipeline order)."""
     raw = options.get("steps")
@@ -124,6 +130,17 @@ def run_baseline_reindex(
         overrides["embedding_model"] = str(options["embedding_model"])
     s = settings.model_copy(update=overrides) if overrides else settings
 
+    # Route within-phase ticks (chunks x/y, ETA) from the heavy loops into the job's `detail`, so a
+    # poller sees a fast-moving second line during the long vectorize phase. Thread-local + single-flight
+    # runner ⇒ no cross-job leakage; cleared in `finally` so a later CLI/overlay run on this thread is
+    # unaffected. `stage` tags which heavy loop is reporting (the coarse `phase` may already be the next).
+    from . import progress as _progress
+
+    def _detail_sink(payload: dict[str, Any]) -> None:
+        report(detail={**payload, "stage": _stage_of(payload.get("label", ""))})
+
+    _progress.set_progress_sink(_detail_sink)
+
     summary: dict[str, Any] = {
         "tenant_id": tenant_id,
         "base_tenant_id": base_tenant_id,
@@ -143,59 +160,62 @@ def run_baseline_reindex(
         "empty_graph": False,
     }
 
-    from .parsing import discover_parts
+    try:
+        from .parsing import discover_parts
 
-    p = Path(path)
-    parts = discover_parts(p) if p.is_dir() else []
-    if not parts:
-        # Missing dir or a directory with no Configurator parts → the mount-desync failure mode.
-        summary["files_missing"] = True
-        summary["empty_graph"] = True
-        summary["error"] = f"dump path missing or contains no configuration parts: {path}"
-        report(phase=PHASE_DONE, percent=100, files_missing=True, empty_graph=True)
+        p = Path(path)
+        parts = discover_parts(p) if p.is_dir() else []
+        if not parts:
+            # Missing dir or a directory with no Configurator parts → the mount-desync failure mode.
+            summary["files_missing"] = True
+            summary["empty_graph"] = True
+            summary["error"] = f"dump path missing or contains no configuration parts: {path}"
+            report(phase=PHASE_DONE, percent=100, files_missing=True, empty_graph=True)
+            return summary
+
+        total = len(steps)
+        done = 0
+
+        if "index" in steps:
+            from .indexer import index_dump
+
+            report(phase=PHASE_INDEX, detail=None)
+            res = index_dump(path, tenant_id, s, reset=reset)
+            objects = res["counts"]["real_objects"]
+            nodes = res["written"]["nodes"]
+            edges = res["written"]["edges"]
+            summary.update(indexed_objects=objects, nodes=nodes, edges=edges,
+                           parse_errors=res.get("parse_errors", 0))
+            if objects == 0 or nodes == 0:
+                summary["empty_graph"] = True  # indexed "successfully" but produced nothing → warning
+            done += 1
+            report(phase=PHASE_INDEX, percent=int(100 * done / total), empty_graph=summary["empty_graph"],
+                   counts={"objects": objects, "nodes": nodes, "edges": edges})
+
+        if "callgraph" in steps:
+            from .callgrapher import build_call_graph
+
+            report(phase=PHASE_CALLGRAPH, detail=None)
+            res = build_call_graph(tenant_id, s, reset=True)
+            routines = res.get("routines")
+            summary.update(routines=routines, graph_updated=True)
+            done += 1
+            report(phase=PHASE_CALLGRAPH, percent=int(100 * done / total), counts={"routines": routines})
+
+        if "vectorize" in steps:
+            from .vectorizer import vectorize
+
+            report(phase=PHASE_VECTORIZE, detail=None)
+            res = vectorize(tenant_id, s, reset=True, code=True)
+            chunks = res.get("chunks_written")
+            summary.update(chunks=chunks, embedding_dim=res.get("dimensions"),
+                           embedding_model=res.get("model", s.embedding_model))
+            done += 1
+            report(phase=PHASE_VECTORIZE, percent=int(100 * done / total), counts={"chunks": chunks})
+
+        report(phase=PHASE_DONE, percent=100, detail=None, embedding_model=summary["embedding_model"],
+               embedding_dim=summary["embedding_dim"], files_missing=summary["files_missing"],
+               empty_graph=summary["empty_graph"])
         return summary
-
-    total = len(steps)
-    done = 0
-
-    if "index" in steps:
-        from .indexer import index_dump
-
-        report(phase=PHASE_INDEX)
-        res = index_dump(path, tenant_id, s, reset=reset)
-        objects = res["counts"]["real_objects"]
-        nodes = res["written"]["nodes"]
-        edges = res["written"]["edges"]
-        summary.update(indexed_objects=objects, nodes=nodes, edges=edges,
-                       parse_errors=res.get("parse_errors", 0))
-        if objects == 0 or nodes == 0:
-            summary["empty_graph"] = True  # indexed "successfully" but produced nothing → warning
-        done += 1
-        report(phase=PHASE_INDEX, percent=int(100 * done / total), empty_graph=summary["empty_graph"],
-               counts={"objects": objects, "nodes": nodes, "edges": edges})
-
-    if "callgraph" in steps:
-        from .callgrapher import build_call_graph
-
-        report(phase=PHASE_CALLGRAPH)
-        res = build_call_graph(tenant_id, s, reset=True)
-        routines = res.get("routines")
-        summary.update(routines=routines, graph_updated=True)
-        done += 1
-        report(phase=PHASE_CALLGRAPH, percent=int(100 * done / total), counts={"routines": routines})
-
-    if "vectorize" in steps:
-        from .vectorizer import vectorize
-
-        report(phase=PHASE_VECTORIZE)
-        res = vectorize(tenant_id, s, reset=True, code=True)
-        chunks = res.get("chunks_written")
-        summary.update(chunks=chunks, embedding_dim=res.get("dimensions"),
-                       embedding_model=res.get("model", s.embedding_model))
-        done += 1
-        report(phase=PHASE_VECTORIZE, percent=int(100 * done / total), counts={"chunks": chunks})
-
-    report(phase=PHASE_DONE, percent=100, embedding_model=summary["embedding_model"],
-           embedding_dim=summary["embedding_dim"], files_missing=summary["files_missing"],
-           empty_graph=summary["empty_graph"])
-    return summary
+    finally:
+        _progress.clear_progress_sink()

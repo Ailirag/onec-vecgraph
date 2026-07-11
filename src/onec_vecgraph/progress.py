@@ -8,9 +8,42 @@ standard library-logging contract, so importing this never forces output on libr
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 log = logging.getLogger("onec_vecgraph.progress")
+
+# ── optional live sink ──────────────────────────────────────────────────
+# A background job (baseline reindex) can subscribe to WITHIN-phase progress so its status reflects
+# "47,231 / 460,153 чанков (10.3%) · ETA ~1ч35м" instead of only the coarse 33/66/100 phase-completion
+# percent. The sink is thread-local: the baseline runner serializes jobs on ONE worker thread and the
+# Progress instances that feed it are created (deep in index/callgraph/vectorize) on that same thread,
+# so a thread-local can never leak one job's ticks into another's — and CLI/overlay processes, which
+# never set a sink, keep the pure logging-only contract.
+_sink_local = threading.local()
+
+
+def set_progress_sink(fn) -> None:
+    """Route within-phase ticks to `fn(payload: dict)` on THIS thread (None disables). See finish()."""
+    _sink_local.fn = fn
+
+
+def clear_progress_sink() -> None:
+    _sink_local.fn = None
+
+
+def _current_sink():
+    return getattr(_sink_local, "fn", None)
+
+
+def _feed_sink(payload: dict) -> None:
+    fn = _current_sink()
+    if fn is None:
+        return
+    try:
+        fn(payload)
+    except Exception:  # noqa: BLE001 - a broken sink must never crash the indexing work
+        log.debug("progress sink raised; ignoring", exc_info=True)
 
 
 def fmt_duration(seconds: float) -> str:
@@ -64,6 +97,12 @@ class Progress:
         log.info("[%s] %s/%s %s (%.1f%%) | %.0f %s | прошло %s | ETA ~%s",
                  self.label, f"{self.done:,}", f"{self.total:,}", self.unit, pct, rate,
                  self.rate_word, fmt_duration(elapsed), fmt_duration(eta))
+        _feed_sink({
+            "label": self.label, "unit": self.unit, "rate_word": self.rate_word,
+            "done": self.done, "total": self.total, "percent": round(pct, 1),
+            "rate": round(rate, 1), "elapsed_sec": round(elapsed, 1),
+            "eta_sec": round(eta), "eta_human": fmt_duration(eta), "done_flag": False,
+        })
 
     def finish(self) -> dict:
         elapsed = time.perf_counter() - self.start
@@ -71,4 +110,10 @@ class Progress:
         if self.total:
             log.info("[%s] готово: %s %s за %s (%.0f %s)",
                      self.label, f"{self.done:,}", self.unit, fmt_duration(elapsed), rate, self.rate_word)
+        _feed_sink({
+            "label": self.label, "unit": self.unit, "rate_word": self.rate_word,
+            "done": self.done, "total": self.total or self.done, "percent": 100.0,
+            "rate": round(rate, 1), "elapsed_sec": round(elapsed, 1),
+            "eta_sec": 0, "eta_human": fmt_duration(0), "done_flag": True,
+        })
         return {"elapsed_sec": round(elapsed, 2), "items_per_sec": round(rate, 1)}

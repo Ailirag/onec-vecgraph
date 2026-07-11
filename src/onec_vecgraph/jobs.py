@@ -77,6 +77,9 @@ class BaselineJob:
     phase: str = PHASE_QUEUED
     counts: dict[str, int | None] = field(default_factory=_empty_counts)
     percent: int = 0
+    # Live WITHIN-phase detail (done/total/percent/rate/eta for the current heavy loop), fed by the
+    # progress reporter so pollers can show a second, fast-moving line under the coarse phase percent.
+    detail: dict[str, Any] | None = None
     queue_position: int = 0
     created_at: str = field(default_factory=_now)
     started_at: str | None = None
@@ -102,6 +105,7 @@ class BaselineJob:
             "phase": self.phase,
             "counts": dict(self.counts),
             "percent": self.percent,
+            "detail": dict(self.detail) if self.detail else None,
             "queue_position": self.queue_position,
             "created_at": self.created_at,
             "started_at": self.started_at,
