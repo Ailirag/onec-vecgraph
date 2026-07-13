@@ -83,6 +83,12 @@ class Progress:
 
     def advance(self, n: int = 1) -> None:
         self.done += n
+        # Cooperatively cede the GIL a few times per second so a tight, pure-Python heavy loop
+        # (BSL parsing / call-graph build) does not starve the in-process MCP HTTP server — otherwise
+        # a concurrent index_job_status poll gets no worker time and the client sees the connection
+        # dropped without a response. sleep(0) is a GIL yield (sub-microsecond), negligible overhead.
+        if self.done % 256 == 0:
+            time.sleep(0)
         now = time.perf_counter()
         # Throttle by wall-time; never emit a mid-run line at 100% (the final summary covers it).
         if self.done < self.total and now - self.last >= self.every:
