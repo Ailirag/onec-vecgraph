@@ -32,3 +32,7 @@ scripts/*.out.json
 
 # configVersion snapshots (test artifacts)
 snapshots/
+
+# local agent / code-graph tool dirs
+.agents/
+.codegraph/
