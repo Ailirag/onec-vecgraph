@@ -43,12 +43,13 @@ MCP-сервер, который векторизует конфигурации
 стандарты разработки 1С (`dev_standards_search`/`dev_standards_get`) · обзор (`metrics`).
 
 ## Lite-режим (без Neo4j и векторов)
-`uv run onec-vecgraph serve-lite --root <рабочая копия>` — отдельный MCP (29 инструментов, пакет
+`onec-lite admin` (или двойной клик `lite-admin.cmd`) — отдельный MCP (29 инструментов, пакет
 `lite/`) по **живой** рабочей копии (Конфигуратор XML | EDT): навигация/структура, код-анализ
 BSL-парсером (callers/callees/overrides/handlers/writes_to), поиск rg + opt-in SQLite FTS5 (BM25),
 справка платформы из `.hbk`, git-осведомлённость (`changed_objects`/`review_set`); веб-админка
-`--admin` (пути base/ext/справка/rg, построение индексов). Ниша — машина разработчика: свежесть
-важнее семантики; серверный граф/векторы/докорпуса — у основного MCP выше. Детали — STATE.md §5.
+(пути base/ext/справка/rg, построение индексов, персист). Ниша — машина разработчика: свежесть
+важнее семантики; серверный граф/векторы/докорпуса — у основного MCP выше.
+**Руководство: [LITE_USAGE.md](LITE_USAGE.md)** (быстрый старт, все инструменты, сценарии).
 
 ## Как начать сессию (чеклист)
 1. Прочитать [STATE.md](STATE.md) — актуальное состояние, что в Neo4j, ограничения, гочи.
@@ -70,6 +71,7 @@ BSL-парсером (callers/callees/overrides/handlers/writes_to), поиск 
 | [OPERATOR_PLAYBOOK.md](OPERATOR_PLAYBOOK.md) | Управление: index / callgraph / vectorize / ingest / ingest-help |
 | [VECTORIZATION_GUIDE.md](VECTORIZATION_GUIDE.md) | Рецепты векторизации корпусов (ИТС по конфигурации / стандарты v8std / справка платформы по версии), agent-runnable |
 | [MCP_USAGE.md](MCP_USAGE.md) | Гайд для агентов-потребителей (подключение, словари, инструменты, сценарии) |
+| [LITE_USAGE.md](LITE_USAGE.md) | Руководство onec-lite: запуск одним словом, админка, 29 инструментов, сценарии, lite vs big |
 | [OVERLAY.md](OVERLAY.md) | Overlay-тенанты: baseline + per-task дельта, write-эндпоинт `index_overlay`, union-граф (Phase 2) |
 | [DEPLOY_DETAILED.md](DEPLOY_DETAILED.md) · [DEPLOYMENT.md](DEPLOYMENT.md) | Деплой, докер (CPU/GPU), настройки, auth |
 | [../AGENTS.md](../AGENTS.md) | Точка входа для Codex / AGENTS.md-совместимых агентов |
