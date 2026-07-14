@@ -42,6 +42,14 @@ MCP-сервер, который векторизует конфигурации
 `artifact_get_document`) · справка платформы (`platform_docinfo`/`platform_get_document`/`platform_versions`) ·
 стандарты разработки 1С (`dev_standards_search`/`dev_standards_get`) · обзор (`metrics`).
 
+## Lite-режим (без Neo4j и векторов)
+`uv run onec-vecgraph serve-lite --root <рабочая копия>` — отдельный MCP (29 инструментов, пакет
+`lite/`) по **живой** рабочей копии (Конфигуратор XML | EDT): навигация/структура, код-анализ
+BSL-парсером (callers/callees/overrides/handlers/writes_to), поиск rg + opt-in SQLite FTS5 (BM25),
+справка платформы из `.hbk`, git-осведомлённость (`changed_objects`/`review_set`); веб-админка
+`--admin` (пути base/ext/справка/rg, построение индексов). Ниша — машина разработчика: свежесть
+важнее семантики; серверный граф/векторы/докорпуса — у основного MCP выше. Детали — STATE.md §5.
+
 ## Как начать сессию (чеклист)
 1. Прочитать [STATE.md](STATE.md) — актуальное состояние, что в Neo4j, ограничения, гочи.
 2. **Предполёт окружения** (снимает типовые ошибки старта): [SESSION_BOOTSTRAP.md](SESSION_BOOTSTRAP.md) —

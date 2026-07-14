@@ -1,6 +1,7 @@
 # Состояние проекта onec-vecgraph (хендофф для новой сессии)
 
-> Дата фиксации: 2026-06-08. Читать ПЕРВЫМ при старте новой сессии.
+> Дата фиксации: 2026-07-15 (база 2026-06-08 + onec-lite + актуализация снимка Neo4j).
+> Читать ПЕРВЫМ при старте новой сессии.
 > Авто-память (`MEMORY.md` и связанные файлы) загружается автоматически; этот файл — полный снимок.
 > Связанное: `README.md`, `PLAN.md`, `docs/INCREMENTAL_TEST_PLAN.md`, `docs/DEPLOYMENT.md`,
 > `docs/DEPLOY_RUNBOOK.md`, `docs/DEPLOY_DETAILED.md` (детальный запуск, каждая настройка),
@@ -63,7 +64,15 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   role 1847; **code-чанков НЕТ** — `vectorize --code` не прогонялся, это ~часы), **`:Detail` 23 998 узлов**.
   Поиск по коду на ERP не валидирован (валидирован на demo); граф-фичи, поиск по метаданным и слой Detail
   валидированы на ERP. Чтобы добить code: `vectorize --tenant-id erp_test --code` (батч 64; ~часы).
-- **`erp`, `ut`** — старые, без config_version/квалиф.fqn — устаревшие, можно удалить (`store.delete_tenant`).
+- **`ut` — ПЕРЕЗАЛИТ из EDT (проверено в работающем docker 2026-07-12)**: база (14 940 объектов) +
+  4 расширения (ДИТ_РасширениеАдаптацияУТ 851, битЕГАИС_УТ 463, ДИТ_ПретензииMMBI 75, дит_КонтурEDI 2);
+  **полная векторизация С кодом** (460 152 чанка, из них code 381 716), callgraph 259k рутин /
+  ~490k вызовов (manager 16 244), HANDLES 43 559, **OVERRIDES 1 350**, WRITES_TO 2 618, Detail 11 853.
+- **`__shared__`** (общий тенант): справка платформы **8.3.27.2130** — 24 874 документа / 24 884 чанка
+  (`platform_help`) + стандарты v8std — 317 документов / 875 чанков. Все эмбеддинги БД единообразно
+  **1024-dim** (Qwen3-0.6B), оба вектор-индекса и fulltext ONLINE (проверено сканом 2026-07-12).
+- **`erp`** — старый дубль erp_test (135k чанков метаданных, без форм/ролей) — можно удалить
+  (`store.delete_tenant`).
 
 ## 5. Что готово (этапы)
 
@@ -164,6 +173,36 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   **e2e не прогонялся — Docker Desktop в сессии не стартовал (WSL-bootstrap), Neo4j недоступен**
   (скрипт `scripts/_shared_probe.py` готов).
 
+- **onec-lite (2026-07-12…15) — MCP по ЖИВОЙ рабочей копии, нулевая инфраструктура** (`lite/`,
+  ветка `claude/vibrant-lewin-84215a`): без Neo4j и векторов — источник истины = файлы на диске,
+  ниша «машина разработчика: свежесть важнее семантики» (big-сервер = снимок+семантика, ut_mcp вытеснен).
+  Оба формата (Конфигуратор XML | EDT), авто-обнаружение расширений, порядок extension-first +
+  кросс-источниковый фолбэк для заимствованных объектов (рутина ищется в ext-модуле → база).
+  **29 read-only инструментов**: навигация/чтение (`overview/list_kinds/list_objects/get_object(+detail)/
+  list_routines/read_module/read_routine/read_file`); поиск (`search_code` rg-стриминг+Python-фолбэк,
+  `search_metadata`, `find_routine`, **`fts_search`** — SQLite FTS5/BM25 по рутинам и карточкам объектов:
+  opt-in индекс в `~/.onec-lite/fts/` — НЕ в рабочей копии, на УТ ~1 ГБ/3.4 мин полная сборка,
+  дальше инкремент по mtime + авто-дообновление при поиске ≥30 c, `built_at` в каждом ответе;
+  токенизация запроса `chunking.search_tokens` + усечённый префикс для кириллицы, OR+BM25-веса
+  title/tokens/body); код-анализ «rg сужает → BSL-парсер подтверждает» (`find_callers` (объявления/
+  строки/комментарии исключены) /`find_callees` (local/common/manager + confidence) /`call_graph`/
+  `find_handlers` (формы+точки входа+подписки EventSubscription)/`find_overrides` (&Вместо/&Перед/
+  &После/&ИзменениеИКонтроль)/`writes_to` (прямо+обратно)/`metrics`); метаданные (`get_dependencies`/
+  `find_type_usages` — `metaview.py`); сервисы/формы (`get_service` HTTP+Web-сервисы, `get_form` —
+  паритет с ut_mcp, в big-сервере их НЕТ); **git-осведомлённость** (`gitview.py`: `changed_objects` —
+  изменённые объекты ветки/рабочей копии, `review_set` — затронутые рутины + их callers/handlers/
+  overrides; уникально для lite — big работает по снимку); **справка платформы .hbk БЕЗ векторов**
+  (`platform_help.py`: `platform_docinfo/platform_search/platform_get_document/platform_versions`,
+  индекс имён ~0.9 с/25.5k тем на версию, лениво/кнопкой). **Веб-админка** `/admin` (opt-in `--admin`,
+  только http): статус источников, пути base+ext+справка+**rg-override**, применение на лету без
+  рестарта, персист `~/.onec-lite/config.json` (env `ONEC_LITE_STATE`), кнопки построения индексов
+  (FTS/справка), `/admin.json`. CLI `serve-lite` (`--root/--ext-root/--help-path/--admin/--host/--port/
+  --check/--build-fts`; env `ONEC_LITE_*`; **порт по умолчанию 8010** — не конфликтует с докерным :8000).
+  Тесты `tests/test_lite*.py` (5 файлов, ~90 тестов; всего в репо 210 зелёных). Гочи: rg ищется
+  env `ONEC_LITE_RG` → PATH → WinGet → VS Code → override в админке (без rg — Python-фолбэк, на УТ
+  ~45 c/скан); `time.monotonic()` на Windows тикает ~15.6 мс → TTL-сравнения только `>=`;
+  сборка FTS/справки в POST админки синхронная (минуты — как build_help у baseline).
+
 ## 6. Модель графа (Neo4j)
 
 - **Ключ узла**: `(tenant_id, fqn)` MERGE. Constraints + индексы — `graph/schema.py`.
@@ -250,6 +289,13 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   dim из карты/override/probe; `--extra cloud-embeddings`), reranker (CrossEncoder, опц.),
   runtime (кэш провайдера/реранкера).
 - `bsl/parser.py` — чистый Python BSL-парсер: процедуры/функции, export, region, **directive**, вызовы.
+- `lite/` — **onec-lite** (MCP по живой рабочей копии, без Neo4j/векторов): `workspace` (источники
+  двух форматов, листинги, точечный парс объекта, mtime/TTL-кэши), `search` (rg-стриминг + Python-фолбэк
+  + rg-override), `code_intel` (гибрид «rg→парсер»: callers/callees/call_graph/overrides/handlers/
+  writes_to/metrics), `metaview` (deps/type_usages/get_service/get_form), `gitview` (changed_objects/
+  review_set), `platform_help` (каталог .hbk: docinfo/search/get_document/versions), `fts` (SQLite FTS5
+  BM25, unit_map, инкремент по mtime), `admin` (чистые рендеры/персист состояния), `server` (FastMCP,
+  29 тулов + маршруты /admin, /admin.json).
 
 ## 8. MCP-инструменты (29)
 
@@ -389,6 +435,8 @@ uv run onec-vecgraph callers "Модуль.Метод" --tenant-id demo
 uv run onec-vecgraph snapshot "<путь>" --out snapshots/x.json               # слепок configVersion
 uv run onec-vecgraph snapshot-diff before.json after.json                   # дифф изменений
 uv run onec-vecgraph serve --transport http                                  # read MCP по HTTP (:8000/mcp)
+uv run onec-vecgraph serve-lite --root "H:\Гранд трейд\gitlab\ones\ut" --check          # lite: обзор живой копии
+uv run onec-vecgraph serve-lite --root <путь> [--transport http --admin --port 8010] [--build-fts]  # lite MCP (stdio по умолч.; админка /admin)
 OVERLAY_WRITE_ENABLED=true uv run onec-vecgraph serve-write --transport http # overlay-write MCP (:8001/mcp)
 BASELINE_REINDEX_ENABLED=true uv run onec-vecgraph serve-admin --transport http # admin/baseline MCP (:8002/mcp)
 ```
