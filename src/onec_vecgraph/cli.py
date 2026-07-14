@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 import typer
@@ -148,6 +149,130 @@ def serve_admin(
         run("stdio")
     else:
         raise typer.BadParameter("transport must be 'http' or 'stdio'")
+
+
+@app.command(name="serve-lite")
+def serve_lite(
+    root: str = typer.Option(
+        None, "--root",
+        help="Корень рабочей копии: выгрузка Конфигуратора или EDT-воркспейс "
+             "(env ONEC_LITE_ROOT; без него берётся сохранённое из админки).",
+    ),
+    ext_root: list[str] = typer.Option(
+        None, "--ext-root",
+        help="Дополнительный корень расширения/проекта (повторяемый; env ONEC_LITE_EXT_ROOTS через ';').",
+    ),
+    help_path: list[str] = typer.Option(
+        None, "--help-path",
+        help="Справка платформы: каталог bin или файл .hbk, форма «версия=путь» допустима "
+             "(повторяемый; env ONEC_LITE_HELP через ';'; без опции берётся сохранённое из админки).",
+    ),
+    transport: str = typer.Option("stdio", help="Transport: 'stdio' (по умолчанию) или 'http'."),
+    admin: bool = typer.Option(
+        False, "--admin",
+        help="Включить веб-админку GET/POST /admin (статус + смена путей на лету; только http).",
+    ),
+    build_fts: bool = typer.Option(
+        False, "--build-fts",
+        help="Построить/дообновить FTS5-индекс поиска (fts_search) перед запуском.",
+    ),
+    host: str = typer.Option(None, "--host", help="HTTP-хост (env ONEC_LITE_HOST, дефолт 127.0.0.1)."),
+    port: int = typer.Option(None, "--port", help="HTTP-порт (env ONEC_LITE_PORT, дефолт 8010)."),
+    check: bool = typer.Option(False, "--check", help="Напечатать overview источников и выйти."),
+) -> None:
+    """Run the zero-infrastructure lite MCP server over a LIVE working copy (no Neo4j/vectors).
+
+    Читает выгрузку Конфигуратора или EDT-проект (база + расширения) прямо с диска;
+    поиск через ripgrep (без него — Python-фолбэк), анализ кода — BSL-парсером.
+    С --admin можно стартовать вовсе без --root и задать пути в браузере."""
+    # env plumbing ДО импорта: lite-сервер читает эти переменные при создании FastMCP.
+    if admin:
+        os.environ["ONEC_LITE_ADMIN"] = "true"
+    if host:
+        os.environ["ONEC_LITE_HOST"] = host
+    if port:
+        os.environ["ONEC_LITE_PORT"] = str(port)
+    from .lite import admin as lite_admin
+    from .lite import platform_help as lite_platform_help
+    from .lite import server as lite_server
+
+    if transport not in ("stdio", "http"):
+        raise typer.BadParameter("transport must be 'stdio' or 'http'")
+    if admin and transport != "http":
+        raise typer.BadParameter("--admin работает только с --transport http")
+
+    root = (root or os.environ.get("ONEC_LITE_ROOT", "")).strip()
+    ext_roots = tuple(ext_root or ()) or tuple(
+        lite_admin.parse_ext_roots(os.environ.get("ONEC_LITE_EXT_ROOTS", ""))
+    )
+    if not root:
+        saved = lite_admin.load_paths(lite_admin.state_file())
+        if saved:
+            root, saved_ext = saved
+            ext_roots = ext_roots or tuple(saved_ext)
+            rprint(f"[dim]Пути взяты из сохранённого состояния: {lite_admin.state_file()}[/]")
+
+    ws = None
+    if root:
+        try:
+            ws = lite_server.configure(root, ext_roots)
+        except (ValueError, OSError) as exc:
+            rprint(f"[red]Не удалось открыть рабочую копию:[/] {exc}")
+            if not (admin and transport == "http"):
+                raise typer.Exit(code=1)
+            rprint("[yellow]Сервер стартует без воркспейса — задайте пути в админке.[/]")
+    elif not (admin and transport == "http"):
+        raise typer.BadParameter(
+            "укажите --root/ONEC_LITE_ROOT (или запустите с --admin --transport http "
+            "и задайте пути в браузере)"
+        )
+
+    if help_path:
+        entries: list[dict] = []
+        for line in help_path:
+            entries.extend(lite_platform_help.parse_help_lines(line))
+        for e in lite_server.configure_help(entries):
+            rprint(f"[yellow]Справка платформы:[/] {e}")
+
+    if build_fts:
+        if ws is None:
+            rprint("[red]--build-fts требует настроенной рабочей копии.[/]")
+            raise typer.Exit(code=1)
+        from .lite import fts as lite_fts
+
+        rprint("[green]Строю FTS5-индекс поиска…[/]")
+        res = lite_fts.index_for(ws).build()
+        if "error" in res:
+            rprint(f"[red]{res['error']}[/]")
+            raise typer.Exit(code=1)
+        rprint(f"  +{res['files_added']} файлов, ~{res['files_updated']} обновлено, "
+               f"-{res['files_removed']}; юнитов записано {res['units_written']} "
+               f"за {res['seconds']} с (всего {res.get('units')})")
+
+    if check:
+        if ws is None:
+            rprint("[yellow]Воркспейс не сконфигурирован.[/]")
+            raise typer.Exit(code=1)
+        rprint(f"[green]Рабочая копия:[/] {ws.root}")
+        for s in ws.sources:
+            counts = ws.kind_counts(s)
+            total = sum(counts.values())
+            tag = "расширение" if s.is_extension else "база"
+            rprint(f"  {s.name} ({s.fmt}, {tag}) — {total} объектов, видов: {len(counts)}")
+        hv = lite_server.help_catalog().versions()
+        for v in hv["versions"]:
+            rprint(f"  справка платформы {v['platform_version']} — файлов .hbk: {v['files']}")
+        raise typer.Exit(code=0)
+
+    if transport == "stdio":
+        lite_server.run("stdio")
+    else:
+        h = os.environ.get("ONEC_LITE_HOST", "").strip() or "127.0.0.1"
+        p = os.environ.get("ONEC_LITE_PORT", "").strip() or "8010"
+        rprint(f"[green]Starting lite MCP server[/] (streamable-http) on http://{h}:{p}/mcp")
+        if admin:
+            rprint(f"[green]Админка:[/] http://{h}:{p}/admin")
+        lite_server.run("streamable-http")
 
 
 @app.command()
