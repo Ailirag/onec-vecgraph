@@ -32,6 +32,8 @@ dev = ["pytest>=8.2", "ruff>=0.5", "mypy>=1.10"]
 
 [project.scripts]
 onec-vecgraph = "onec_vecgraph.cli:app"
+# One-word lite launcher: `onec-lite` = stdio MCP, `onec-lite admin` = web admin.
+onec-lite = "onec_vecgraph.lite.launcher:main"
 
 [build-system]
 requires = ["hatchling"]

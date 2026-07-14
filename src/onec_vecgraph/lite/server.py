@@ -805,6 +805,11 @@ def _admin_enabled() -> bool:
 
 def _snapshot() -> dict:
     _init_rg_from_state()
+    if _WS is None:
+        try:
+            _ws()  # env/state могут уже указывать на рабочую копию (запуск с --root)
+        except RuntimeError:
+            pass  # честно «не настроен» — пути задаются формой админки
     snap = lite_admin.workspace_snapshot(_WS)
     snap["rg"] = search.rg_path()
     snap["rg_override"] = search.rg_override()
