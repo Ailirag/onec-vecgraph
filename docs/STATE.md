@@ -178,7 +178,10 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   ниша «машина разработчика: свежесть важнее семантики» (big-сервер = снимок+семантика, ut_mcp вытеснен).
   Оба формата (Конфигуратор XML | EDT), авто-обнаружение расширений, порядок extension-first +
   кросс-источниковый фолбэк для заимствованных объектов (рутина ищется в ext-модуле → база).
-  **29 read-only инструментов**: навигация/чтение (`overview/list_kinds/list_objects/get_object(+detail)/
+  **мульти-воркспейс** (именованные рабочие копии в одном процессе: state v2 `workspaces{}`+`active`,
+  дефолт сессии env `ONEC_LITE_WORKSPACE`→active→единственный, параметр `workspace` у всех тулов,
+  `list_workspaces`; изоляция одноимённых конфигураций — name_index в Workspace);
+  **30 read-only инструментов**: навигация/чтение (`overview/list_kinds/list_objects/get_object(+detail)/
   list_routines/read_module/read_routine/read_file`); поиск (`search_code` rg-стриминг+Python-фолбэк,
   `search_metadata`, `find_routine`, **`fts_search`** — SQLite FTS5/BM25 по рутинам и карточкам объектов:
   opt-in индекс в `~/.onec-lite/fts/` — НЕ в рабочей копии, на УТ ~1 ГБ/3.4 мин полная сборка,
@@ -295,7 +298,7 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   writes_to/metrics), `metaview` (deps/type_usages/get_service/get_form), `gitview` (changed_objects/
   review_set), `platform_help` (каталог .hbk: docinfo/search/get_document/versions), `fts` (SQLite FTS5
   BM25, unit_map, инкремент по mtime), `admin` (чистые рендеры/персист состояния), `server` (FastMCP,
-  29 тулов + маршруты /admin, /admin.json).
+  30 тулов + маршруты /admin, /admin.json; воркспейсы: `_WORKSPACES`/`default_workspace_name`).
 
 ## 8. MCP-инструменты (29)
 
