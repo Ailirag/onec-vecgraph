@@ -181,6 +181,10 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   **мульти-воркспейс** (именованные рабочие копии в одном процессе: state v2 `workspaces{}`+`active`,
   дефолт сессии env `ONEC_LITE_WORKSPACE`→active→единственный, параметр `workspace` у всех тулов,
   `list_workspaces`; изоляция одноимённых конфигураций — name_index в Workspace);
+  **обновление из remote** (`lite/gitops.py`: fetch / pull `--ff-only` с предохранителями
+  (чистое дерево, не detached, ff), зеркала `~/.onec-lite/mirrors/<имя>` из `{repo,branch}` с полной
+  историей, `update_on_start` per workspace, кнопка «обновить» + git-статус в админке,
+  `onec-lite update [--pull]`; git неинтерактивный `GIT_TERMINAL_PROMPT=0`; MCP остаётся read-only);
   **30 read-only инструментов**: навигация/чтение (`overview/list_kinds/list_objects/get_object(+detail)/
   list_routines/read_module/read_routine/read_file`); поиск (`search_code` rg-стриминг+Python-фолбэк,
   `search_metadata`, `find_routine`, **`fts_search`** — SQLite FTS5/BM25 по рутинам и карточкам объектов:
