@@ -101,6 +101,7 @@ class Workspace:
         self._by_kind_name: dict[str, dict[tuple[str, str], ObjectRef]] = {}
         self._objects: dict[tuple[str, str], tuple[float, MetaObject]] = {}
         self._bsl: dict[str, tuple[float, list[Path]]] = {}
+        self._names: dict[str, tuple[float, dict[str, list[tuple[str, str]]]]] = {}
 
     # ------------------------------------------------------------------ sources
 
@@ -147,6 +148,22 @@ class Workspace:
             for fqn, meta, obj_dir in rows
         }
         return rows
+
+    def name_index(self, src: LiteSource) -> dict[str, list[tuple[str, str]]]:
+        """name(lower) → [(kind, fqn)] одного источника; TTL-кэш (резолв квалификаторов).
+
+        Живёт в Workspace, а не в модуле: имена конфигураций не уникальны между
+        рабочими копиями (две «УправлениеТорговлей» в двух репо — норма)."""
+        now = time.monotonic()
+        hit = self._names.get(src.name)
+        if hit and now - hit[0] < 2 * _LIST_TTL:
+            return hit[1]
+        idx: dict[str, list[tuple[str, str]]] = {}
+        for fqn, _meta, _dir in self.listing(src):
+            kind, _, tail = fqn.partition(".")
+            idx.setdefault(tail.lower(), []).append((kind, fqn))
+        self._names[src.name] = (now, idx)
+        return idx
 
     def kind_counts(self, src: LiteSource) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -331,6 +348,7 @@ class Workspace:
         self._by_kind_name.clear()
         self._objects.clear()
         self._bsl.clear()
+        self._names.clear()
 
 
 def read_text(path: Path) -> str:

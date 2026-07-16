@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -35,12 +36,94 @@ def load_state(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def load_paths(path: Path) -> tuple[str, list[str]] | None:
-    """Saved (root, ext_roots) or None when the state file is absent/бит/без корня."""
+_WS_NAME_RX = re.compile(r"^[\w.\-]{1,64}$", re.UNICODE)
+
+
+def normalize_ws_name(name: str) -> str | None:
+    """Workspace name: буквы/цифры/_/-/. до 64 символов; None — невалидно."""
+    name = (name or "").strip()
+    return name if _WS_NAME_RX.match(name) else None
+
+
+def load_workspaces(path: Path) -> tuple[dict[str, dict], str]:
+    """Saved workspaces {name: {root, ext_roots}} + active name (v1 root мигрирует в 'default')."""
     data = load_state(path)
-    root = str(data.get("root") or "").strip()
-    ext = [str(p).strip() for p in (data.get("ext_roots") or []) if str(p).strip()]
-    return (root, ext) if root else None
+    out: dict[str, dict] = {}
+    raw = data.get("workspaces")
+    if isinstance(raw, dict):
+        for name, e in raw.items():
+            name = str(name).strip()
+            if not name or not isinstance(e, dict):
+                continue
+            root = str(e.get("root") or "").strip()
+            if not root:
+                continue
+            out[name] = {
+                "root": root,
+                "ext_roots": [str(p).strip() for p in (e.get("ext_roots") or [])
+                              if str(p).strip()],
+            }
+    elif str(data.get("root") or "").strip():  # legacy flat v1 state
+        out["default"] = {
+            "root": str(data["root"]).strip(),
+            "ext_roots": [str(p).strip() for p in (data.get("ext_roots") or [])
+                          if str(p).strip()],
+        }
+    active = str(data.get("active") or "").strip()
+    if active not in out:
+        active = next(iter(out), "")
+    return out, active
+
+
+def save_state(path: Path, workspaces: dict[str, dict], active: str,
+               platform_help: list[dict] | None = None,
+               rg_path: str | None = None) -> None:
+    """Persist v2 state; None for platform_help/rg_path keeps whatever the file already has."""
+    saved = load_state(path)
+    if platform_help is None:
+        platform_help = saved.get("platform_help") or []
+    if rg_path is None:
+        rg_path = str(saved.get("rg_path") or "")
+    if active not in workspaces:
+        active = next(iter(workspaces), "")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"version": 2, "workspaces": workspaces, "active": active,
+                    "platform_help": platform_help, "rg_path": rg_path},
+                   ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
+
+
+def upsert_workspace(path: Path, name: str, root: str, ext_roots: list[str],
+                     make_active: bool = False) -> None:
+    wss, active = load_workspaces(path)
+    wss[name] = {"root": root, "ext_roots": list(ext_roots)}
+    save_state(path, wss, name if (make_active or not active) else active)
+
+
+def delete_workspace(path: Path, name: str) -> bool:
+    wss, active = load_workspaces(path)
+    if name not in wss:
+        return False
+    del wss[name]
+    save_state(path, wss, active)
+    return True
+
+
+def set_active(path: Path, name: str) -> bool:
+    wss, _active = load_workspaces(path)
+    if name not in wss:
+        return False
+    save_state(path, wss, name)
+    return True
+
+
+def load_paths(path: Path) -> tuple[str, list[str]] | None:
+    """Active workspace's (root, ext_roots) or None (legacy single-workspace shim)."""
+    wss, active = load_workspaces(path)
+    entry = wss.get(active)
+    return (entry["root"], list(entry["ext_roots"])) if entry else None
 
 
 def load_help_entries(path: Path) -> list[dict]:
@@ -56,19 +139,15 @@ def load_help_entries(path: Path) -> list[dict]:
 def save_paths(path: Path, root: str, ext_roots: list[str],
                platform_help: list[dict] | None = None,
                rg_path: str | None = None) -> None:
-    """Persist state; None for platform_help/rg_path keeps whatever the file already has."""
-    saved = load_state(path)
-    if platform_help is None:
-        platform_help = saved.get("platform_help") or []
-    if rg_path is None:
-        rg_path = str(saved.get("rg_path") or "")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"root": root, "ext_roots": ext_roots, "platform_help": platform_help,
-                    "rg_path": rg_path},
-                   ensure_ascii=False, indent=1),
-        encoding="utf-8",
-    )
+    """Legacy single-workspace shim: upsert the active (or 'default') workspace.
+
+    Пустой root не создаёт воркспейс — только обновляет help/rg (частичный apply)."""
+    wss, active = load_workspaces(path)
+    name = active or "default"
+    if str(root or "").strip():
+        wss[name] = {"root": str(root).strip(), "ext_roots": list(ext_roots)}
+        active = name
+    save_state(path, wss, active, platform_help=platform_help, rg_path=rg_path)
 
 
 def parse_ext_roots(text: str) -> list[str]:
@@ -131,6 +210,40 @@ def _fts_status_line(fts: dict) -> str:
     return (f"построен {escape(str(fts.get('built_at') or ''))} · юнитов "
             f"{fts.get('units', 0)} · файлов {fts.get('files', 0)} · {size_mb} МБ · "
             "дообновляется по mtime при поиске")
+
+
+def _workspace_rows(workspaces: list[dict]) -> str:
+    if not workspaces:
+        return ('<tr><td colspan="4" class="empty">Ни одного воркспейса — задайте имя и корень '
+                "в форме ниже.</td></tr>")
+    rows = []
+    for w in workspaces:
+        name = str(w.get("name") or "")
+        badges = []
+        if w.get("active"):
+            badges.append('<span class="badge ok">активный</span>')
+        if w.get("selected"):
+            badges.append('<span class="badge sel">выбран</span>')
+        if w.get("loaded"):
+            badges.append('<span class="small">загружен</span>')
+        actions = (
+            f'<form method="post" action="admin" class="inline">'
+            f'<input type="hidden" name="ws" value="{escape(name)}">'
+            f'<a class="btn-link" href="admin?ws={escape(name)}">открыть</a> '
+            f'<button class="mini" type="submit" name="action" value="activate">активировать</button> '
+            f'<button class="mini danger" type="submit" name="action" value="delete" '
+            f'onclick="return confirm(\'Удалить воркспейс {escape(name)} из настроек?\')">удалить</button>'
+            f"</form>"
+        )
+        rows.append(
+            "<tr>"
+            f'<td class="mono">{escape(name)}</td>'
+            f'<td class="mono small">{escape(str(w.get("root") or ""))}</td>'
+            f"<td>{' '.join(badges)}</td>"
+            f"<td>{actions}</td>"
+            "</tr>"
+        )
+    return "\n".join(rows)
 
 
 def _source_rows(sources: list[dict]) -> str:
@@ -198,6 +311,12 @@ def render_admin_page(
             font-size: .74rem; font-weight: 600; }}
   .ok {{ background: #dcfce7; color: #166534; }}
   .warn {{ background: #fef3c7; color: #92400e; }}
+  .sel {{ background: #dbeafe; color: #1e40af; }}
+  form.inline {{ display: inline; background: none; padding: 0; box-shadow: none; }}
+  .mini {{ padding: .15rem .5rem; font-size: .72rem; background: #e5e7eb; color: #374151;
+           border: 0; border-radius: 5px; cursor: pointer; }}
+  .mini.danger {{ background: #fee2e2; color: #991b1b; }}
+  .btn-link {{ font-size: .78rem; }}
   .banner {{ padding: .5rem .8rem; border-radius: 8px; font-size: .85rem; margin-bottom: 1rem; }}
   .ok-b {{ background: #dcfce7; color: #166534; }}
   .err-b {{ background: #fee2e2; color: #991b1b; }}
@@ -218,7 +337,18 @@ def render_admin_page(
   <h1>onec-lite — админка</h1>
   <div class="meta">рабочая копия: {status} · ripgrep: {rg_note}</div>
   {banner}
-  <h2>Источники (порядок разрешения: расширения → база)</h2>
+  <h2>Воркспейсы (рабочие копии; выбранная показана ниже)</h2>
+  <table>
+    <thead><tr><th>имя</th><th>каталог</th><th>статус</th><th></th></tr></thead>
+    <tbody>
+{_workspace_rows(snap.get("workspaces") or [])}
+    </tbody>
+  </table>
+  <div class="hint" style="margin:.35rem 0 0">Дефолт этой сессии:
+    <span class="mono">{escape(snap.get("default_workspace") or "")}</span>
+    (env <span class="mono">ONEC_LITE_WORKSPACE</span> → активный). Инструменты принимают
+    workspace=&lt;имя&gt;.</div>
+  <h2>Источники воркспейса «{escape(snap.get("workspace") or "")}» (расширения → база)</h2>
   <table>
     <thead><tr><th>источник</th><th>формат</th><th>объектов</th><th>каталог</th></tr></thead>
     <tbody>
@@ -227,6 +357,10 @@ def render_admin_page(
   </table>
   <h2>Пути рабочей копии</h2>
   <form method="post" action="admin">
+    <input type="hidden" name="ws" value="{escape(snap.get("workspace") or "")}">
+    <label for="ws_name">Имя воркспейса (новое имя = добавить ещё одну рабочую копию)</label>
+    <input type="text" id="ws_name" name="ws_name" value="{escape(snap.get("workspace") or "")}"
+           placeholder="ut">
     <label for="root">Корень конфигурации (выгрузка Конфигуратора или EDT-воркспейс)</label>
     <input type="text" id="root" name="root" value="{escape(snap.get("root") or "")}"
            placeholder="H:\\path\\to\\ut  или  D:\\dumps\\erp_xml">

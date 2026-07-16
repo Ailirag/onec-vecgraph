@@ -25,6 +25,8 @@ def _apply_env(args: argparse.Namespace) -> None:
     """CLI-аргументы становятся env: lite-сервер читает конфигурацию оттуда."""
     if args.root:
         os.environ["ONEC_LITE_ROOT"] = args.root
+    if args.workspace:
+        os.environ["ONEC_LITE_WORKSPACE"] = args.workspace
     if args.ext_root:
         os.environ["ONEC_LITE_EXT_ROOTS"] = ";".join(args.ext_root)
     if args.help_path:
@@ -51,6 +53,7 @@ def _check() -> int:
     except RuntimeError as exc:
         print(f"{exc}\nПодсказка: onec-lite admin — задать пути в браузере.")
         return 1
+    print(f"Воркспейс: {lite_server.default_workspace_name()}")
     print(f"Рабочая копия: {ws.root}")
     for s in ws.sources:
         counts = ws.kind_counts(s)
@@ -71,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("mode", nargs="?", choices=("stdio", "admin", "check"), default="stdio",
                         help="stdio (по умолчанию, для MCP-клиентов) | admin (веб-админка) | check")
     parser.add_argument("--root", help="корень рабочей копии (Конфигуратор XML или EDT)")
+    parser.add_argument("--workspace",
+                        help="имя воркспейса: дефолт этой сессии (с --root — имя, под которым "
+                             "корень будет сконфигурирован); сервер может держать несколько")
     parser.add_argument("--ext-root", action="append", default=[],
                         help="дополнительный корень расширения (повторяемый)")
     parser.add_argument("--help-path", action="append", default=[],

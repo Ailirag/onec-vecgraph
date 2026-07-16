@@ -29,7 +29,9 @@ INSTRUCTIONS = """onec-lite: навигация по ЖИВОЙ рабочей �
 
 Словарь: kind — вид метаданных (Catalog, Document, CommonModule, ...); module — псевдоним
 модуля (Module|Object|Manager|RecordSet|Value|Command|Form:<Имя>|<имя файла .bsl>);
-source — имя источника из overview() (пусто = все, расширения раньше базы).
+source — имя источника из overview() (пусто = все, расширения раньше базы);
+workspace — имя рабочей копии из list_workspaces() (сервер может держать несколько
+репозиториев 1С; пусто = дефолт сессии: env ONEC_LITE_WORKSPACE → активный из админки).
 
 Куда идти: обзор -> overview/metrics; структура -> list_objects/get_object;
 зависимости -> get_dependencies (связи объекта) / find_type_usages (где используется тип);
@@ -58,7 +60,10 @@ mcp = FastMCP(
     stateless_http=True,
 )
 
-_WS: Workspace | None = None
+# Named workspaces: one lite process can hold several 1C repositories at once.
+# Sessions pin their default via env ONEC_LITE_WORKSPACE; every tool accepts an
+# explicit `workspace` argument that overrides it (see default_workspace_name()).
+_WORKSPACES: dict[str, Workspace] = {}
 _RG_INIT = False
 
 
@@ -73,39 +78,60 @@ def _init_rg_from_state() -> None:
         search.set_rg_path(saved)
 
 
-def configure(root: str | Path, ext_roots: tuple[str | Path, ...] = ()) -> Workspace:
-    """Build and swap in the module-level workspace (CLI startup / admin apply).
+def default_workspace_name() -> str:
+    """Process default: env ONEC_LITE_WORKSPACE → saved active → единственный → 'default'.
 
-    The swap happens only after Workspace() succeeds, so a bad path keeps serving the
-    previous workspace. Code-intel caches are dropped: source names may stay the same
-    while pointing at a different checkout."""
-    global _WS
+    The env step is what makes different Claude Code sessions independent: each stdio
+    process pins its own default, the shared `active` in the state file is only a
+    fallback for single-workspace setups."""
+    env = os.environ.get("ONEC_LITE_WORKSPACE", "").strip()
+    if env:
+        return env
+    wss, active = lite_admin.load_workspaces(lite_admin.state_file())
+    if active:
+        return active
+    if len(wss) == 1:
+        return next(iter(wss))
+    if len(_WORKSPACES) == 1:
+        return next(iter(_WORKSPACES))
+    return "default"
+
+
+def configure(root: str | Path, ext_roots: tuple[str | Path, ...] = (),
+              name: str = "default") -> Workspace:
+    """Build a workspace and register it under `name` (CLI startup / admin apply / lazy).
+
+    Registration happens only after Workspace() succeeds, so a bad path keeps serving
+    the previous workspace. Code-intel caches are dropped: source names may stay the
+    same while pointing at a different checkout."""
     _init_rg_from_state()
     ws = Workspace(root, ext_roots)
-    _WS = ws
+    _WORKSPACES[name] = ws
     code_intel.clear_caches()
     return ws
 
 
-def _ws() -> Workspace:
-    if _WS is None:
+def _ws(workspace: str = "") -> Workspace:
+    """Workspace by name; пусто = дефолт процесса. Lazy-builds from saved state/env."""
+    name = (workspace or "").strip() or default_workspace_name()
+    ws = _WORKSPACES.get(name)
+    if ws is not None:
+        return ws
+    wss, _active = lite_admin.load_workspaces(lite_admin.state_file())
+    entry = wss.get(name)
+    if entry is None and name == default_workspace_name():
+        # Legacy/env path: ONEC_LITE_ROOT binds to the process-default name.
         root = os.environ.get("ONEC_LITE_ROOT", "").strip()
-        ext: tuple[str, ...] = tuple(
-            lite_admin.parse_ext_roots(os.environ.get("ONEC_LITE_EXT_ROOTS", ""))
+        if root:
+            ext = tuple(lite_admin.parse_ext_roots(os.environ.get("ONEC_LITE_EXT_ROOTS", "")))
+            return configure(root, ext, name=name)
+    if entry is None:
+        known = ", ".join(sorted(wss)) or "(нет ни одного)"
+        raise RuntimeError(
+            f"Воркспейс '{name}' не сконфигурирован. Известные: {known}. "
+            "Задайте --root/ONEC_LITE_ROOT, --workspace или добавьте в админке (/admin)."
         )
-        if not root:
-            saved = lite_admin.load_paths(lite_admin.state_file())
-            if saved:
-                root, saved_ext = saved
-                ext = ext or tuple(saved_ext)
-        if not root:
-            raise RuntimeError(
-                "Workspace не сконфигурирован: задайте --root/ONEC_LITE_ROOT "
-                "или откройте админку (/admin при serve-lite --admin --transport http)."
-            )
-        configure(root, ext)
-    assert _WS is not None
-    return _WS
+    return configure(entry["root"], tuple(entry["ext_roots"]), name=name)
 
 
 _HELP = platform_help.HelpCatalog()
@@ -153,10 +179,13 @@ def _kind_ok(kind: str) -> str | None:
 # --------------------------------------------------------------------------- #
 
 @mcp.tool()
-def overview() -> dict:
-    """Обзор рабочей копии: источники (база + расширения) и число объектов по видам."""
-    ws = _ws()
+def overview(workspace: str = "") -> dict:
+    """Обзор рабочей копии: источники (база + расширения) и число объектов по видам.
+
+    workspace — имя из list_workspaces(); пусто = дефолт сессии."""
+    ws = _ws(workspace)
     return {
+        "workspace": workspace or default_workspace_name(),
         "root": str(ws.root),
         "sources": [
             {
@@ -174,6 +203,28 @@ def overview() -> dict:
 
 
 @mcp.tool()
+def list_workspaces() -> dict:
+    """Рабочие копии, которые знает сервер: имена, корни, активная и дефолт этой сессии.
+
+    Любой инструмент принимает workspace=<имя>; пусто = default_workspace."""
+    wss, active = lite_admin.load_workspaces(lite_admin.state_file())
+    for name, ws in _WORKSPACES.items():  # сконфигурированные в процессе (env/--root)
+        wss.setdefault(name, {"root": str(ws.root),
+                              "ext_roots": [str(p) for p in ws.ext_roots]})
+    default = default_workspace_name()
+    return {
+        "workspaces": [
+            {"name": n, "root": e["root"], "ext_roots": e["ext_roots"],
+             "active": n == active, "loaded": n in _WORKSPACES}
+            for n, e in sorted(wss.items())
+        ],
+        "active": active,
+        "default_workspace": default,
+        "note": "workspace=<имя> в любом инструменте; пусто = default_workspace.",
+    }
+
+
+@mcp.tool()
 def list_kinds() -> dict:
     """Все допустимые значения параметра kind (+ русские названия)."""
     kinds = sorted(set(TYPE_FOLDERS.values()))
@@ -181,11 +232,11 @@ def list_kinds() -> dict:
 
 
 @mcp.tool()
-def list_objects(kind: str, filter: str = "", limit: int = 200, source: str = "") -> dict:
+def list_objects(kind: str, filter: str = "", limit: int = 200, source: str = "", workspace: str = "") -> dict:
     """Объекты вида по всем источникам; filter — подстрока имени (без регистра).
 
     Совпадение имени в нескольких источниках отражается полем in_multiple_sources."""
-    ws = _ws()
+    ws = _ws(workspace)
     if err := _kind_ok(kind):
         return _err(err)
     srcs, serr = ws.resolve_sources(source)
@@ -285,11 +336,12 @@ def _object_payload(ws: Workspace, obj: MetaObject, detail: bool) -> dict:
 
 
 @mcp.tool()
-def get_object(kind: str, name: str, source: str = "", detail: bool = False) -> dict:
+def get_object(kind: str, name: str, source: str = "", detail: bool = False,
+               workspace: str = "") -> dict:
     """Структура объекта: синоним, реквизиты, ТЧ, перечисления, формы, модули, движения.
 
     detail=True добавляет полный сырой набор свойств (<Properties>) из метаданных."""
-    ws = _ws()
+    ws = _ws(workspace)
     if err := _kind_ok(kind):
         return _err(err)
     src, ref, also, err2 = ws.find_object(kind, name, source)
@@ -311,12 +363,12 @@ def get_object(kind: str, name: str, source: str = "", detail: bool = False) -> 
 # Код: чтение модулей и рутин
 # --------------------------------------------------------------------------- #
 
-def _resolve_module(kind: str, name: str, module: str, source: str, routine: str = ""):
+def _resolve_module(ws: Workspace, kind: str, name: str, module: str, source: str,
+                    routine: str = ""):
     """Resolve object+module extension-first; with `routine` prefer the source declaring it.
 
     Adopted objects exist in several sources — the extension's module holds only its own
     hooks, so a base routine must fall through to the base module instead of erroring."""
-    ws = _ws()
     if err := _kind_ok(kind):
         return None, None, None, _err(err)
     cands, err2 = ws.find_objects(kind, name, source)
@@ -341,11 +393,11 @@ def _resolve_module(kind: str, name: str, module: str, source: str, routine: str
 
 
 @mcp.tool()
-def list_routines(kind: str, name: str, module: str = "Module", source: str = "") -> dict:
+def list_routines(kind: str, name: str, module: str = "Module", source: str = "", workspace: str = "") -> dict:
     """Процедуры/функции модуля: сигнатуры, Экспорт, директивы, точки входа, override-аннотации.
 
     module: Module|Object|Manager|RecordSet|Value|Command|Form:<Имя>|<имя .bsl>."""
-    ws, src, path, err = _resolve_module(kind, name, module, source)
+    ws, src, path, err = _resolve_module(_ws(workspace), kind, name, module, source)
     if err:
         return err
     rows = [code_intel.routine_row(path, rt) for rt in code_intel.routines_of(path)]
@@ -355,9 +407,9 @@ def list_routines(kind: str, name: str, module: str = "Module", source: str = ""
 
 @mcp.tool()
 def read_module(kind: str, name: str, module: str = "Module", start_line: int = 1,
-                max_lines: int = 400, source: str = "") -> dict:
+                max_lines: int = 400, source: str = "", workspace: str = "") -> dict:
     """Текст модуля с пагинацией (start_line/max_lines)."""
-    ws, src, path, err = _resolve_module(kind, name, module, source)
+    ws, src, path, err = _resolve_module(_ws(workspace), kind, name, module, source)
     if err:
         return err
     lines = read_text(path).splitlines()
@@ -375,10 +427,11 @@ def read_module(kind: str, name: str, module: str = "Module", start_line: int = 
 
 @mcp.tool()
 def read_routine(kind: str, name: str, routine_name: str, module: str = "Module",
-                 source: str = "") -> dict:
+                 source: str = "", workspace: str = "") -> dict:
     """Тело одной процедуры/функции модуля по имени (для заимствованных объектов рутина
     ищется по источникам: расширения, затем база)."""
-    ws, src, path, err = _resolve_module(kind, name, module, source, routine=routine_name)
+    ws, src, path, err = _resolve_module(_ws(workspace), kind, name, module, source,
+                                         routine=routine_name)
     if err:
         return err
     rt = code_intel.find_in_module(path, routine_name)
@@ -394,9 +447,9 @@ def read_routine(kind: str, name: str, routine_name: str, module: str = "Module"
 
 
 @mcp.tool()
-def read_file(rel_path: str, start_line: int = 1, max_lines: int = 400, source: str = "") -> dict:
+def read_file(rel_path: str, start_line: int = 1, max_lines: int = 400, source: str = "", workspace: str = "") -> dict:
     """Любой файл источника по пути относительно его корня (.mdo, .form, .xml, .bsl)."""
-    ws = _ws()
+    ws = _ws(workspace)
     srcs, serr = ws.resolve_sources(source)
     if serr:
         return _err(serr)
@@ -419,12 +472,12 @@ def read_file(rel_path: str, start_line: int = 1, max_lines: int = 400, source: 
 @mcp.tool()
 def search_code(pattern: str, kinds: list[str] | None = None, name_filter: str = "",
                 regex: bool = True, case_sensitive: bool = False, max_results: int = 100,
-                source: str = "") -> dict:
+                source: str = "", workspace: str = "") -> dict:
     """Полнотекстовый поиск по BSL-модулям (ripgrep; без rg — Python-фолбэк).
 
     kinds — ограничить видами (['CommonModule','Document']); name_filter — подстрока
     имени объекта-владельца; source — один источник."""
-    ws = _ws()
+    ws = _ws(workspace)
     kindset = set(kinds) if kinds else None
     if kindset and (bad := kindset - set(TYPE_FOLDERS.values())):
         return _err(f"Неизвестные виды: {', '.join(sorted(bad))}")
@@ -435,7 +488,7 @@ def search_code(pattern: str, kinds: list[str] | None = None, name_filter: str =
 
 
 @mcp.tool()
-def fts_search(query: str, limit: int = 20, unit: str = "", source: str = "") -> dict:
+def fts_search(query: str, limit: int = 20, unit: str = "", source: str = "", workspace: str = "") -> dict:
     """Ранжированный поиск (SQLite FTS5, BM25) по рутинам и карточкам объектов:
     CamelCase-подслова, вес имени выше тела, кириллица матчится с усечением окончаний.
 
@@ -443,26 +496,27 @@ def fts_search(query: str, limit: int = 20, unit: str = "", source: str = "") ->
     админке или serve-lite --build-fts); свежесть — авто-дообновление по mtime раз в
     ~30 с, момент построения — в поле built_at. Это лексический ранжированный поиск,
     не семантика: синонимию без общих слов ловит только большой сервер (векторы)."""
-    return fts.index_for(_ws()).search(query, limit=limit, unit=unit, source=source)
+    return fts.index_for(_ws(workspace)).search(query, limit=limit, unit=unit, source=source)
 
 
 @mcp.tool()
 def find_routine(routine_name: str, exported_only: bool = False, max_results: int = 50,
-                 source: str = "") -> dict:
+                 source: str = "", workspace: str = "") -> dict:
     """Где ОБЪЯВЛЕНА процедура/функция с этим именем (по всем источникам, точный парс)."""
     return code_intel.find_declarations(
-        _ws(), routine_name, exported_only=exported_only, max_results=max_results, source=source,
+        _ws(workspace), routine_name, exported_only=exported_only, max_results=max_results,
+        source=source,
     )
 
 
 @mcp.tool()
 def search_metadata(query: str, kinds: list[str] | None = None, max_results: int = 100,
-                    source: str = "") -> dict:
+                    source: str = "", workspace: str = "") -> dict:
     """Поиск объектов по имени и по тексту метаданных (синонимы и пр.).
 
     Сначала совпадения по имени (список объектов), затем текстовые совпадения в
     файлах метаданных (.xml/.mdo) с привязкой к объекту."""
-    ws = _ws()
+    ws = _ws(workspace)
     kindset = set(kinds) if kinds else None
     srcs, serr = ws.resolve_sources(source)
     if serr:
@@ -518,59 +572,61 @@ def search_metadata(query: str, kinds: list[str] | None = None, max_results: int
 
 @mcp.tool()
 def find_callees(kind: str, name: str, routine_name: str, module: str = "Module",
-                 source: str = "") -> dict:
+                 source: str = "", workspace: str = "") -> dict:
     """Кого вызывает рутина: разрешённые вызовы (local/common_module/manager) + неразрешённые."""
-    return code_intel.find_callees(_ws(), kind, name, module, routine_name, source)
+    return code_intel.find_callees(_ws(workspace), kind, name, module, routine_name, source)
 
 
 @mcp.tool()
 def find_callers(routine_name: str, object_hint: str = "", kinds: list[str] | None = None,
-                 max_results: int = 100, source: str = "") -> dict:
+                 max_results: int = 100, source: str = "", workspace: str = "") -> dict:
     """Места ВЫЗОВА рутины (проверено парсером: объявления и строки/комментарии исключены).
 
     object_hint — имя общего модуля/объекта для отсечения одноимённых методов."""
     return code_intel.find_callers(
-        _ws(), routine_name, object_hint=object_hint, kinds=kinds,
+        _ws(workspace), routine_name, object_hint=object_hint, kinds=kinds,
         max_results=max_results, source=source,
     )
 
 
 @mcp.tool()
 def call_graph(routine_name: str, depth: int = 2, max_per_level: int = 40,
-               source: str = "") -> dict:
+               source: str = "", workspace: str = "") -> dict:
     """Восходящий граф вызовов: кто (рекурсивно) вызывает рутину; уровни с охватывающими рутинами."""
     return code_intel.call_graph(
-        _ws(), routine_name, depth=depth, max_per_level=max_per_level, source=source,
+        _ws(workspace), routine_name, depth=depth, max_per_level=max_per_level, source=source,
     )
 
 
 @mcp.tool()
-def find_overrides(kind: str = "", name: str = "", method: str = "", source: str = "") -> dict:
+def find_overrides(kind: str = "", name: str = "", method: str = "", source: str = "", workspace: str = "") -> dict:
     """Переопределения расширений (&Вместо/&Перед/&После/&ИзменениеИКонтроль) с целями.
 
     Фильтры: kind+name — заимствованный объект; method — базовый метод; source — расширение."""
-    return code_intel.find_overrides(_ws(), kind=kind, name=name, method=method, source=source)
+    return code_intel.find_overrides(_ws(workspace), kind=kind, name=name, method=method,
+                                     source=source)
 
 
 @mcp.tool()
-def find_handlers(kind: str, name: str, source: str = "") -> dict:
+def find_handlers(kind: str, name: str, source: str = "", workspace: str = "") -> dict:
     """Обработчики объекта: события форм (+объявлен ли обработчик) и точки входа модулей
     (проведение/запись/проверка_заполнения/...)."""
     if err := _kind_ok(kind):
         return _err(err)
-    return code_intel.find_handlers(_ws(), kind, name, source)
+    return code_intel.find_handlers(_ws(workspace), kind, name, source)
 
 
 @mcp.tool()
-def writes_to(document: str = "", register: str = "", source: str = "") -> dict:
+def writes_to(document: str = "", register: str = "", source: str = "", workspace: str = "") -> dict:
     """Движения: document='Заказ' -> его регистры; register='ОстаткиТоваров' -> кто в него пишет."""
-    return code_intel.writes_to(_ws(), document=document, register=register, source=source)
+    return code_intel.writes_to(_ws(workspace), document=document, register=register,
+                                source=source)
 
 
 @mcp.tool()
-def metrics(source: str = "") -> dict:
+def metrics(source: str = "", workspace: str = "") -> dict:
     """Инвентарь рабочей копии: объекты по видам, файлы/байты кода, число рутин, overrides."""
-    return code_intel.metrics(_ws(), source=source)
+    return code_intel.metrics(_ws(workspace), source=source)
 
 
 # --------------------------------------------------------------------------- #
@@ -578,22 +634,23 @@ def metrics(source: str = "") -> dict:
 # --------------------------------------------------------------------------- #
 
 @mcp.tool()
-def get_dependencies(kind: str, name: str, source: str = "") -> dict:
+def get_dependencies(kind: str, name: str, source: str = "", workspace: str = "") -> dict:
     """Связи объекта: исходящие (ссылочные реквизиты по всем источникам, владельцы,
     движения) и входящие (кто ссылается на тип, подписки на события; для регистров —
     какие документы пишут). Метаданные-уровень; использование в коде — search_code."""
     if err := _kind_ok(kind):
         return _err(err)
-    return code_intel.get_dependencies(_ws(), kind, name, source)
+    return code_intel.get_dependencies(_ws(workspace), kind, name, source)
 
 
 @mcp.tool()
-def find_type_usages(kind: str, name: str, max_results: int = 100, source: str = "") -> dict:
+def find_type_usages(kind: str, name: str, max_results: int = 100, source: str = "", workspace: str = "") -> dict:
     """Где используется ТИП объекта в метаданных: реквизиты объектов и форм, подписки,
     определяемые типы — точные строки файлов (`<Вид>Ref.<Имя>`/`<Вид>Object.<Имя>`)."""
     if err := _kind_ok(kind):
         return _err(err)
-    return code_intel.type_usages(_ws(), kind, name, max_results=max_results, source=source)
+    return code_intel.type_usages(_ws(workspace), kind, name, max_results=max_results,
+                                  source=source)
 
 
 # --------------------------------------------------------------------------- #
@@ -601,22 +658,22 @@ def find_type_usages(kind: str, name: str, max_results: int = 100, source: str =
 # --------------------------------------------------------------------------- #
 
 @mcp.tool()
-def changed_objects(ref: str = "", source: str = "") -> dict:
+def changed_objects(ref: str = "", source: str = "", workspace: str = "") -> dict:
     """Что изменено в рабочей копии: git status (ref пуст) или diff против ref
     (ветка/коммит/'HEAD~1'), сгруппировано по объектам метаданных.
 
     У каждого изменения — файл, git-статус и вид артефакта (module/meta/form_layout)."""
-    return gitview.changed_objects(_ws(), ref, source)
+    return gitview.changed_objects(_ws(workspace), ref, source)
 
 
 @mcp.tool()
-def review_set(ref: str = "", max_callers: int = 8, source: str = "") -> dict:
+def review_set(ref: str = "", max_callers: int = 8, source: str = "", workspace: str = "") -> dict:
     """Ревью-набор изменений: изменённые строки → затронутые рутины → их вызывающие,
     точки входа и override-хуки расширений поверх них.
 
     Отвечает на «что я сломал этой правкой»: каждый вызывающий проверен парсером,
     untracked-модули включаются целиком. ref как в changed_objects."""
-    return gitview.review_set(_ws(), ref, max_callers=max_callers, source=source)
+    return gitview.review_set(_ws(workspace), ref, max_callers=max_callers, source=source)
 
 
 # --------------------------------------------------------------------------- #
@@ -635,11 +692,11 @@ def _mark_declared(rows: list[dict], declared: dict, key: str = "handler") -> No
 
 
 @mcp.tool()
-def get_service(name: str, source: str = "") -> dict:
+def get_service(name: str, source: str = "", workspace: str = "") -> dict:
     """Интроспекция сервиса: HTTPService (rootURL, шаблоны URL, методы) или WebService
     (namespace, операции с параметрами). Обработчики сверяются с модулем сервиса
     (declared/lines) — сразу видно, какие методы не реализованы."""
-    ws = _ws()
+    ws = _ws(workspace)
     for kind, parser in (
         ("HTTPService", metaview.parse_http_service),
         ("WebService", metaview.parse_web_service),
@@ -680,14 +737,14 @@ def _form_files(ws: Workspace, src, obj_dir: Path, kind: str, name: str,
 
 
 @mcp.tool()
-def get_form(kind: str, name: str, form: str = "", source: str = "") -> dict:
+def get_form(kind: str, name: str, form: str = "", source: str = "", workspace: str = "") -> dict:
     """Структура формы: реквизиты, команды (+обработчики), элементы (поля с dataPath,
     кнопки с командами, группы), обработчики событий формы/элементов с пометкой declared.
 
     Для CommonForm параметр form не нужен. Форма расширения затеняет одноимённую базовую;
     секции, которых в форме расширения нет (реквизиты/команды), дополняются из базовой
     формы с пометкой attributes_source/commands_source — как их видит платформа."""
-    ws = _ws()
+    ws = _ws(workspace)
     if err := _kind_ok(kind):
         return _err(err)
     cands, err = ws.find_objects(kind, name, source)
@@ -803,14 +860,28 @@ def _admin_enabled() -> bool:
     return os.environ.get("ONEC_LITE_ADMIN", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _snapshot() -> dict:
+def _snapshot(workspace: str = "") -> dict:
+    """Admin view: selected workspace details + каталог всех воркспейсов + help/rg/fts."""
     _init_rg_from_state()
-    if _WS is None:
-        try:
-            _ws()  # env/state могут уже указывать на рабочую копию (запуск с --root)
-        except RuntimeError:
-            pass  # честно «не настроен» — пути задаются формой админки
-    snap = lite_admin.workspace_snapshot(_WS)
+    name = (workspace or "").strip() or default_workspace_name()
+    ws: Workspace | None = None
+    try:
+        ws = _ws(name)
+    except RuntimeError:
+        pass  # честно «не настроен» — пути задаются формой админки
+    snap = lite_admin.workspace_snapshot(ws)
+    snap["workspace"] = name
+    wss, active = lite_admin.load_workspaces(lite_admin.state_file())
+    for wname, loaded in _WORKSPACES.items():  # env/--root конфигурации вне state
+        wss.setdefault(wname, {"root": str(loaded.root),
+                               "ext_roots": [str(p) for p in loaded.ext_roots]})
+    snap["workspaces"] = [
+        {"name": n, "root": e["root"], "ext_roots": e["ext_roots"],
+         "active": n == active, "loaded": n in _WORKSPACES, "selected": n == name}
+        for n, e in sorted(wss.items())
+    ]
+    snap["active"] = active
+    snap["default_workspace"] = default_workspace_name()
     snap["rg"] = search.rg_path()
     snap["rg_override"] = search.rg_override()
     snap["state_file"] = str(lite_admin.state_file())
@@ -822,16 +893,17 @@ def _snapshot() -> dict:
         "indexed": hv["indexed"],
     }
     snap["fts"] = (
-        fts.index_for(_WS).status() if _WS is not None
+        fts.index_for(ws).status() if ws is not None
         else {"available": fts.fts_available(), "built": False}
     )
     return snap
 
 
 def apply_admin_paths(
-    root: str, ext_text: str, help_text: str = "", rg_text: str | None = None
+    root: str, ext_text: str, help_text: str = "", rg_text: str | None = None,
+    name: str = "",
 ) -> tuple[dict | None, str | None]:
-    """Re-point workspace + platform help (+ ripgrep path) and persist; (snapshot, errors).
+    """Upsert workspace `name` + platform help (+ ripgrep path) and persist; (snapshot, errors).
 
     Частичный успех допустим (кривая строка справки не отменяет рабочую копию); в state
     сохраняется ФАКТИЧЕСКИ применённое, а не введённое — битый путь не переживёт рестарт."""
@@ -840,6 +912,9 @@ def apply_admin_paths(
     ext = lite_admin.parse_ext_roots(ext_text)
     help_entries = platform_help.parse_help_lines(help_text)
     errors: list[str] = []
+    ws_name = (name or "").strip() or default_workspace_name()
+    if lite_admin.normalize_ws_name(ws_name) is None:
+        return None, f"Недопустимое имя воркспейса: '{ws_name}' (буквы/цифры/_/-/., до 64)."
     if rg_text is not None:
         cleaned = rg_text.strip().strip('"')
         if cleaned and not Path(cleaned).is_file():
@@ -849,22 +924,29 @@ def apply_admin_paths(
     if not root and not help_entries and rg_text is None:
         return None, "Укажите корень конфигурации и/или пути к справке платформы."
     if root:
+        ws = None
         try:
-            configure(root, tuple(ext))
+            ws = configure(root, tuple(ext), name=ws_name)
         except Exception as exc:  # noqa: BLE001 - показать причину, оставив прежний workspace
             errors.append(f"Рабочая копия: {exc}")
+        if ws is not None:
+            try:
+                lite_admin.upsert_workspace(
+                    lite_admin.state_file(), ws_name, str(ws.root),
+                    [str(p) for p in ws.ext_roots],
+                )
+            except OSError as exc:
+                errors.append(f"Состояние не сохранено: {exc}")
     errors.extend(f"Справка: {e}" for e in configure_help(help_entries))
     try:
-        lite_admin.save_paths(
-            lite_admin.state_file(),
-            str(_WS.root) if _WS is not None else "",
-            list(_WS.ext_roots) if _WS is not None else [],
-            platform_help=_HELP.entries,
-            rg_path=search.rg_override() or "",
+        wss, active = lite_admin.load_workspaces(lite_admin.state_file())
+        lite_admin.save_state(
+            lite_admin.state_file(), wss, active,
+            platform_help=_HELP.entries, rg_path=search.rg_override() or "",
         )
     except OSError as exc:
         errors.append(f"Состояние не сохранено: {exc}")
-    return _snapshot(), ("; ".join(errors) if errors else None)
+    return _snapshot(ws_name), ("; ".join(errors) if errors else None)
 
 
 @mcp.custom_route("/admin", methods=["GET", "POST"])
@@ -880,49 +962,64 @@ async def admin_page(request: Request) -> Response:
     if request.method == "POST":
         form = await request.form()
         action = form.get("action") or "apply"
+        sel = str(form.get("ws") or "").strip()
+
+        def _redir(param: str, text: str, ws_name: str = "") -> RedirectResponse:
+            target = ws_name or sel
+            prefix = f"admin?ws={quote(target)}&" if target else "admin?"
+            return RedirectResponse(prefix + param + "=" + quote(text), status_code=303)
+
         if action == "refresh":
-            if _WS is not None:
-                _WS.refresh()
+            for loaded in _WORKSPACES.values():
+                loaded.refresh()
             code_intel.clear_caches()
             _help().refresh()
-            return RedirectResponse("admin?msg=" + quote("Кэши сброшены"), status_code=303)
-        if action == "build_fts":
-            if _WS is None:
+            return _redir("msg", "Кэши сброшены")
+        if action == "activate":
+            if lite_admin.set_active(lite_admin.state_file(), sel):
+                return _redir("msg", f"Активный воркспейс: {sel}")
+            return _redir("err", f"Воркспейс '{sel}' не найден в сохранённом состоянии.")
+        if action == "delete":
+            _WORKSPACES.pop(sel, None)
+            if lite_admin.delete_workspace(lite_admin.state_file(), sel):
                 return RedirectResponse(
-                    "admin?err=" + quote("Сначала задайте рабочую копию."), status_code=303)
-            res = fts.index_for(_WS).build()
+                    "admin?msg=" + quote(f"Воркспейс '{sel}' удалён (индексы на диске не тронуты)."),
+                    status_code=303)
+            return _redir("err", f"Воркспейс '{sel}' не найден в сохранённом состоянии.")
+        if action == "build_fts":
+            try:
+                ws = _ws(sel)
+            except RuntimeError as exc:
+                return _redir("err", str(exc))
+            res = fts.index_for(ws).build()
             if "error" in res:
-                return RedirectResponse("admin?err=" + quote(res["error"]), status_code=303)
+                return _redir("err", res["error"])
             msg = (f"Индекс поиска: +{res['files_added']} файлов, ~{res['files_updated']} "
                    f"обновлено, -{res['files_removed']}; юнитов записано "
                    f"{res['units_written']} за {res['seconds']} с (всего {res.get('units')})")
-            return RedirectResponse("admin?msg=" + quote(msg), status_code=303)
+            return _redir("msg", msg)
         if action == "build_help":
             cat = _help()
             if not cat.entries:
-                return RedirectResponse(
-                    "admin?err=" + quote("Сначала задайте и примените пути к справке."),
-                    status_code=303,
-                )
+                return _redir("err", "Сначала задайте и примените пути к справке.")
             from time import perf_counter
 
             t0 = perf_counter()
             topics = len(cat.index())
-            msg = f"Индекс справки построен: {topics} тем за {perf_counter() - t0:.1f} с"
-            return RedirectResponse("admin?msg=" + quote(msg), status_code=303)
+            return _redir("msg", f"Индекс справки построен: {topics} тем за {perf_counter() - t0:.1f} с")
+        name = str(form.get("ws_name") or "").strip() or sel
         _snap, err = apply_admin_paths(
             str(form.get("root") or ""),
             str(form.get("ext_roots") or ""),
             str(form.get("help_paths") or ""),
             rg_text=str(form.get("rg_path") or ""),
+            name=name,
         )
         if err:
-            return RedirectResponse("admin?err=" + quote(err), status_code=303)
-        return RedirectResponse(
-            "admin?msg=" + quote("Пути применены и сохранены"), status_code=303
-        )
+            return _redir("err", err, ws_name=name)
+        return _redir("msg", "Пути применены и сохранены", ws_name=name)
     return HTMLResponse(lite_admin.render_admin_page(
-        _snapshot(),
+        _snapshot(request.query_params.get("ws", "")),
         rg=search.rg_path(),
         state_path=str(lite_admin.state_file()),
         message=request.query_params.get("msg", ""),
@@ -932,10 +1029,10 @@ async def admin_page(request: Request) -> Response:
 
 @mcp.custom_route("/admin.json", methods=["GET"])
 async def admin_json(request: Request) -> Response:
-    """Машиночитаемое состояние воркспейса (то же, что на странице)."""
+    """Машиночитаемое состояние воркспейсов (?ws=<имя> — выбрать; то же, что на странице)."""
     if not _admin_enabled():
         return JSONResponse({"error": "admin disabled"}, status_code=404)
-    return JSONResponse(_snapshot())
+    return JSONResponse(_snapshot(request.query_params.get("ws", "")))
 
 
 def run(transport: str = "stdio") -> None:

@@ -454,8 +454,11 @@ def test_metrics(edt_ws: Workspace) -> None:
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture()
-def served(edt_ws: Workspace, monkeypatch: pytest.MonkeyPatch) -> Workspace:
-    monkeypatch.setattr(lite_server, "_WS", edt_ws)
+def served(edt_ws: Workspace, monkeypatch: pytest.MonkeyPatch,
+           tmp_path: Path) -> Workspace:
+    monkeypatch.setenv("ONEC_LITE_STATE", str(tmp_path / "state.json"))
+    monkeypatch.delenv("ONEC_LITE_WORKSPACE", raising=False)
+    monkeypatch.setattr(lite_server, "_WORKSPACES", {"default": edt_ws})
     return edt_ws
 
 
@@ -757,8 +760,11 @@ def test_get_form_missing_and_no_name(served: Workspace) -> None:
     assert "Укажите имя формы" in lite_server.get_form("Catalog", "Контрагенты")["error"]
 
 
-def test_get_form_configurator(cfg_ws: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(lite_server, "_WS", cfg_ws)
+def test_get_form_configurator(cfg_ws: Workspace, monkeypatch: pytest.MonkeyPatch,
+                               tmp_path: Path) -> None:
+    monkeypatch.setenv("ONEC_LITE_STATE", str(tmp_path / "state.json"))
+    monkeypatch.delenv("ONEC_LITE_WORKSPACE", raising=False)
+    monkeypatch.setattr(lite_server, "_WORKSPACES", {"default": cfg_ws})
     res = lite_server.get_form("Catalog", "Товары", "Форма")
     attr = res["attributes"][0]
     assert attr["name"] == "Объект" and attr.get("main") is True

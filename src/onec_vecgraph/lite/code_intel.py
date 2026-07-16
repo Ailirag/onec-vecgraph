@@ -9,7 +9,6 @@ annotations, entry points — instead of raw text lines. No Neo4j, no embeddings
 from __future__ import annotations
 
 import re
-import time
 from pathlib import Path
 
 from ..bsl.parser import Routine, parse_module
@@ -22,18 +21,16 @@ from .workspace import LiteSource, Workspace, read_text
 _KW = r"(?:Процедура|Функция|Procedure|Function)"
 
 # Parsed-module cache: path -> (mtime, routines). Safe across workspaces (path is absolute).
+# The name index for qualifier resolution lives in Workspace.name_index(): configuration
+# names are NOT unique across repositories, so a module-level cache would collide.
 _MODULES: dict[str, tuple[float, list[Routine]]] = {}
-# Per-source "name -> [(kind, fqn)]" index for qualifier resolution; TTL-refreshed.
-_NAME_INDEX: dict[str, tuple[float, dict[str, list[tuple[str, str]]]]] = {}
-_NAME_TTL = 30.0
 
 _MAX_CANDIDATE_FILES = 300  # cap on files re-parsed per callers/overrides query
 
 
 def clear_caches() -> None:
-    """Drop parsed-module and name-index caches (workspace re-point / admin refresh)."""
+    """Drop the parsed-module cache (admin refresh; mtime already guards staleness)."""
     _MODULES.clear()
-    _NAME_INDEX.clear()
 
 
 def routines_of(path: Path) -> list[Routine]:
@@ -278,19 +275,6 @@ def get_dependencies(ws: Workspace, kind: str, name: str, source: str = "") -> d
 # Qualifier resolution (callees)
 # --------------------------------------------------------------------------- #
 
-def _name_index(ws: Workspace, src: LiteSource) -> dict[str, list[tuple[str, str]]]:
-    now = time.monotonic()
-    hit = _NAME_INDEX.get(src.name)
-    if hit and now - hit[0] < _NAME_TTL:
-        return hit[1]
-    idx: dict[str, list[tuple[str, str]]] = {}
-    for fqn, _meta, _dir in ws.listing(src):
-        kind, _, tail = fqn.partition(".")
-        idx.setdefault(tail.lower(), []).append((kind, fqn))
-    _NAME_INDEX[src.name] = (now, idx)
-    return idx
-
-
 def _resolve_call(
     ws: Workspace, qualifier: str | None, method: str, local: dict[str, Routine],
     home: tuple[LiteSource, Path],
@@ -309,7 +293,7 @@ def _resolve_call(
                        note="не локальный: платформенный/глобальный вызов?")
         return row
     for src in ws.sources:
-        candidates = _name_index(ws, src).get(qualifier.lower(), [])
+        candidates = ws.name_index(src).get(qualifier.lower(), [])
         for kind, fqn in candidates:
             name = fqn.partition(".")[2]
             stem = "Module" if kind == "CommonModule" else "ManagerModule"

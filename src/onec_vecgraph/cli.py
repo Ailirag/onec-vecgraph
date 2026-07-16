@@ -158,6 +158,12 @@ def serve_lite(
         help="Корень рабочей копии: выгрузка Конфигуратора или EDT-воркспейс "
              "(env ONEC_LITE_ROOT; без него берётся сохранённое из админки).",
     ),
+    workspace: str = typer.Option(
+        None, "--workspace",
+        help="Имя воркспейса — дефолт этой сессии (env ONEC_LITE_WORKSPACE); "
+             "с --root корень конфигурируется под этим именем. Сервер держит несколько "
+             "рабочих копий: инструменты принимают workspace=<имя>.",
+    ),
     ext_root: list[str] = typer.Option(
         None, "--ext-root",
         help="Дополнительный корень расширения/проекта (повторяемый; env ONEC_LITE_EXT_ROOTS через ';').",
@@ -188,6 +194,8 @@ def serve_lite(
     # env plumbing ДО импорта: lite-сервер читает эти переменные при создании FastMCP.
     if admin:
         os.environ["ONEC_LITE_ADMIN"] = "true"
+    if workspace:
+        os.environ["ONEC_LITE_WORKSPACE"] = workspace
     if host:
         os.environ["ONEC_LITE_HOST"] = host
     if port:
@@ -201,21 +209,24 @@ def serve_lite(
     if admin and transport != "http":
         raise typer.BadParameter("--admin работает только с --transport http")
 
+    ws_name = lite_server.default_workspace_name()
     root = (root or os.environ.get("ONEC_LITE_ROOT", "")).strip()
     ext_roots = tuple(ext_root or ()) or tuple(
         lite_admin.parse_ext_roots(os.environ.get("ONEC_LITE_EXT_ROOTS", ""))
     )
     if not root:
-        saved = lite_admin.load_paths(lite_admin.state_file())
-        if saved:
-            root, saved_ext = saved
-            ext_roots = ext_roots or tuple(saved_ext)
-            rprint(f"[dim]Пути взяты из сохранённого состояния: {lite_admin.state_file()}[/]")
+        wss, _active = lite_admin.load_workspaces(lite_admin.state_file())
+        entry = wss.get(ws_name)
+        if entry:
+            root = entry["root"]
+            ext_roots = ext_roots or tuple(entry["ext_roots"])
+            rprint(f"[dim]Воркспейс '{ws_name}' взят из сохранённого состояния: "
+                   f"{lite_admin.state_file()}[/]")
 
     ws = None
     if root:
         try:
-            ws = lite_server.configure(root, ext_roots)
+            ws = lite_server.configure(root, ext_roots, name=ws_name)
         except (ValueError, OSError) as exc:
             rprint(f"[red]Не удалось открыть рабочую копию:[/] {exc}")
             if not (admin and transport == "http"):
@@ -253,6 +264,7 @@ def serve_lite(
         if ws is None:
             rprint("[yellow]Воркспейс не сконфигурирован.[/]")
             raise typer.Exit(code=1)
+        rprint(f"[green]Воркспейс:[/] {ws_name}")
         rprint(f"[green]Рабочая копия:[/] {ws.root}")
         for s in ws.sources:
             counts = ws.kind_counts(s)

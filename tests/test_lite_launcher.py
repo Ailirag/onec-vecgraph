@@ -42,7 +42,8 @@ def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     for var in ("ONEC_LITE_ROOT", "ONEC_LITE_EXT_ROOTS", "ONEC_LITE_HELP",
                 "ONEC_LITE_ADMIN", "ONEC_LITE_HOST", "ONEC_LITE_PORT"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(lite_server, "_WS", None)
+    monkeypatch.delenv("ONEC_LITE_WORKSPACE", raising=False)
+    monkeypatch.setattr(lite_server, "_WORKSPACES", {})
     monkeypatch.setattr(lite_server, "_HELP", ph.HelpCatalog())
     monkeypatch.setattr(lite_server, "_HELP_INIT", True)
 

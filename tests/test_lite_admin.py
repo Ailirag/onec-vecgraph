@@ -43,7 +43,8 @@ def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ONEC_LITE_STATE", str(tmp_path / "state" / "config.json"))
     monkeypatch.delenv("ONEC_LITE_ROOT", raising=False)
     monkeypatch.delenv("ONEC_LITE_EXT_ROOTS", raising=False)
-    monkeypatch.setattr(lite_server, "_WS", None)
+    monkeypatch.delenv("ONEC_LITE_WORKSPACE", raising=False)
+    monkeypatch.setattr(lite_server, "_WORKSPACES", {})
     monkeypatch.setattr(lite_server, "_RG_INIT", False)
     monkeypatch.setattr(lite_search, "_RG_OVERRIDE", None)
 
@@ -72,19 +73,19 @@ def test_apply_admin_paths_configures_and_persists(tmp_path: Path) -> None:
     assert snap["sources"][0]["objects"] == 1
     saved = lite_admin.load_paths(lite_admin.state_file())
     assert saved == (str(root), [])
-    assert lite_server._WS is not None  # noqa: SLF001
+    assert lite_server._WORKSPACES  # noqa: SLF001
 
 
 def test_apply_bad_path_keeps_previous_workspace(tmp_path: Path) -> None:
     root = _mini_edt(tmp_path / "ws")
     lite_server.apply_admin_paths(str(root), "")
-    old = lite_server._WS  # noqa: SLF001
+    old = lite_server._WORKSPACES["default"]  # noqa: SLF001
     # частичный успех: ошибка рабочей копии репортится, но прежний воркспейс жив,
     # а битый путь НЕ попадает в сохранённое состояние
     snap, err = lite_server.apply_admin_paths(str(tmp_path / "нет_такого"), "")
     assert err is not None and "Рабочая копия" in err
     assert snap is not None and snap["configured"] and snap["root"] == str(root)
-    assert lite_server._WS is old  # noqa: SLF001
+    assert lite_server._WORKSPACES["default"] is old  # noqa: SLF001
     assert lite_admin.load_paths(lite_admin.state_file()) == (str(root), [])
     _snap2, err2 = lite_server.apply_admin_paths("", "")
     assert err2 is not None
