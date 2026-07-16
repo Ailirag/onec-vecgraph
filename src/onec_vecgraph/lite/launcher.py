@@ -3,6 +3,7 @@
     onec-lite                    stdio MCP-сервер (регистрация в Claude Code/Cursor)
     onec-lite admin              http + веб-админка, браузер откроется сам (:8010/admin)
     onec-lite check              напечатать источники/справку и выйти
+    onec-lite update [--pull]    обновить воркспейс из remote (fetch; --pull = ff-pull)
 
 Пути берутся из --root/--ext-root/--help-path, env ONEC_LITE_*, либо из состояния,
 сохранённого админкой (~/.onec-lite/config.json) — поэтому после первой настройки
@@ -65,14 +66,44 @@ def _check() -> int:
     return 0
 
 
+def _update(pull: bool) -> int:
+    """Обновить дефолтный воркспейс из remote: зеркало → clone/pull, путь → fetch|pull."""
+    from . import admin as lite_admin
+    from . import gitops
+    from . import server as lite_server
+
+    name = lite_server.default_workspace_name()
+    wss, _active = lite_admin.load_workspaces(lite_admin.state_file())
+    entry = wss.get(name)
+    if entry is None:
+        print(f"Воркспейс '{name}' не найден. Известные: {', '.join(sorted(wss)) or '(нет)'}")
+        return 1
+    res = gitops.update_workspace(name, entry, mode="pull" if pull else "fetch")
+    label = res.get("op", "update")
+    if not res.get("ok"):
+        print(f"{name}: {label} — ОШИБКА: {res.get('error')}")
+        return 1
+    extra = []
+    if res.get("branch"):
+        extra.append(f"ветка {res['branch']}")
+    if res.get("behind"):
+        extra.append(f"отстаёт на {res['behind']} (сделайте --pull)")
+    print(f"{name}: {label} — ok. {res.get('output') or ''} {'· ' + ', '.join(extra) if extra else ''}".strip())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="onec-lite",
         description="MCP-сервер по живой рабочей копии 1С (без Neo4j и векторов).",
         epilog="Первая настройка: onec-lite admin (пути задаются в браузере и сохраняются).",
     )
-    parser.add_argument("mode", nargs="?", choices=("stdio", "admin", "check"), default="stdio",
-                        help="stdio (по умолчанию, для MCP-клиентов) | admin (веб-админка) | check")
+    parser.add_argument("mode", nargs="?", choices=("stdio", "admin", "check", "update"),
+                        default="stdio",
+                        help="stdio (по умолчанию, для MCP-клиентов) | admin (веб-админка) | "
+                             "check | update (обновить воркспейс из remote)")
+    parser.add_argument("--pull", action="store_true",
+                        help="update: pull --ff-only вместо безопасного fetch (для путей)")
     parser.add_argument("--root", help="корень рабочей копии (Конфигуратор XML или EDT)")
     parser.add_argument("--workspace",
                         help="имя воркспейса: дефолт этой сессии (с --root — имя, под которым "
@@ -90,6 +121,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "check":
         return _check()
+
+    if args.mode == "update":
+        return _update(pull=args.pull)
 
     from . import server as lite_server
 

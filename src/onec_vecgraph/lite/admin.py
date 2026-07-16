@@ -45,8 +45,28 @@ def normalize_ws_name(name: str) -> str | None:
     return name if _WS_NAME_RX.match(name) else None
 
 
+UPDATE_MODES = ("off", "fetch", "pull")
+
+
+def _norm_entry(e: dict) -> dict | None:
+    """Normalize a workspace entry; needs root (путь) и/или repo (управляемое зеркало)."""
+    root = str(e.get("root") or "").strip()
+    repo = str(e.get("repo") or "").strip()
+    if not root and not repo:
+        return None
+    mode = str(e.get("update_on_start") or "off").strip().lower()
+    return {
+        "root": root,
+        "ext_roots": [str(p).strip() for p in (e.get("ext_roots") or []) if str(p).strip()],
+        "repo": repo,
+        "branch": str(e.get("branch") or "").strip(),
+        "update_on_start": mode if mode in UPDATE_MODES else "off",
+    }
+
+
 def load_workspaces(path: Path) -> tuple[dict[str, dict], str]:
-    """Saved workspaces {name: {root, ext_roots}} + active name (v1 root мигрирует в 'default')."""
+    """Saved workspaces {name: {root, ext_roots, repo, branch, update_on_start}} + active
+    (v1 плоский root мигрирует в 'default')."""
     data = load_state(path)
     out: dict[str, dict] = {}
     raw = data.get("workspaces")
@@ -55,20 +75,11 @@ def load_workspaces(path: Path) -> tuple[dict[str, dict], str]:
             name = str(name).strip()
             if not name or not isinstance(e, dict):
                 continue
-            root = str(e.get("root") or "").strip()
-            if not root:
-                continue
-            out[name] = {
-                "root": root,
-                "ext_roots": [str(p).strip() for p in (e.get("ext_roots") or [])
-                              if str(p).strip()],
-            }
+            norm = _norm_entry(e)
+            if norm:
+                out[name] = norm
     elif str(data.get("root") or "").strip():  # legacy flat v1 state
-        out["default"] = {
-            "root": str(data["root"]).strip(),
-            "ext_roots": [str(p).strip() for p in (data.get("ext_roots") or [])
-                          if str(p).strip()],
-        }
+        out["default"] = _norm_entry(data) or {}
     active = str(data.get("active") or "").strip()
     if active not in out:
         active = next(iter(out), "")
@@ -96,9 +107,14 @@ def save_state(path: Path, workspaces: dict[str, dict], active: str,
 
 
 def upsert_workspace(path: Path, name: str, root: str, ext_roots: list[str],
-                     make_active: bool = False) -> None:
+                     make_active: bool = False, repo: str = "", branch: str = "",
+                     update_on_start: str = "off") -> None:
     wss, active = load_workspaces(path)
-    wss[name] = {"root": root, "ext_roots": list(ext_roots)}
+    entry = _norm_entry({"root": root, "ext_roots": list(ext_roots), "repo": repo,
+                         "branch": branch, "update_on_start": update_on_start})
+    if entry is None:
+        raise ValueError("воркспейсу нужен путь (root) и/или git-URL (repo)")
+    wss[name] = entry
     save_state(path, wss, name if (make_active or not active) else active)
 
 
@@ -212,10 +228,40 @@ def _fts_status_line(fts: dict) -> str:
             "дообновляется по mtime при поиске")
 
 
+def _ws_git_cell(w: dict) -> str:
+    """«обновление»-ячейка: вид (путь/зеркало), режим на старте, git-статус, итог апдейта."""
+    bits: list[str] = []
+    if w.get("repo"):
+        br = f"@{w['branch']}" if w.get("branch") else ""
+        bits.append(f'<span class="badge sel">зеркало{escape(br)}</span>')
+        if w.get("cloned") is False:
+            bits.append('<span class="badge warn">не клонировано</span>')
+    mode = str(w.get("update_on_start") or "off")
+    if mode != "off":
+        bits.append(f'<span class="badge ok">на старте: {escape(mode)}</span>')
+    g = w.get("git") or {}
+    if g.get("git"):
+        gb = escape(str(g.get("branch") or ""))
+        extra = []
+        if g.get("dirty"):
+            extra.append("грязное дерево")
+        if g.get("behind"):
+            extra.append(f"отстаёт на {g['behind']}")
+        bits.append(f'<span class="small">{gb}{" · " + ", ".join(extra) if extra else ""}</span>')
+    elif not w.get("repo"):
+        bits.append('<span class="small">не git</span>')
+    lu = w.get("last_update") or {}
+    if lu:
+        cls = "ok" if lu.get("ok") else "warn"
+        bits.append(f'<span class="badge {cls}" title="{escape(str(lu.get("output") or lu.get("error") or ""))}">'
+                    f'{escape(str(lu.get("op") or "update"))}</span>')
+    return " ".join(bits)
+
+
 def _workspace_rows(workspaces: list[dict]) -> str:
     if not workspaces:
-        return ('<tr><td colspan="4" class="empty">Ни одного воркспейса — задайте имя и корень '
-                "в форме ниже.</td></tr>")
+        return ('<tr><td colspan="5" class="empty">Ни одного воркспейса — задайте имя и корень '
+                "(или git-URL зеркала) в форме ниже.</td></tr>")
     rows = []
     for w in workspaces:
         name = str(w.get("name") or "")
@@ -226,10 +272,17 @@ def _workspace_rows(workspaces: list[dict]) -> str:
             badges.append('<span class="badge sel">выбран</span>')
         if w.get("loaded"):
             badges.append('<span class="small">загружен</span>')
+        can_update = bool(w.get("repo")) or (w.get("git") or {}).get("git")
+        update_btn = (
+            '<button class="mini" type="submit" name="action" value="update_ws" '
+            'title="зеркало: clone/pull; путь: безопасный fetch (pull — из формы ниже)">обновить</button> '
+            if can_update else ""
+        )
         actions = (
             f'<form method="post" action="admin" class="inline">'
             f'<input type="hidden" name="ws" value="{escape(name)}">'
             f'<a class="btn-link" href="admin?ws={escape(name)}">открыть</a> '
+            f"{update_btn}"
             f'<button class="mini" type="submit" name="action" value="activate">активировать</button> '
             f'<button class="mini danger" type="submit" name="action" value="delete" '
             f'onclick="return confirm(\'Удалить воркспейс {escape(name)} из настроек?\')">удалить</button>'
@@ -239,6 +292,7 @@ def _workspace_rows(workspaces: list[dict]) -> str:
             "<tr>"
             f'<td class="mono">{escape(name)}</td>'
             f'<td class="mono small">{escape(str(w.get("root") or ""))}</td>'
+            f"<td>{_ws_git_cell(w)}</td>"
             f"<td>{' '.join(badges)}</td>"
             f"<td>{actions}</td>"
             "</tr>"
@@ -284,6 +338,13 @@ def render_admin_page(
     elif error:
         banner = f'<div class="banner err-b">{escape(error)}</div>'
     ext_text = "\n".join(snap.get("ext_roots") or [])
+    sel_row = next((w for w in (snap.get("workspaces") or []) if w.get("selected")), {})
+    sel_mode = str(sel_row.get("update_on_start") or "off")
+    mode_opts = "".join(
+        f'<option value="{m}"{" selected" if m == sel_mode else ""}>{lbl}</option>'
+        for m, lbl in (("off", "выключено"), ("fetch", "fetch (безопасно)"),
+                       ("pull", "pull --ff-only"))
+    )
     help_snap = snap.get("platform_help") or {}
     help_text = render_help_lines(help_snap.get("entries") or [])
     return f"""<!doctype html>
@@ -322,7 +383,7 @@ def render_admin_page(
   .err-b {{ background: #fee2e2; color: #991b1b; }}
   form {{ background: #fff; padding: 1rem; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }}
   label {{ display: block; font-size: .78rem; font-weight: 600; color: #374151; margin: .6rem 0 .25rem; }}
-  input[type=text], textarea {{ width: 100%; box-sizing: border-box; padding: .45rem .55rem;
+  input[type=text], textarea, select {{ width: 100%; box-sizing: border-box; padding: .45rem .55rem;
     border: 1px solid #d1d5db; border-radius: 6px; font-family: ui-monospace, Menlo, monospace;
     font-size: .82rem; }}
   textarea {{ min-height: 4.5rem; resize: vertical; }}
@@ -339,7 +400,7 @@ def render_admin_page(
   {banner}
   <h2>Воркспейсы (рабочие копии; выбранная показана ниже)</h2>
   <table>
-    <thead><tr><th>имя</th><th>каталог</th><th>статус</th><th></th></tr></thead>
+    <thead><tr><th>имя</th><th>каталог</th><th>обновление</th><th>статус</th><th></th></tr></thead>
     <tbody>
 {_workspace_rows(snap.get("workspaces") or [])}
     </tbody>
@@ -368,6 +429,18 @@ def render_admin_page(
     <label for="ext_roots">Дополнительные корни расширений (по одному пути в строке; обычно не нужно)</label>
     <textarea id="ext_roots" name="ext_roots"
               placeholder="D:\\ext\\ДИТ_Расширение">{escape(ext_text)}</textarea>
+    <label for="repo">…ИЛИ git-URL зеркала (клон будет жить в ~/.onec-lite/mirrors/&lt;имя&gt;;
+      поле «Корень» тогда не заполняйте)</label>
+    <input type="text" id="repo" name="repo" value="{escape(str(sel_row.get("repo") or ""))}"
+           placeholder="https://git.corp.example/1c/ut_prod.git">
+    <label for="branch">Ветка зеркала (пусто = дефолтная)</label>
+    <input type="text" id="branch" name="branch" value="{escape(str(sel_row.get("branch") or ""))}"
+           placeholder="main">
+    <label for="update_on_start">Обновление из remote при старте сервера</label>
+    <select id="update_on_start" name="update_on_start">{mode_opts}</select>
+    <div class="hint">fetch не трогает файлы (нужен для честного review_set против origin/*);
+      pull --ff-only обновляет дерево и отменяется, если есть локальные изменения.
+      Кнопка «обновить» в таблице выше: зеркало → clone/pull, путь → fetch.</div>
     <h2>Справка платформы (.hbk)</h2>
     <table>
       <thead><tr><th>версия платформы</th><th>файлов .hbk</th><th>тем</th></tr></thead>

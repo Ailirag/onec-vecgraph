@@ -91,7 +91,10 @@ def test_v1_state_migrates_to_default_workspace(tmp_path: Path) -> None:
     f.write_text(json.dumps({"root": "H:\\ut", "ext_roots": ["D:\\ext"],
                              "rg_path": "C:\\rg.exe"}), encoding="utf-8")
     wss, active = lite_admin.load_workspaces(f)
-    assert wss == {"default": {"root": "H:\\ut", "ext_roots": ["D:\\ext"]}}
+    assert set(wss) == {"default"}
+    d = wss["default"]
+    assert d["root"] == "H:\\ut" and d["ext_roots"] == ["D:\\ext"]
+    assert d["repo"] == "" and d["update_on_start"] == "off"  # дефолты новых полей
     assert active == "default"
     # legacy-шимы работают поверх v2
     assert lite_admin.load_paths(f) == ("H:\\ut", ["D:\\ext"])

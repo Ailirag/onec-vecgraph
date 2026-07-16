@@ -9,6 +9,7 @@ Start via CLI: `onec-vecgraph serve-lite --root <путь>` (stdio by default).
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from urllib.parse import quote
@@ -21,7 +22,7 @@ from ..chunking import KIND_RU
 from ..parsing.dump import TYPE_FOLDERS
 from ..parsing.model import MetaObject
 from . import admin as lite_admin
-from . import code_intel, fts, gitview, metaview, platform_help, search
+from . import code_intel, fts, gitops, gitview, metaview, platform_help, search
 from .workspace import Workspace, read_text
 
 INSTRUCTIONS = """onec-lite: навигация по ЖИВОЙ рабочей копии конфигурации 1С (база + расширения),
@@ -111,6 +112,35 @@ def configure(root: str | Path, ext_roots: tuple[str | Path, ...] = (),
     return ws
 
 
+# Последний результат обновления из remote на воркспейс (админка/диагностика).
+_UPDATE_RESULTS: dict[str, dict] = {}
+
+
+def _entry_root(name: str, entry: dict) -> Path:
+    """Каталог воркспейса: явный root или управляемое зеркало ~/.onec-lite/mirrors/<имя>."""
+    root = str(entry.get("root") or "").strip()
+    return Path(root) if root else gitops.mirror_path(name)
+
+
+def _maybe_update_on_start(name: str, entry: dict) -> None:
+    """Per-workspace update_on_start (off|fetch|pull) — один раз, при ленивом построении.
+
+    Ошибки не блокируют воркспейс (обслуживаем то, что на диске) и не пишут в stdout
+    (он принадлежит MCP-протоколу) — итог виден в админке и в логе."""
+    mode = str(entry.get("update_on_start") or "off")
+    if mode not in ("fetch", "pull"):
+        return
+    if entry.get("repo") and not (gitops.mirror_path(name) / ".git").is_dir():
+        _UPDATE_RESULTS[name] = {"ok": False, "op": "start",
+                                 "error": "зеркало ещё не клонировано — кнопка «Обновить» в админке"}
+        return
+    res = gitops.update_workspace(name, entry, mode=mode)
+    res["trigger"] = "on_start"
+    _UPDATE_RESULTS[name] = res
+    logging.getLogger(__name__).info("workspace %s update_on_start(%s): %s",
+                                     name, mode, res.get("output") or res.get("error"))
+
+
 def _ws(workspace: str = "") -> Workspace:
     """Workspace by name; пусто = дефолт процесса. Lazy-builds from saved state/env."""
     name = (workspace or "").strip() or default_workspace_name()
@@ -131,7 +161,15 @@ def _ws(workspace: str = "") -> Workspace:
             f"Воркспейс '{name}' не сконфигурирован. Известные: {known}. "
             "Задайте --root/ONEC_LITE_ROOT, --workspace или добавьте в админке (/admin)."
         )
-    return configure(entry["root"], tuple(entry["ext_roots"]), name=name)
+    root = _entry_root(name, entry)
+    if entry.get("repo") and not root.is_dir():
+        raise RuntimeError(
+            f"Зеркало воркспейса '{name}' ещё не клонировано ({entry['repo']}). "
+            "Клонировать: кнопка «Обновить из remote» в админке или `onec-lite update "
+            f"--workspace {name}`."
+        )
+    _maybe_update_on_start(name, entry)
+    return configure(root, tuple(entry["ext_roots"]), name=name)
 
 
 _HELP = platform_help.HelpCatalog()
@@ -875,11 +913,20 @@ def _snapshot(workspace: str = "") -> dict:
     for wname, loaded in _WORKSPACES.items():  # env/--root конфигурации вне state
         wss.setdefault(wname, {"root": str(loaded.root),
                                "ext_roots": [str(p) for p in loaded.ext_roots]})
-    snap["workspaces"] = [
-        {"name": n, "root": e["root"], "ext_roots": e["ext_roots"],
-         "active": n == active, "loaded": n in _WORKSPACES, "selected": n == name}
-        for n, e in sorted(wss.items())
-    ]
+    rows = []
+    for n, e in sorted(wss.items()):
+        row_root = _entry_root(n, e) if (e.get("repo") or e.get("root")) else Path(e.get("root") or "")
+        rows.append({
+            "name": n, "root": str(row_root), "ext_roots": e.get("ext_roots") or [],
+            "repo": e.get("repo") or "", "branch": e.get("branch") or "",
+            "update_on_start": e.get("update_on_start") or "off",
+            "kind": "mirror" if e.get("repo") else "path",
+            "cloned": (row_root / ".git").is_dir() if e.get("repo") else None,
+            "active": n == active, "loaded": n in _WORKSPACES, "selected": n == name,
+            "git": gitops.status_brief(row_root) if row_root.is_dir() else {"git": False},
+            "last_update": _UPDATE_RESULTS.get(n),
+        })
+    snap["workspaces"] = rows
     snap["active"] = active
     snap["default_workspace"] = default_workspace_name()
     snap["rg"] = search.rg_path()
@@ -901,14 +948,20 @@ def _snapshot(workspace: str = "") -> dict:
 
 def apply_admin_paths(
     root: str, ext_text: str, help_text: str = "", rg_text: str | None = None,
-    name: str = "",
+    name: str = "", repo: str = "", branch: str = "", update_on_start: str = "",
 ) -> tuple[dict | None, str | None]:
-    """Upsert workspace `name` + platform help (+ ripgrep path) and persist; (snapshot, errors).
+    """Upsert workspace `name` (путь ИЛИ git-зеркало) + help/rg and persist; (snapshot, errors).
 
-    Частичный успех допустим (кривая строка справки не отменяет рабочую копию); в state
-    сохраняется ФАКТИЧЕСКИ применённое, а не введённое — битый путь не переживёт рестарт."""
+    repo задаёт управляемое зеркало: клонируется/обновляется сразу (синхронно, как
+    построение индексов). Частичный успех допустим; в state сохраняется ФАКТИЧЕСКИ
+    применённое, а не введённое — битый путь не переживёт рестарт."""
     _init_rg_from_state()
     root = (root or "").strip().strip('"').strip()
+    repo = (repo or "").strip().strip('"').strip()
+    branch = (branch or "").strip()
+    mode = (update_on_start or "").strip().lower()
+    if mode not in lite_admin.UPDATE_MODES:
+        mode = "off"
     ext = lite_admin.parse_ext_roots(ext_text)
     help_entries = platform_help.parse_help_lines(help_text)
     errors: list[str] = []
@@ -921,9 +974,28 @@ def apply_admin_paths(
             errors.append(f"ripgrep: файл не найден: {cleaned}")
         else:
             search.set_rg_path(cleaned or None)  # пусто = вернуться к автопоиску
-    if not root and not help_entries and rg_text is None:
-        return None, "Укажите корень конфигурации и/или пути к справке платформы."
-    if root:
+    if not root and not repo and not help_entries and rg_text is None:
+        return None, "Укажите корень конфигурации, git-URL зеркала и/или пути к справке."
+    if repo:
+        res = gitops.update_workspace(ws_name, {"repo": repo, "branch": branch})
+        _UPDATE_RESULTS[ws_name] = res
+        if not res.get("ok"):
+            errors.append(f"Зеркало: {res.get('error')}")
+        else:
+            ws = None
+            try:
+                ws = configure(gitops.mirror_path(ws_name), tuple(ext), name=ws_name)
+            except Exception as exc:  # noqa: BLE001 - клон есть, но не парсится как конфигурация
+                errors.append(f"Рабочая копия: {exc}")
+            if ws is not None:
+                try:
+                    lite_admin.upsert_workspace(
+                        lite_admin.state_file(), ws_name, "", [str(p) for p in ws.ext_roots],
+                        repo=repo, branch=branch, update_on_start=mode,
+                    )
+                except OSError as exc:
+                    errors.append(f"Состояние не сохранено: {exc}")
+    elif root:
         ws = None
         try:
             ws = configure(root, tuple(ext), name=ws_name)
@@ -933,7 +1005,7 @@ def apply_admin_paths(
             try:
                 lite_admin.upsert_workspace(
                     lite_admin.state_file(), ws_name, str(ws.root),
-                    [str(p) for p in ws.ext_roots],
+                    [str(p) for p in ws.ext_roots], update_on_start=mode,
                 )
             except OSError as exc:
                 errors.append(f"Состояние не сохранено: {exc}")
@@ -986,6 +1058,23 @@ async def admin_page(request: Request) -> Response:
                     "admin?msg=" + quote(f"Воркспейс '{sel}' удалён (индексы на диске не тронуты)."),
                     status_code=303)
             return _redir("err", f"Воркспейс '{sel}' не найден в сохранённом состоянии.")
+        if action == "update_ws":
+            wss, _active = lite_admin.load_workspaces(lite_admin.state_file())
+            entry = wss.get(sel)
+            if entry is None:
+                return _redir("err", f"Воркспейс '{sel}' не найден в сохранённом состоянии.")
+            res = gitops.update_workspace(sel, entry, mode=str(form.get("mode") or ""))
+            res["trigger"] = "admin"
+            _UPDATE_RESULTS[sel] = res
+            if not res.get("ok"):
+                return _redir("err", f"{res.get('op')}: {res.get('error')}")
+            loaded = _WORKSPACES.get(sel)
+            if loaded is not None:
+                loaded.refresh()
+                code_intel.clear_caches()
+            brief = res.get("output") or "готово"
+            extra = f" · ветка {res.get('branch')}" if res.get("branch") else ""
+            return _redir("msg", f"{res.get('op')}: {brief[:160]}{extra}")
         if action == "build_fts":
             try:
                 ws = _ws(sel)
@@ -1014,6 +1103,9 @@ async def admin_page(request: Request) -> Response:
             str(form.get("help_paths") or ""),
             rg_text=str(form.get("rg_path") or ""),
             name=name,
+            repo=str(form.get("repo") or ""),
+            branch=str(form.get("branch") or ""),
+            update_on_start=str(form.get("update_on_start") or ""),
         )
         if err:
             return _redir("err", err, ws_name=name)
