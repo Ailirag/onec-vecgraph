@@ -4,6 +4,7 @@
     onec-lite admin              http + веб-админка, браузер откроется сам (:8010/admin)
     onec-lite check              напечатать источники/справку и выйти
     onec-lite update [--pull]    обновить воркспейс из remote (fetch; --pull = ff-pull)
+    onec-lite sync ...           периодически обновлять ВСЕ воркспейсы (--interval N / --at HH:MM / --once)
 
 Пути берутся из --root/--ext-root/--help-path, env ONEC_LITE_*, либо из состояния,
 сохранённого админкой (~/.onec-lite/config.json) — поэтому после первой настройки
@@ -92,18 +93,128 @@ def _update(pull: bool) -> int:
     return 0
 
 
+def _parse_at_times(vals: list[str]) -> list[tuple[int, int]] | None:
+    """'HH:MM' → (час, минута); None при ошибке разбора (сообщение уже напечатано)."""
+    out: list[tuple[int, int]] = []
+    for v in vals:
+        parts = (v or "").strip().split(":")
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            print(f"onec-lite sync: неверное время --at {v!r} (ожидается HH:MM)")
+            return None
+        h, m = int(parts[0]), int(parts[1])
+        if not (0 <= h < 24 and 0 <= m < 60):
+            print(f"onec-lite sync: время вне диапазона --at {v!r}")
+            return None
+        out.append((h, m))
+    return out
+
+
+def _sync_pass(pull: bool, only: set[str] | None, logger) -> tuple[int, int]:
+    """Один проход по ВСЕМ воркспейсам: зеркало → clone/pull, путь → fetch (или ff-pull при --pull).
+    Возвращает (обновлено, ошибок). Ошибка отдельного репозитория не прерывает проход:
+    gitops.update_workspace сама не бросает исключений (см. её докстринг)."""
+    from . import admin as lite_admin
+    from . import gitops
+
+    wss, _active = lite_admin.load_workspaces(lite_admin.state_file())
+    if not wss:
+        logger.warning("нет ни одного воркспейса в %s", lite_admin.state_file())
+        return 0, 0
+    ok = fail = 0
+    for name, entry in sorted(wss.items()):
+        if only and name not in only:
+            continue
+        try:
+            res = gitops.update_workspace(name, entry, mode="pull" if pull else "")
+        except Exception as exc:  # noqa: BLE001 — доп. страховка поверх и без того безопасной update_workspace
+            res = {"ok": False, "op": "sync", "error": f"{type(exc).__name__}: {exc}"}
+        op = res.get("op", "update")
+        if res.get("ok"):
+            ok += 1
+            out = (res.get("output") or "").strip().splitlines()
+            logger.info("%s: %s — ok%s", name, op, (" · " + out[0]) if out else "")
+        else:
+            fail += 1
+            logger.warning("%s: %s — ОШИБКА: %s", name, op, res.get("error"))
+    return ok, fail
+
+
+def _sync(interval: int | None, at_raw: list[str], once: bool, pull: bool,
+          only: set[str] | None) -> int:
+    """Демон обновления воркспейсов. stdlib-планировщик: --interval N (сек, дрейфонезависимо
+    через monotonic) или --at HH:MM (фиксированное время суток; приоритетнее interval).
+    --once — один проход и выход. Логи — в stderr (переживают nohup/systemd)."""
+    import logging
+    import time
+    from datetime import datetime, timedelta
+
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(asctime)s onec-lite sync: %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S")
+    logger = logging.getLogger("onec_vecgraph.lite.sync")
+
+    at_times = _parse_at_times(at_raw)
+    if at_times is None:
+        return 2
+    if not once and not interval and not at_times:
+        print("onec-lite sync: укажите --interval N (сек) и/или --at HH:MM, либо --once")
+        return 2
+    if at_times and interval:
+        logger.warning("--interval игнорируется: заданы фиксированные времена --at")
+
+    def one_pass() -> None:
+        ok, fail = _sync_pass(pull, only, logger)
+        logger.info("проход завершён: обновлено %d, ошибок %d", ok, fail)
+
+    if once:
+        one_pass()
+        return 0
+    if not at_times:
+        one_pass()   # чистый --interval: первый проход сразу; при --at ждём назначенное время суток
+
+    next_tick = time.monotonic()
+    while True:
+        if at_times:
+            now = datetime.now()
+            cands = []
+            for (h, m) in at_times:
+                t = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if t <= now:
+                    t += timedelta(days=1)
+                cands.append(t)
+            delay = max(1.0, (min(cands) - now).total_seconds())
+        else:
+            next_tick += max(1, interval or 0)
+            delay = max(0.0, next_tick - time.monotonic())
+        try:
+            time.sleep(delay)
+        except KeyboardInterrupt:
+            logger.info("остановлен (Ctrl+C)")
+            return 0
+        one_pass()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="onec-lite",
         description="MCP-сервер по живой рабочей копии 1С (без Neo4j и векторов).",
         epilog="Первая настройка: onec-lite admin (пути задаются в браузере и сохраняются).",
     )
-    parser.add_argument("mode", nargs="?", choices=("stdio", "admin", "check", "update"),
+    parser.add_argument("mode", nargs="?", choices=("stdio", "admin", "check", "update", "sync"),
                         default="stdio",
                         help="stdio (по умолчанию, для MCP-клиентов) | admin (веб-админка) | "
-                             "check | update (обновить воркспейс из remote)")
+                             "check | update (обновить воркспейс из remote) | "
+                             "sync (демон обновления всех воркспейсов по расписанию)")
     parser.add_argument("--pull", action="store_true",
-                        help="update: pull --ff-only вместо безопасного fetch (для путей)")
+                        help="update/sync: pull --ff-only вместо безопасного fetch (для path-воркспейсов; "
+                             "зеркала обновляются в любом случае)")
+    parser.add_argument("--interval", type=int, metavar="N",
+                        help="sync: период между проходами в секундах (напр. 3600)")
+    parser.add_argument("--at", action="append", default=[], metavar="HH:MM",
+                        help="sync: фиксированное время суток для прохода (повторяемый; напр. --at 08:00 --at 14:00). "
+                             "Заданные --at имеют приоритет над --interval")
+    parser.add_argument("--once", action="store_true",
+                        help="sync: один проход и выход (для внешнего планировщика cron/systemd)")
     parser.add_argument("--root", help="корень рабочей копии (Конфигуратор XML или EDT)")
     parser.add_argument("--workspace",
                         help="имя воркспейса: дефолт этой сессии (с --root — имя, под которым "
@@ -124,6 +235,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "update":
         return _update(pull=args.pull)
+
+    if args.mode == "sync":
+        only = {args.workspace} if args.workspace else None
+        return _sync(interval=args.interval, at_raw=args.at, once=args.once,
+                     pull=args.pull, only=only)
 
     from . import server as lite_server
 

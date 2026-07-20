@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from pathlib import Path
@@ -190,3 +191,42 @@ def test_launcher_update_fetch_and_pull(remote_and_clone,
     out2 = capsys.readouterr().out
     assert "pull — ok" in out2
     assert (clone / "conf" / "src" / "Catalogs" / "Тест" / "ObjectModule.bsl").exists()
+
+
+# ---------- sync (демон обновления всех воркспейсов) ----------
+
+def test_sync_pass_iterates_all_and_isolates_errors(tmp_path: Path, remote_and_clone) -> None:
+    """Проход обходит ВСЕ воркспейсы; ошибка одного (не-git путь) не роняет остальные."""
+    bare, _clone, _author = remote_and_clone
+    st = lite_admin.state_file()
+    lite_admin.upsert_workspace(st, "good", "", [], repo=str(bare))       # зеркало — склонируется
+    lite_admin.upsert_workspace(st, "bad", str(tmp_path / "nope"), [])    # не git — ошибка
+    ok, fail = launcher._sync_pass(pull=False, only=None, logger=logging.getLogger("t"))
+    assert ok == 1 and fail == 1
+    assert (gitops.mirror_path("good") / ".git").is_dir()
+
+
+def test_sync_pass_only_filter(remote_and_clone) -> None:
+    """--workspace фильтрует: обновляется только указанный воркспейс."""
+    bare, _clone, _author = remote_and_clone
+    st = lite_admin.state_file()
+    lite_admin.upsert_workspace(st, "m_a", "", [], repo=str(bare))
+    lite_admin.upsert_workspace(st, "m_b", "", [], repo=str(bare))
+    ok, fail = launcher._sync_pass(pull=False, only={"m_a"}, logger=logging.getLogger("t"))
+    assert ok == 1 and fail == 0
+    assert (gitops.mirror_path("m_a") / ".git").is_dir()
+    assert not (gitops.mirror_path("m_b") / ".git").exists()
+
+
+def test_launcher_sync_once(remote_and_clone) -> None:
+    """`onec-lite sync --once` делает один проход (клонирует зеркало) и возвращает 0."""
+    bare, _clone, _author = remote_and_clone
+    lite_admin.upsert_workspace(lite_admin.state_file(), "m", "", [], repo=str(bare))
+    assert launcher.main(["sync", "--once"]) == 0
+    assert (gitops.mirror_path("m") / ".git").is_dir()
+
+
+def test_launcher_sync_requires_schedule() -> None:
+    """Без --once/--interval/--at sync не запускается (код 2), не трогая репозитории."""
+    assert launcher.main(["sync"]) == 2
+    assert launcher.main(["sync", "--at", "25:00", "--once"]) == 2  # неверное время
