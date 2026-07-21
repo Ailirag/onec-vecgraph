@@ -147,6 +147,55 @@ def test_unknown_workspace_lists_known(two_repos: tuple[Path, Path]) -> None:
         lite_server._ws("nope")  # noqa: SLF001
 
 
+def _ctx_with(headers: dict[str, str] | None):
+    """Фейковый MCP-Context как в streamable-http (headers=None ⇒ Request нет, т.е. stdio)."""
+    from starlette.datastructures import Headers
+
+    request = None if headers is None else type("Req", (), {"headers": Headers(headers)})()
+    return type("Ctx", (), {"request_context": type("RC", (), {"request": request})()})()
+
+
+def test_resolve_from_http_header(two_repos: tuple[Path, Path],
+                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTP: пустой аргумент → воркспейс из заголовка запроса (пер-проектное деление)."""
+    a, b = two_repos
+    state = lite_admin.state_file()
+    lite_admin.upsert_workspace(state, "a", str(a), [])
+    lite_admin.upsert_workspace(state, "b", str(b), [])
+    lite_admin.set_active(state, "a")  # дефолт процесса = a
+
+    def use(headers: dict[str, str] | None) -> None:
+        monkeypatch.setattr(lite_server.mcp, "get_context", lambda: _ctx_with(headers))
+
+    use({"X-Tenant-Id": "b"})
+    assert str(lite_server._ws().root) == str(b)  # noqa: SLF001 - тенант-заголовок оркестратора
+    assert lite_server.overview()["workspace"] == "b"  # отчёт совпадает с обслуженным воркспейсом
+    use({"x-workspace": "a"})
+    assert str(lite_server._ws().root) == str(a)  # noqa: SLF001 - регистр не важен (Starlette Headers)
+    use({"X-Workspace": "a", "X-Tenant-Id": "b"})
+    assert str(lite_server._ws().root) == str(a)  # noqa: SLF001 - X-Workspace приоритетнее X-Tenant-Id
+    use({"X-Workspace": "a"})
+    assert str(lite_server._ws("b").root) == str(b)  # noqa: SLF001 - явный аргумент сильнее заголовка
+    use(None)  # stdio: Request отсутствует
+    assert str(lite_server._ws().root) == str(a)  # noqa: SLF001 - → дефолт процесса (active)
+
+
+def test_header_workspace_name_configurable(two_repos: tuple[Path, Path],
+                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """Имя заголовка настраивается через ONEC_LITE_WORKSPACE_HEADER (дефолтные имена гаснут)."""
+    a, b = two_repos
+    state = lite_admin.state_file()
+    lite_admin.upsert_workspace(state, "a", str(a), [])
+    lite_admin.upsert_workspace(state, "b", str(b), [])
+    lite_admin.set_active(state, "a")
+    monkeypatch.setenv("ONEC_LITE_WORKSPACE_HEADER", "X-Proj")
+
+    monkeypatch.setattr(lite_server.mcp, "get_context", lambda: _ctx_with({"X-Proj": "b"}))
+    assert str(lite_server._ws().root) == str(b)  # noqa: SLF001 - кастомный заголовок читается
+    monkeypatch.setattr(lite_server.mcp, "get_context", lambda: _ctx_with({"X-Workspace": "b"}))
+    assert str(lite_server._ws().root) == str(a)  # noqa: SLF001 - дефолтные имена уже не смотрятся
+
+
 # --------------------------------------------------------------------------- #
 # Инструменты с workspace-параметром + изоляция одноимённых конфигураций
 # --------------------------------------------------------------------------- #

@@ -32,7 +32,8 @@ INSTRUCTIONS = """onec-lite: навигация по ЖИВОЙ рабочей �
 модуля (Module|Object|Manager|RecordSet|Value|Command|Form:<Имя>|<имя файла .bsl>);
 source — имя источника из overview() (пусто = все, расширения раньше базы);
 workspace — имя рабочей копии из list_workspaces() (сервер может держать несколько
-репозиториев 1С; пусто = дефолт сессии: env ONEC_LITE_WORKSPACE → активный из админки).
+репозиториев 1С; пусто = заголовок запроса X-Workspace/X-Tenant-Id (по http, для
+пер-проектного деления) → дефолт сессии: env ONEC_LITE_WORKSPACE → активный из админки).
 
 Куда идти: обзор -> overview/metrics; структура -> list_objects/get_object;
 зависимости -> get_dependencies (связи объекта) / find_type_usages (где используется тип);
@@ -141,9 +142,61 @@ def _maybe_update_on_start(name: str, entry: dict) -> None:
                                      name, mode, res.get("output") or res.get("error"))
 
 
+def _header_workspace_names() -> list[str]:
+    """HTTP-заголовки с именем воркспейса, в порядке приоритета (env-настраиваемо).
+
+    Дефолт: X-Workspace, затем X-Tenant-Id — тенант-заголовок оркестратора, которым
+    он делит проекты (см. serve-lite мультипроект). Переопределить набор/имена —
+    ONEC_LITE_WORKSPACE_HEADER (список через запятую или пробел)."""
+    raw = os.environ.get("ONEC_LITE_WORKSPACE_HEADER", "")
+    names = [h.strip() for h in raw.replace(",", " ").split() if h.strip()]
+    return names or ["X-Workspace", "X-Tenant-Id"]
+
+
+def _request_headers():
+    """Заголовки текущего MCP-запроса (Starlette Headers) или None — вне запроса / в stdio.
+
+    FastMCP пробрасывает Request в контекст только для streamable-http; в stdio (и когда
+    тул вызван напрямую, вне запроса) Request отсутствует, поэтому выбор воркспейса по
+    заголовку молча пропускается и берётся дефолт процесса."""
+    try:
+        request = mcp.get_context().request_context.request
+    except Exception:  # noqa: BLE001 — вне запроса / stdio / контекст недоступен
+        return None
+    return getattr(request, "headers", None)
+
+
+def _workspace_from_headers() -> str:
+    """Имя воркспейса из заголовка запроса (HTTP-мультипроект) или '' если заголовка нет.
+
+    Позволяет одному http serve-lite обслуживать несколько проектов оркестратора: клиент
+    шлёт X-Workspace (или тенант-заголовок X-Tenant-Id) при каждом вызове. Имена заголовков —
+    из _header_workspace_names(); значение = имя из list_workspaces(). В stdio → ''."""
+    headers = _request_headers()
+    if headers is None:
+        return ""
+    for name in _header_workspace_names():
+        value = (headers.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _resolve_ws_name(workspace: str = "") -> str:
+    """Эффективное имя воркспейса для вызова: явный аргумент → заголовок запроса → дефолт.
+
+    Единый порядок резолва для _ws() и для полей ответа (overview), чтобы отчёт о
+    воркспейсе совпадал с тем, что реально обслуживалось."""
+    return (workspace or "").strip() or _workspace_from_headers() or default_workspace_name()
+
+
 def _ws(workspace: str = "") -> Workspace:
-    """Workspace by name; пусто = дефолт процесса. Lazy-builds from saved state/env."""
-    name = (workspace or "").strip() or default_workspace_name()
+    """Workspace by name; пусто = заголовок запроса (http) → дефолт процесса. Lazy-builds.
+
+    Приоритет резолва: явный аргумент `workspace` > HTTP-заголовок X-Workspace/X-Tenant-Id
+    (только streamable-http, см. _workspace_from_headers) > дефолт процесса
+    (default_workspace_name). В stdio заголовков нет → поведение прежнее."""
+    name = _resolve_ws_name(workspace)
     ws = _WORKSPACES.get(name)
     if ws is not None:
         return ws
@@ -223,7 +276,7 @@ def overview(workspace: str = "") -> dict:
     workspace — имя из list_workspaces(); пусто = дефолт сессии."""
     ws = _ws(workspace)
     return {
-        "workspace": workspace or default_workspace_name(),
+        "workspace": _resolve_ws_name(workspace),
         "root": str(ws.root),
         "sources": [
             {
