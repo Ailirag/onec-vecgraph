@@ -324,6 +324,13 @@ baseline_index_url:   "http://host:8002/mcp"   # отдельный порт adm
 `ping` (liveness), `neo4j_health` (коннект к Neo4j), `whoami` (резолвнутый `authorized_base` +
 `baseline_reindex_enabled` + число активных джоб) — для readiness-probe и `tools/list`.
 
+**Tenant-health по данным** — на read-сервере (:8000): `list_configurations` → блок `layers`
+(`state: "empty" | "structural_only" | "vectorized"`, `chunks`/`code_chunks`/`callgraph_built`).
+`structural_only` = граф загружен, векторизация ещё не выполнена — штатное состояние, не ошибка;
+поисковые инструменты в этом состоянии сами возвращают `status: "not_vectorized"` /
+`"shared_corpora_only"` (см. `docs/MCP_USAGE.md` §2). `list_configurations` публикуется во всех
+режимах, включая `PEER_LITE=true` (когда структурные тулзы отданы onec-lite).
+
 ### 10.6. Read-only веб-дашборд (опционально)
 
 Лёгкий человекочитаемый статус джоб на том же admin-порту: `GET /jobs` (HTML-таблица с автообновлением

@@ -456,6 +456,16 @@ class Neo4jStore:
         rows = self.read("MATCH (c:Chunk {tenant_id: $t}) RETURN count(c) AS n", t=tenant_id)
         return rows[0]["n"] if rows else 0
 
+    def has_chunks(self, tenant_id: str, chunk_kind: str | None = None) -> bool:
+        """Cheap existence probe: does the tenant hold any (optionally kind-filtered) chunks?
+        Drives the explicit 'tenant not vectorized yet' search status."""
+        rows = self.read(
+            "MATCH (c:Chunk {tenant_id: $t}) WHERE $k IS NULL OR c.chunk_kind = $k "
+            "RETURN true AS ok LIMIT 1",
+            t=tenant_id, k=chunk_kind,
+        )
+        return bool(rows)
+
     def stale_chunk_owners(self, tenant_id: str) -> list[str]:
         """Objects whose chunks are missing or built from a different configVersion."""
         rows = self.read(

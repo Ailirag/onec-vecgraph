@@ -56,6 +56,26 @@ onec-vecgraph serve --transport stdio
 ```
 Заголовков нет → берётся дефолтный tenant из `.env` (`default_tenant_id`/`default_config_id`).
 
+### Режим «peer-lite» (в связке с onec-lite)
+
+Если рядом с этим сервером в той же сессии подключён **onec-lite** (структурные/лексические
+инструменты по живой рабочей копии), сервер запускают с `PEER_LITE=true` — тогда он **не публикует**
+структурные инструменты, которые закрывает lite: `list_metadata`, `get_object`,
+`get_object_properties`, `get_dependencies`, `find_type_usages`, `find_callers`, `find_callees`,
+`call_graph`, `find_handlers`, `find_overrides`, `get_routine_source`, `metrics`, `platform_docinfo`,
+`platform_get_document`, `platform_versions`. Роль видит каждую способность один раз: структура/код/
+граф вызовов/справка платформы — из onec-lite; здесь остаётся уникальное (14):
+
+- поиск по смыслу: `hybrid_search`, `semantic_search`;
+- знания: `dev_standards_search`/`dev_standards_get`, `its_*`, `artifact_*`;
+- анализ поверх глобального графа: `impact_analysis`, `call_path` (кратчайший путь вызовов — у lite его нет);
+- состояние БЗ: `list_configurations` (+ блок `layers`), `whoami`, `ping`, `neo4j_health`.
+
+Настройка исключений: `PEER_LITE_KEEP="metrics,…"` — оставить конкретные из скрываемых;
+`DISABLED_TOOLS="…"` — скрыть произвольные инструменты в любом режиме (сильнее KEEP).
+Инструкции сервера (`initialize`) в этом режиме прямо направляют структурные вопросы в onec-lite.
+Standalone-развёртывание (без lite) ничего не меняет: `PEER_LITE=false` (по умолчанию) публикует все 29.
+
 ---
 
 ## 2. Доступность данных по арендатору (ВАЖНО)
@@ -76,6 +96,20 @@ onec-vecgraph serve --transport stdio
 
 **Пустой результат поиска или графа вызовов обычно означает «слой не построен для этого tenant», а не
 «ничего не найдено».** Сначала проверьте `metrics` (есть ли routines/chunks).
+
+**Поиск сообщает о недоступности слоя ЯВНО.** Пока тенант не векторизован, `semantic_search` /
+`hybrid_search` (и обёртка `dev_standards_search`) возвращают не пустой список, а статус:
+- `status: "not_vectorized"` + `message` — у тенанта нет чанков и искать нечего (в т.ч. когда
+  векторный/полнотекстовый индекс ещё не создан в БД). `results` пуст, `tenant_vectorized: false`.
+- `status: "shared_corpora_only"` + `message` — тенант не векторизован, но поиск выполнен по общим
+  публичным корпусам (справка платформы / стандарты); результатов из самой конфигурации нет.
+- Статуса нет в ответе ⇒ тенант векторизован, пустой `results` = действительно «ничего не совпало».
+
+**Готовность слоёв машиночитаемо** — блок `layers` в `metrics` и `list_configurations`:
+`{state: "empty"|"structural_only"|"vectorized", graph_objects, callgraph_routines, callgraph_built,
+chunks, code_chunks, vectorized, code_vectorized, chunks_by_kind, chunks_by_source}`. Для
+tenant-health оркестратора: `structural_only` — граф есть, векторизация ещё не выполнена (это не
+ошибка); `code_vectorized=false` — код-чанков нет (`get_routine_source` вернёт `source=null`).
 
 ---
 
@@ -139,7 +173,7 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 
 ---
 
-## 4. Карта инструментов по потребности (23)
+## 4. Карта инструментов по потребности (29; в peer-lite — 14)
 
 ### Здоровье / контекст
 - **`ping`** — живость сервера (имя/версия).
@@ -156,12 +190,15 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
   `expand=True` → к хиту добавляется `context`.
 - Хиты по коду несут `routine_fqn`/`routine` (адрес рутины — можно сразу подать в `find_callers`/`find_callees`);
   каждый хит несёт `corpus`.
-- Результат: `{query, mode, results:[{fqn, kind, synonym, via, corpus, matched, rrf_score, routine_fqn?, routine?, context?}]}`.
+- Результат: `{query, mode, results:[{fqn, kind, synonym, via, corpus, matched, rrf_score, routine_fqn?, routine?, context?}]}`;
+  у невекторизованного тенанта дополнительно `status`/`tenant_vectorized`/`message` (см. §2).
 
 ### Структура объекта (граф метаданных)
 - **`list_configurations()`** — какие конфигурации есть в тенанте: слои `config_id` (`base` + расширения
   `ext:<имя>`) с числом объектов + зафиксированные релизы (`config_releases`, `config:<релиз>`). Читает только
-  тенант вызывающего. Результат: `{tenant_id, configurations:[{config_id, objects}], config_releases:[…], count}`.
+  тенант вызывающего. Результат: `{tenant_id, configurations:[{config_id, objects}], config_releases:[…], count,
+  layers}` — `layers` это снимок готовности данных (см. §2); публикуется и в peer-lite режиме, поэтому
+  подходит для tenant-health.
 - **`list_metadata(kind?, name_contains?, limit=200)`** — список объектов (точный фильтр, не семантика).
 - **`get_object(query, detail=False)`** — карточка: реквизиты+типы, ТЧ, значения перечислений,
   предопределённые, формы, модули, владельцы, подсистемы. `detail=True` добавляет полный сырой набор свойств.
@@ -219,7 +256,8 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
   `Объект.Метод` / имя. Возврат `routines:[{fqn, name, object, module_type, entry_point, source,
   overrides:[{mode, extension, fqn, source}]}]`. Для частично расширённого метода возвращает базу и все
   хуки вместе (платформа собирает их в рантайме — «слитого» текста не существует).
-  **Требует `vectorize --code`** (исходник собирается из code-чанков; без них `source=null`).
+  **Требует `vectorize --code`** (исходник собирается из code-чанков; без них `source=null`, а ответ
+  помечается `code_vectorized: false` + `note` — чтобы «слой не построен» не читалось как «метода нет»).
 
 ### Overlay (baseline + рабочая копия задачи) — Phase 2
 Графовые инструменты `get_dependencies` / `impact_analysis` / `find_callers` / `find_callees` / `call_graph`
@@ -230,7 +268,9 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 
 ### Обзор
 - **`metrics(subsystem?)`** — объекты по видам, объём кода, рёбра графа вызовов по kind/confidence,
-  точки входа, хотспоты fan-in/fan-out. Опц. scope по подсистеме.
+  точки входа, хотспоты fan-in/fan-out. Опц. scope по подсистеме. Плюс `layers` — готовность слоёв
+  тенанта (`state`: `empty`/`structural_only`/`vectorized`, chunks/code_chunks, callgraph_built);
+  `layers` всегда считается по всему тенанту, даже при scope по подсистеме.
 
 ---
 
@@ -281,7 +321,9 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 ## 7. Замечания / ограничения
 
 - Все инструменты **read-only** и **строго ограничены** арендатором из заголовка (не из аргументов).
-- Пустой результат поиска/графа вызовов ⇒ скорее «слой не построен», проверьте `metrics`.
+- Пустой результат поиска/графа вызовов ⇒ скорее «слой не построен»: поиск теперь сам возвращает
+  `status: "not_vectorized"`/`"shared_corpora_only"` (см. §2); готовность слоёв — `layers` в
+  `metrics`/`list_configurations`.
 - Структурные свойства в `:Detail` (StandardAttributes/InputByString/Characteristics) хранятся как
   raw-XML (обрезка ~2000 симв.) — скаляры (Hierarchical/CodeLength/…) чистые.
 - Менеджерные вызовы (`Справочники.X.Метод`) — `confidence=medium`; платформенные/через-переменную вызовы

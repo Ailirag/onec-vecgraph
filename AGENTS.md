@@ -54,8 +54,11 @@ uv run onec-vecgraph metrics --tenant-id acme_erp
 ```
 Overlay (baseline + per-task дельта разработчика): `serve-write`/`index-overlay` пишет только в `<base>@task/*`; графовые инструменты принимают `overlay_tenant_id` для union-чтения. Детали — [docs/OVERLAY.md](docs/OVERLAY.md).
 Гочи: при падении `uv` на офлайн-пересборке → `uv run --no-sync onec-vecgraph …`. `vectorize --incremental` игнорирует
-reset (безопасно); `--no-reset --code` доливает код без перезатирания. Пустой результат поиска ⇒ «слой не построен
-для тенанта» — проверь `metrics` (есть ли chunks/routines).
+reset (безопасно); `--no-reset --code` доливает код без перезатирания. Невекторизованный тенант поиск помечает сам
+(`status: "not_vectorized"`/`"shared_corpora_only"`); готовность слоёв — блок `layers` в `metrics`/`list_configurations`
+(`state: empty|structural_only|vectorized`). В связке с onec-lite read-сервер запускают с `PEER_LITE=true` —
+структурные тулзы (get_object, find_callers, metrics, platform_* и т.п.) тогда НЕ публикуются (их отдаёт lite);
+standalone — все инструменты, как раньше.
 
 Классификация для фильтрованного поиска (owner-фасеты): `index --config-release "ERP_2.5.18"` → `corpus_version=config:<релиз>`
 на объектах; источники манифеста (`its`/`git_artifacts`) принимают `doc_topic` (`platform`/`config`/`task`) и `corpus_version`.

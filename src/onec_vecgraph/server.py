@@ -18,6 +18,42 @@ from .storage import Neo4jStore
 
 settings = get_settings()
 
+# Structural tools the onec-lite peer serves from the LIVE working copy (always fresh, no
+# vectorization needed). In peer-lite deployments (PEER_LITE=true) they are NOT published
+# here, so a role sees each capability exactly once: structure / code reading / call graph /
+# platform help from onec-lite, semantics & knowledge from this server. The split mirrors
+# the orchestrator registry (docs/mcp-servers-registry.md, «Разделение инструментов»).
+LITE_COVERED_TOOLS = frozenset({
+    "list_metadata",          # lite: list_objects / search_metadata
+    "get_object",             # lite: get_object
+    "get_object_properties",  # lite: get_object reads the live XML incl. <Properties>
+    "get_dependencies",       # lite: get_dependencies
+    "find_type_usages",       # lite: find_type_usages
+    "metrics",                # lite: metrics / overview (KB readiness stays in list_configurations)
+    "find_callers",           # lite: find_callers
+    "find_callees",           # lite: find_callees
+    "call_graph",             # lite: call_graph
+    "find_handlers",          # lite: find_handlers
+    "find_overrides",         # lite: find_overrides
+    "get_routine_source",     # lite: read_routine / read_module (live source)
+    "platform_docinfo",       # lite: platform_docinfo
+    "platform_get_document",  # lite: platform_get_document
+    "platform_versions",      # lite: platform_versions
+})
+# Still published in peer-lite mode (unique to this server): semantic/hybrid search,
+# dev_standards_*, its_* / artifact_* doc corpora, graph-wide analysis lite can't do
+# (impact_analysis, call_path), KB introspection (list_configurations) and health tools.
+
+
+def _published(name: str, s=settings) -> bool:
+    """Whether a tool is published on this deployment (peer-lite / DISABLED_TOOLS aware)."""
+    if name in s.disabled_tools_set():
+        return False
+    if s.peer_lite and name in LITE_COVERED_TOOLS and name not in s.peer_lite_keep_set():
+        return False
+    return True
+
+
 # Server-level instructions: sent to every MCP client on `initialize`. This is the overview a
 # cold third-party agent needs to use the server correctly (tenant header, fqn convention, which
 # tool for which need, data-availability caveat). Per-tool docstrings cover the specifics.
@@ -32,6 +68,9 @@ to confirm the resolved tenant. A tenant only has data for the layers that were 
 metadata graph + raw `:Detail` properties (from indexing) are usually present; vector search needs
 prior vectorization; the BSL call graph / `find_handlers` need the call graph to have been built.
 EMPTY RESULTS usually mean that layer isn't built for this tenant — not that nothing matched.
+Search tools make this explicit: they return status='not_vectorized' (nothing searchable yet) or
+'shared_corpora_only' (only public help/standards searchable) with a message. Check what a tenant
+holds via list_configurations.layers (state: empty | structural_only | vectorized) or metrics.
 
 OBJECT IDENTITY (fqn) = `<Kind>.<Name>`, e.g. `Catalog.Контрагенты`, `Document.РеализацияТоваров`,
 `Enum.СтатусыЗаказов`, `CommonModule.ОбщегоНазначения`, `InformationRegister.Цены`,
@@ -75,14 +114,53 @@ DATA-DEPTH LAYERS (cheap → exhaustive): search & list (discovery) → get_obje
 → get_object_properties / :Detail (every raw property). The detail layer is deliberately NOT
 searchable — fetch it by fqn when you need exact configuration facts."""
 
+# Peer-lite variant: the structural toolset is unpublished here (the onec-lite MCP serves it
+# from the live working copy), so the guidance covers only what this server uniquely adds.
+PEER_LITE_INSTRUCTIONS = """\
+onec-vecgraph — READ-ONLY semantic knowledge base over a 1C:Enterprise configuration stored in
+Neo4j (vector & full-text search + metadata/call graph). PEER-LITE deployment: structural and
+lexical navigation (object cards, lists, dependencies, call graph, code reading, git review sets,
+platform syntax help) is served by the companion onec-lite MCP over the LIVE working copy — use
+onec-lite for those needs. This server publishes only what lite cannot do:
+
+• Find by meaning/keywords across vectorized corpora → hybrid_search (default; identifiers are
+  sub-word tokenized, so 'Продажи' matches 'ПродажиТоваров') or semantic_search. Filters: source
+  (['config','its','artifact','platform_help','bsp_help']) / kinds / chunk_kinds / subsystem /
+  doc_topic / corpus_version / help_kind; expand=True adds a graph neighborhood per hit. Code hits
+  carry routine_fqn.
+• 1C development STANDARDS («как писать по стандартам 1С», v8std) → dev_standards_search, then
+  dev_standards_get(<number>) for one standard's full text. Always available (shared corpus).
+• Documentation linked to a config object → its_find_related_docs / its_get_document (1C ITS),
+  artifact_find_related_docs / artifact_get_document (project docs) — if those corpora were ingested.
+• Graph-wide analysis → impact_analysis (who breaks if this object changes: incoming references,
+  subsystems, roles, subscriptions), call_path (shortest BSL call chain between two routines).
+• Knowledge-base state → list_configurations (config_id layers of the tenant + 'layers' readiness:
+  state empty | structural_only | vectorized), whoami (resolved tenant), ping / neo4j_health.
+
+ACCESS — multi-tenant. Over HTTP every call MUST carry `X-Tenant-Id: <tenant>` (or a bearer token);
+without it the request is REJECTED. OBJECT IDENTITY (fqn) = `<Kind>.<Name>`, e.g.
+`Catalog.Контрагенты`, `Document.РеализацияТоваров`; a routine fqn is `<module-fqn>::<MethodName>`.
+
+DATA AVAILABILITY: semantic search needs the tenant to have been VECTORIZED (an hours-long operator
+job). Until then search tools return an explicit status='not_vectorized' — or
+'shared_corpora_only' when only the shared public corpora (platform help / standards) are
+searchable. That status is NOT 'nothing matched': fall back to onec-lite (fts_search/search_code)
+for the interim, and check readiness via list_configurations.layers."""
+
 mcp = FastMCP(
     "onec-vecgraph",
-    instructions=INSTRUCTIONS,
+    instructions=PEER_LITE_INSTRUCTIONS if settings.peer_lite else INSTRUCTIONS,
     host=settings.mcp_host,
     port=settings.mcp_port,
     streamable_http_path=settings.mcp_path,
     stateless_http=True,  # tenant-per-request; no shared session state
 )
+
+
+def _tool(fn):
+    """Register `fn` as an MCP tool unless unpublished for this deployment (peer-lite mode /
+    DISABLED_TOOLS). The function stays importable & callable either way (CLI/tests use them)."""
+    return mcp.tool()(fn) if _published(fn.__name__) else fn
 
 
 def _token_lookup():
@@ -124,20 +202,20 @@ def _overlay(caller_tenant: str, overlay_tenant_id: str | None) -> str | None:
 
 
 # ── health / introspection ────────────────────────────────────────────
-@mcp.tool()
+@_tool
 def ping() -> dict[str, Any]:
     """Liveness check. Returns server name and version."""
     return {"status": "ok", "server": "onec-vecgraph", "version": __version__}
 
 
-@mcp.tool()
+@_tool
 def neo4j_health() -> dict[str, Any]:
     """Check Neo4j connectivity and report server edition and node count."""
     with Neo4jStore.from_settings(settings) as store:
         return store.health()
 
 
-@mcp.tool()
+@_tool
 def whoami(ctx: Context) -> dict[str, Any]:
     """Return the tenant/config resolved for this request (to verify header wiring)."""
     scope = tenancy.resolve(ctx, settings, token_lookup=_token_lookup())
@@ -145,7 +223,7 @@ def whoami(ctx: Context) -> dict[str, Any]:
 
 
 # ── metadata / graph ──────────────────────────────────────────────────
-@mcp.tool()
+@_tool
 def list_metadata(
     ctx: Context, kind: str | None = None, name_contains: str | None = None, limit: int = 200
 ) -> list[dict[str, Any]]:
@@ -159,17 +237,20 @@ def list_metadata(
         return queries.list_metadata(store, _tenant(ctx), kind, name_contains, limit)
 
 
-@mcp.tool()
+@_tool
 def list_configurations(ctx: Context) -> dict[str, Any]:
     """Configurations available in the caller's tenant: the config_id layers present — 'base' plus any
     extensions 'ext:<name>' — each with its object count, plus any pinned config release(s)
     (corpus_version 'config:<release>'). A tenant holds ONE configuration (base + its extensions);
-    use this to discover which layers/release are loaded before querying. Reads the caller tenant only."""
+    use this to discover which layers/release are loaded before querying. Also returns 'layers' —
+    the data-readiness snapshot (state: empty | structural_only | vectorized, chunks/code_chunks,
+    callgraph_built) for health checks: an unbuilt layer explains empty results, it is not an error.
+    Reads the caller tenant only."""
     with Neo4jStore.from_settings(settings) as store:
         return queries.list_configurations(store, _tenant(ctx))
 
 
-@mcp.tool()
+@_tool
 def get_object(ctx: Context, query: str, detail: bool = False) -> dict[str, Any]:
     """Full card for an object (by fqn like 'Catalog.AI_Модели' or by name): attributes with types, tabular sections, enum values, predefined values, forms, modules, owners, subsystems.
 
@@ -180,7 +261,7 @@ def get_object(ctx: Context, query: str, detail: bool = False) -> dict[str, Any]
         return queries.get_object(store, _tenant(ctx), query, detail=detail)
 
 
-@mcp.tool()
+@_tool
 def get_object_properties(ctx: Context, query: str) -> dict[str, Any]:
     """Full raw metadata property set for an object (by fqn or name): every <Properties> value —
     Hierarchical, CodeLength/CodeType, NumberLength, Posting/RealTimePosting, Periodicity,
@@ -190,7 +271,7 @@ def get_object_properties(ctx: Context, query: str) -> dict[str, Any]:
         return queries.get_object_properties(store, _tenant(ctx), query)
 
 
-@mcp.tool()
+@_tool
 def get_dependencies(ctx: Context, query: str, direction: str = "both",
                      overlay_tenant_id: str | None = None) -> dict[str, Any]:
     """Dependency graph around an object. direction: 'out' (what it depends on), 'in' (what depends
@@ -205,7 +286,7 @@ def get_dependencies(ctx: Context, query: str, direction: str = "both",
                                         overlay_tenant_id=_overlay(t, overlay_tenant_id))
 
 
-@mcp.tool()
+@_tool
 def impact_analysis(ctx: Context, query: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
     """What would be affected if this object changes: incoming references, subsystems, roles and
     subscriptions that depend on it. overlay_tenant_id ('<base>@task/<id>' under the caller's tenant)
@@ -216,7 +297,7 @@ def impact_analysis(ctx: Context, query: str, overlay_tenant_id: str | None = No
                                         overlay_tenant_id=_overlay(t, overlay_tenant_id))
 
 
-@mcp.tool()
+@_tool
 def find_type_usages(ctx: Context, query: str) -> dict[str, Any]:
     """Find all attributes/dimensions/resources that use the given object as their reference type."""
     with Neo4jStore.from_settings(settings) as store:
@@ -224,7 +305,7 @@ def find_type_usages(ctx: Context, query: str) -> dict[str, Any]:
 
 
 # ── ITS documentation (1C ITS knowledge base) ─────────────────────────
-@mcp.tool()
+@_tool
 def its_find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
     """1C ITS documentation linked to an object (by fqn or name) via MENTIONS (explicit/scanned
     fqns) or RELATES_TO (semantic, with confidence). Answers 'what ITS docs cover this object'.
@@ -234,7 +315,7 @@ def its_find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
         return queries.find_related_docs(store, _tenant(ctx), query, source="its")
 
 
-@mcp.tool()
+@_tool
 def its_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
     """Full ITS document by owner fqn ('its:<id>', e.g. from a search hit's fqn): metadata, full
     text (chunks rejoined) and the config objects it links to. Resolves in the caller tenant and
@@ -245,7 +326,7 @@ def its_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
 
 
 # ── project artifacts (task docs / repo artifacts) ────────────────────
-@mcp.tool()
+@_tool
 def artifact_find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
     """Project artifacts (task docs / repo artifacts) linked to an object (by fqn or name) via
     MENTIONS (explicit/scanned fqns) or RELATES_TO (semantic, with confidence). Answers 'what
@@ -255,7 +336,7 @@ def artifact_find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
         return queries.find_related_docs(store, _tenant(ctx), query, source="artifact")
 
 
-@mcp.tool()
+@_tool
 def artifact_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
     """Full project artifact by owner fqn ('artifact:<path>#<n>', e.g. from a search hit's fqn):
     metadata, full text (chunks rejoined) and the config objects it links to. Resolves in the
@@ -266,7 +347,7 @@ def artifact_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
 
 
 # ── 1C platform help (syntax assistant) ───────────────────────────────
-@mcp.tool()
+@_tool
 def platform_docinfo(ctx: Context, name: str, platform_version: str | None = None) -> dict[str, Any]:
     """Exact 1C platform-help lookup by canonical name — the syntax assistant. Accepts a Russian
     name, the English name, or the dotted 'Object.Method'/'Object.Property' form (e.g.
@@ -278,7 +359,7 @@ def platform_docinfo(ctx: Context, name: str, platform_version: str | None = Non
         return queries.docinfo(store, t, name, platform_version=platform_version, shared_tenant_id=_shared(t))
 
 
-@mcp.tool()
+@_tool
 def platform_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
     """Full platform-help article by owner fqn ('platform_help:<ver>|<Name>', e.g. from a search
     hit's fqn or a platform_docinfo candidate): metadata, full text (chunks rejoined) and the config
@@ -288,7 +369,7 @@ def platform_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
         return queries.get_document(store, t, fqn, shared_tenant_id=_shared(t), source="platform_help")
 
 
-@mcp.tool()
+@_tool
 def platform_versions(ctx: Context) -> dict[str, Any]:
     """List the 1C platform-help builds available for the syntax assistant: each distinct
     platform_version with its topic count and a per-help_kind breakdown (context / language / query).
@@ -317,7 +398,7 @@ def _standard_fqn(standard: str) -> str:
     return f"its:{settings.standards_id_prefix}{m.group(0)}" if m else f"its:{s}"
 
 
-@mcp.tool()
+@_tool
 def dev_standards_search(ctx: Context, query: str, top_k: int = 8, expand: bool = False) -> dict[str, Any]:
     """Search the 1C:Enterprise DEVELOPMENT STANDARDS (official «Система стандартов и методик разработки
     конфигураций», ITS v8std) by meaning or keywords: naming/coding conventions, event-handler rules,
@@ -339,7 +420,7 @@ def dev_standards_search(ctx: Context, query: str, top_k: int = 8, expand: bool 
         )
 
 
-@mcp.tool()
+@_tool
 def dev_standards_get(ctx: Context, standard: str) -> dict[str, Any]:
     """Full text of ONE 1C development standard by its number or id. Accepts a bare number ('396'),
     an anchor ('std396' / '#std396'), the id ('v8std_396'), or a search hit's fqn ('its:v8std_396').
@@ -351,7 +432,7 @@ def dev_standards_get(ctx: Context, standard: str) -> dict[str, Any]:
 
 
 # ── search ────────────────────────────────────────────────────────────
-@mcp.tool()
+@_tool
 def semantic_search(
     ctx: Context, query: str, top_k: int = 10, kinds: list[str] | None = None,
     chunk_kinds: list[str] | None = None, subsystem: str | None = None,
@@ -371,7 +452,8 @@ def semantic_search(
     / 'task:JIRA-1234'), help_kind ('context' | 'language' | 'query'). Public corpora are read additively
     from the shared tenant — no extra args. Code hits return routine granularity ('routine_fqn'); each
     hit carries 'corpus'. expand=True attaches a compact graph neighborhood ('context'). Requires prior
-    vectorization."""
+    vectorization — before it the response carries an explicit status='not_vectorized' (or
+    'shared_corpora_only' when only public help/standards are searchable), NOT a bare empty list."""
     from .embeddings.runtime import provider
 
     with Neo4jStore.from_settings(settings) as store:
@@ -384,7 +466,7 @@ def semantic_search(
         )
 
 
-@mcp.tool()
+@_tool
 def hybrid_search(
     ctx: Context, query: str, top_k: int = 10, kinds: list[str] | None = None,
     chunk_kinds: list[str] | None = None, subsystem: str | None = None,
@@ -400,7 +482,8 @@ def hybrid_search(
     the shared tenant. platform_version restricts help to one build; doc_topic/corpus_version/help_kind
     are owner-node facets (pair with the matching source). Identifiers are sub-word tokenized, so
     'Продажи' matches 'ПродажиТоваров'. Code hits are routine-grained; each hit carries 'corpus'. Same
-    result shape as semantic_search."""
+    result shape as semantic_search, incl. the explicit status ('not_vectorized' /
+    'shared_corpora_only') for tenants whose vector layer is not built yet."""
     from .embeddings.runtime import provider, reranker
 
     with Neo4jStore.from_settings(settings) as store:
@@ -413,16 +496,18 @@ def hybrid_search(
         )
 
 
-@mcp.tool()
+@_tool
 def metrics(ctx: Context, subsystem: str | None = None) -> dict[str, Any]:
     """Inventory & hotspot metrics: object counts by kind, code volume, call-graph edges by
-    kind/confidence, fan-in/out hotspots, behavior entry points. Optionally scoped to a subsystem."""
+    kind/confidence, fan-in/out hotspots, behavior entry points. Optionally scoped to a subsystem.
+    'layers' reports tenant-wide data readiness (state: empty | structural_only | vectorized,
+    chunks/code_chunks, callgraph_built) — an unbuilt layer, not an error, explains empty results."""
     with Neo4jStore.from_settings(settings) as store:
         return queries.metrics(store, _tenant(ctx), subsystem)
 
 
 # ── BSL call graph ────────────────────────────────────────────────────
-@mcp.tool()
+@_tool
 def find_callers(ctx: Context, query: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
     """Which BSL routines call the given procedure/function (by routine fqn, 'Module.Method', or
     bare name). Returns {query, routines, callers:[{fqn, name, object, kind, confidence}], count}.
@@ -432,7 +517,7 @@ def find_callers(ctx: Context, query: str, overlay_tenant_id: str | None = None)
         return queries.find_callers(store, t, query, overlay_tenant_id=_overlay(t, overlay_tenant_id))
 
 
-@mcp.tool()
+@_tool
 def find_callees(ctx: Context, query: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
     """Which BSL routines the given procedure/function calls. Returns {query, routines,
     callees:[{fqn, name, object, kind, via (local/common_module/manager)}], count}.
@@ -442,7 +527,7 @@ def find_callees(ctx: Context, query: str, overlay_tenant_id: str | None = None)
         return queries.find_callees(store, t, query, overlay_tenant_id=_overlay(t, overlay_tenant_id))
 
 
-@mcp.tool()
+@_tool
 def call_graph(ctx: Context, query: str, overlay_tenant_id: str | None = None) -> dict[str, Any]:
     """Combined BSL call graph around a routine: {callers, callees}. With overlay_tenant_id
     ('<base>@task/<id>' under the caller's tenant) the result unions baseline ∪ working copy
@@ -452,7 +537,7 @@ def call_graph(ctx: Context, query: str, overlay_tenant_id: str | None = None) -
         return queries.call_graph(store, t, query, overlay_tenant_id=_overlay(t, overlay_tenant_id))
 
 
-@mcp.tool()
+@_tool
 def call_path(ctx: Context, from_routine: str, to_routine: str) -> dict[str, Any]:
     """Shortest BSL call path between two routines (single tenant; for overlay-aware analysis use
     call_graph — cross-layer path-finding is not unioned, see docs/OVERLAY.md)."""
@@ -460,7 +545,7 @@ def call_path(ctx: Context, from_routine: str, to_routine: str) -> dict[str, Any
         return queries.call_path(store, _tenant(ctx), from_routine, to_routine)
 
 
-@mcp.tool()
+@_tool
 def find_handlers(ctx: Context, query: str) -> dict[str, Any]:
     """Behavior entry points of an object (by fqn or name): form event handlers (event→routine,
     via HANDLES) and standard module events (проведение/запись/проверка_заполнения/нумерация/…).
@@ -469,7 +554,7 @@ def find_handlers(ctx: Context, query: str) -> dict[str, Any]:
         return queries.find_handlers(store, _tenant(ctx), query)
 
 
-@mcp.tool()
+@_tool
 def find_overrides(ctx: Context, query: str) -> dict[str, Any]:
     """How extensions alter an object's BSL: routines annotated &Вместо/&Перед/&После/
     &ИзменениеИКонтроль in a borrowed (Adopted) object, each linked to the base method it hooks.
@@ -479,7 +564,7 @@ def find_overrides(ctx: Context, query: str) -> dict[str, Any]:
         return queries.find_overrides(store, _tenant(ctx), query)
 
 
-@mcp.tool()
+@_tool
 def get_routine_source(ctx: Context, query: str) -> dict[str, Any]:
     """Source code of a BSL routine for agent context — base body PLUS every extension override.
     query = routine fqn | 'Module.Method' | 'Object.Method' | method name. Returns routines:[{fqn,

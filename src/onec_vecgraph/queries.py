@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+from neo4j.exceptions import ClientError
 
 from .storage import Neo4jStore
 
@@ -33,8 +36,9 @@ def list_metadata(
 
 def list_configurations(store: Neo4jStore, tenant_id: str) -> dict[str, Any]:
     """Configurations present within a tenant: the config_id layers (base + extensions 'ext:<name>')
-    with object counts, plus any pinned config release(s) (corpus_version 'config:<release>')."""
-    layers = store.read(
+    with object counts, plus any pinned config release(s) (corpus_version 'config:<release>') and a
+    data-readiness snapshot ('layers': structural-only vs vectorized)."""
+    config_layers = store.read(
         "MATCH (o:Object {tenant_id: $t}) WHERE coalesce(o.stub, false) = false "
         "RETURN o.config_id AS config_id, count(*) AS objects ORDER BY objects DESC",
         t=tenant_id,
@@ -46,9 +50,13 @@ def list_configurations(store: Neo4jStore, tenant_id: str) -> dict[str, Any]:
     )
     return {
         "tenant_id": tenant_id,
-        "configurations": layers,
+        "configurations": config_layers,
         "config_releases": [r["corpus_version"] for r in releases],
-        "count": len(layers),
+        "count": len(config_layers),
+        # Readiness snapshot (structural-only vs vectorized) — published in every server
+        # mode, so orchestrator tenant-health can tell "layer not built" from "broken".
+        "layers": tenant_layers(store, tenant_id,
+                                objects_total=sum(r["objects"] for r in config_layers)),
     }
 
 
@@ -569,7 +577,16 @@ def get_routine_source(store, tenant_id: str, q: str) -> dict[str, Any]:
             "source": _reassemble_source(store, tenant_id, fqn),
             "overrides": overrides, "override_count": len(overrides),
         })
-    return {"found": True, "query": q, "routines": routines, "count": len(routines)}
+    out: dict[str, Any] = {"found": True, "query": q, "routines": routines, "count": len(routines)}
+    if (routines and all(r["source"] is None for r in routines)
+            and not store.has_chunks(tenant_id, chunk_kind="code")):
+        # Distinguish "code layer not built" from "method below the chunking threshold".
+        out["code_vectorized"] = False
+        out["note"] = (
+            "no code chunks stored for this tenant — source=null means the code layer is not "
+            "built (run `vectorize --code`), not that the method has no body"
+        )
+    return out
 
 
 def find_related_docs(store, tenant_id: str, q: str, source: str | None = None) -> dict[str, Any]:
@@ -743,6 +760,53 @@ def _expand(store, tenant_id: str, results: list[dict]) -> list[dict]:
     return results
 
 
+def tenant_layers(store, tenant_id: str, objects_total: int | None = None,
+                  routines_total: int | None = None) -> dict[str, Any]:
+    """Data-availability snapshot of a tenant: which layers are built (metadata graph /
+    call graph / vectors / code vectors). `state` gives health checks one word to test —
+    'empty' | 'structural_only' | 'vectorized' — so a not-yet-vectorized tenant is not
+    mistaken for a broken one. Pass precomputed totals to avoid re-counting."""
+    if objects_total is None:
+        rows = store.read(
+            "MATCH (o:Object {tenant_id: $t}) WHERE coalesce(o.stub, false) = false "
+            "RETURN count(o) AS n",
+            t=tenant_id,
+        )
+        objects_total = rows[0]["n"] if rows else 0
+    if routines_total is None:
+        rows = store.read("MATCH (r:Routine {tenant_id: $t}) RETURN count(r) AS n", t=tenant_id)
+        routines_total = rows[0]["n"] if rows else 0
+    by_kind = store.read(
+        "MATCH (c:Chunk {tenant_id: $t}) RETURN c.chunk_kind AS kind, count(*) AS n ORDER BY n DESC",
+        t=tenant_id,
+    )
+    by_source = store.read(
+        "MATCH (c:Chunk {tenant_id: $t}) "
+        "RETURN coalesce(c.source, 'config') AS source, count(*) AS n ORDER BY n DESC",
+        t=tenant_id,
+    )
+    chunks = sum(r["n"] for r in by_kind)
+    code_chunks = next((r["n"] for r in by_kind if r["kind"] == "code"), 0)
+    if chunks > 0:
+        state = "vectorized"  # docs-only tenants (no config objects) count as vectorized too
+    elif objects_total > 0:
+        state = "structural_only"
+    else:
+        state = "empty"
+    return {
+        "state": state,
+        "graph_objects": objects_total,
+        "callgraph_routines": routines_total,
+        "callgraph_built": routines_total > 0,
+        "chunks": chunks,
+        "code_chunks": code_chunks,
+        "vectorized": chunks > 0,
+        "code_vectorized": code_chunks > 0,
+        "chunks_by_kind": by_kind,
+        "chunks_by_source": by_source,
+    }
+
+
 def metrics(store, tenant_id: str, subsystem: str | None = None) -> dict[str, Any]:
     """Inventory & hotspot metrics for an overview: object counts by kind, code volume, call-graph
     edges by kind/confidence, fan-in/out hotspots, behavior entry points. Optionally scoped to a
@@ -808,7 +872,51 @@ def metrics(store, tenant_id: str, subsystem: str | None = None) -> dict[str, An
         "objects_by_config_id": by_config,
         "extension_overrides": overrides,
         "hotspots": {"top_fan_in": top_fan_in, "top_fan_out": top_fan_out},
+        # Tenant-wide (never subsystem-scoped) readiness: structural-only vs vectorized.
+        "layers": tenant_layers(
+            store, tenant_id,
+            objects_total=None if subsystem else sum(r["n"] for r in by_kind),
+            routines_total=routines[0]["n"] if routines else 0,
+        ),
     }
+
+
+# ── vectorization readiness (explicit status instead of silently-empty results) ──────
+# A tenant that was indexed but not yet vectorized has NO Chunk nodes, so its vector/
+# full-text retrievers would return [] — indistinguishable from "nothing matched" (and
+# vectorizing a configuration takes many hours, so this window is long). Search tools
+# probe readiness up front and answer with a machine-checkable `status` instead.
+
+_MISSING_INDEX_RE = re.compile(r"(?i)no such \w+ (?:schema )?index")
+
+
+def _is_missing_index_error(exc: Exception) -> bool:
+    """A queryNodes call failed because the vector/full-text index was never created."""
+    return bool(_MISSING_INDEX_RE.search(str(exc)))
+
+
+def _not_vectorized(query: str, mode: str, tenant_id: str, reason: str) -> dict[str, Any]:
+    return {
+        "query": query, "mode": mode, "results": [],
+        "status": "not_vectorized", "tenant_vectorized": False,
+        "message": (
+            f"Tenant '{tenant_id}' is not vectorized yet ({reason}). This is an availability "
+            "status, NOT an empty match: semantic/full-text search needs the operator to run "
+            "`vectorize` for the tenant first. Until then use the metadata/graph tools — or "
+            "the onec-lite peer MCP, if deployed — for structural and lexical questions."
+        ),
+    }
+
+
+def _shared_only_note(out: dict[str, Any], tenant_id: str) -> dict[str, Any]:
+    """Annotate a search response whose caller tenant holds no chunks (shared corpora only)."""
+    out["status"] = "shared_corpora_only"
+    out["tenant_vectorized"] = False
+    out["message"] = (
+        f"Tenant '{tenant_id}' is not vectorized yet — results come from shared public "
+        "corpora only (platform help / standards / docs), not from this configuration."
+    )
+    return out
 
 
 def _fts_query(raw: str) -> str:
@@ -850,7 +958,14 @@ def semantic_search(store, tenant_id, query, embedder, top_k=10, overfetch=5,
     corpus_version / help_kind) are post-applied to the vector hits; fetch is widened when filtering
     so a narrow slice still fills top_k. doc_topic / corpus_version / help_kind are owner-node facets
     (apply only with the matching source). With expand=True each hit is enriched with a compact graph
-    neighborhood (GraphRAG). shared_tenant_id adds a public corpus tenant to the read scope (server-derived)."""
+    neighborhood (GraphRAG). shared_tenant_id adds a public corpus tenant to the read scope (server-derived).
+
+    A tenant without chunks gets an explicit `status` ('not_vectorized' / 'shared_corpora_only')
+    instead of a silently-empty result."""
+    tenant_vectorized = store.has_chunks(tenant_id)
+    if not tenant_vectorized and not (shared_tenant_id and store.has_chunks(shared_tenant_id)):
+        # Nothing searchable in scope — answer before embedding (no model load for nothing).
+        return _not_vectorized(query, "semantic", tenant_id, "no chunks stored for this tenant")
     vec = embedder.embed([query], is_query=True)[0]
     filtered = bool(kinds or chunk_kinds or subsystem or source or platform_version
                     or doc_topic or corpus_version or help_kind)
@@ -858,11 +973,18 @@ def semantic_search(store, tenant_id, query, embedder, top_k=10, overfetch=5,
     f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
              platform_version=platform_version, doc_topic=doc_topic,
              corpus_version=corpus_version, help_kind=help_kind)
-    sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id)
+    try:
+        sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id)
+    except ClientError as e:
+        if _is_missing_index_error(e):
+            return _not_vectorized(query, "semantic", tenant_id,
+                                   "the vector search index does not exist in this database")
+        raise
     results = _rrf_fuse([("semantic", sem), ("ident", idt)], top_k)
     if expand:
         _expand(store, tenant_id, results)
-    return {"query": query, "mode": "semantic", "results": results}
+    out = {"query": query, "mode": "semantic", "results": results}
+    return out if tenant_vectorized else _shared_only_note(out, tenant_id)
 
 
 def hybrid_search(store, tenant_id, query, embedder, top_k=10, overfetch=5, rrf_k=60,
@@ -875,7 +997,14 @@ def hybrid_search(store, tenant_id, query, embedder, top_k=10, overfetch=5, rrf_
     corpus_version / help_kind) restrict all three retrievers. doc_topic / corpus_version / help_kind
     are owner-node facets (apply only with the matching source). With expand=True each hit is enriched
     with a compact graph neighborhood (GraphRAG). shared_tenant_id adds a public corpus tenant to the
-    read scope (server-derived)."""
+    read scope (server-derived).
+
+    A tenant without chunks gets an explicit `status` ('not_vectorized' / 'shared_corpora_only')
+    instead of a silently-empty result."""
+    tenant_vectorized = store.has_chunks(tenant_id)
+    if not tenant_vectorized and not (shared_tenant_id and store.has_chunks(shared_tenant_id)):
+        # Nothing searchable in scope — answer before embedding (no model load for nothing).
+        return _not_vectorized(query, "hybrid", tenant_id, "no chunks stored for this tenant")
     vec = embedder.embed([query], is_query=True)[0]
     filtered = bool(kinds or chunk_kinds or subsystem or source or platform_version
                     or doc_topic or corpus_version or help_kind)
@@ -883,12 +1012,19 @@ def hybrid_search(store, tenant_id, query, embedder, top_k=10, overfetch=5, rrf_
     f = dict(kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
              platform_version=platform_version, doc_topic=doc_topic,
              corpus_version=corpus_version, help_kind=help_kind)
-    sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id)
-    ft = _dedup(store.fulltext_search(tenant_id, _fts_query(query), limit=fetch, shared_tenant_id=shared_tenant_id, **f))
+    try:
+        sem, idt = _vector_retrievers(store, tenant_id, vec, fetch, f, shared_tenant_id)
+        ft = _dedup(store.fulltext_search(tenant_id, _fts_query(query), limit=fetch, shared_tenant_id=shared_tenant_id, **f))
+    except ClientError as e:
+        if _is_missing_index_error(e):
+            return _not_vectorized(query, "hybrid", tenant_id,
+                                   "the vector/full-text search index does not exist in this database")
+        raise
     pool = top_k if reranker is None else max(top_k, 20)
     results = _rrf_fuse([("semantic", sem), ("ident", idt), ("fulltext", ft)], pool, rrf_k)
     if reranker is not None:
         results = _rerank(reranker, query, results, top_k)
     if expand:
         _expand(store, tenant_id, results)
-    return {"query": query, "mode": "hybrid", "results": results}
+    out = {"query": query, "mode": "hybrid", "results": results}
+    return out if tenant_vectorized else _shared_only_note(out, tenant_id)

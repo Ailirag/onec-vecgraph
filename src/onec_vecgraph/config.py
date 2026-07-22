@@ -71,6 +71,25 @@ class Settings(BaseSettings):
     shared_tenant_id: str = "__shared__"
     include_shared_tenant: bool = True  # additively read the shared tenant in search/get_document
 
+    # ── Peer-lite mode (tool publication control) ──────────────────────
+    # When this server runs ALONGSIDE an onec-lite MCP (which serves structural/lexical/
+    # call-graph/platform-help tools from the LIVE working copy, no vectorization needed),
+    # set PEER_LITE=true: the lite-covered structural tools are NOT published here, so a
+    # role sees each capability once — structure from lite, semantics/knowledge from this
+    # server. Standalone (no lite peer): keep false → all tools published (default).
+    peer_lite: bool = False
+    # Comma-separated tool names to KEEP published despite peer_lite (escape hatch),
+    # e.g. PEER_LITE_KEEP="metrics,get_routine_source".
+    peer_lite_keep: str = ""
+    # Comma-separated tool names to NEVER publish, regardless of mode (fine-grained override).
+    disabled_tools: str = ""
+
+    def peer_lite_keep_set(self) -> frozenset[str]:
+        return _csv_names(self.peer_lite_keep)
+
+    def disabled_tools_set(self) -> frozenset[str]:
+        return _csv_names(self.disabled_tools)
+
     # ── Development standards (1C v8std) read tools ────────────────────
     # `dev_standards_search` / `dev_standards_get` target the ITS development-standards corpus. It is ingested
     # (`type: its`) into the shared tenant with this corpus_version; ids look like '<prefix><number>'.
@@ -176,6 +195,11 @@ class Settings(BaseSettings):
             if token and base:
                 out[token] = base
         return out
+
+
+def _csv_names(raw: str) -> frozenset[str]:
+    """Parse a comma-separated name list into a trimmed set (empty entries dropped)."""
+    return frozenset(x.strip() for x in raw.split(",") if x.strip())
 
 
 @lru_cache

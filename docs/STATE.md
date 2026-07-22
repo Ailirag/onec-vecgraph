@@ -173,6 +173,31 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   **e2e не прогонялся — Docker Desktop в сессии не стартовал (WSL-bootstrap), Neo4j недоступен**
   (скрипт `scripts/_shared_probe.py` готов).
 
+- **Peer-lite режим + явные статусы векторизации (2026-07-22)** — доработка read-сервера под связку
+  с onec-lite (реестр оркестратора `docs/mcp-servers-registry.md`, §«Разделение инструментов»):
+  1) **условная публикация тулзов**: `PEER_LITE=true` скрывает 15 lite-покрытых структурных
+  (`server.LITE_COVERED_TOOLS`: list_metadata, get_object, get_object_properties, get_dependencies,
+  find_type_usages, find_callers/callees, call_graph, find_handlers, find_overrides,
+  get_routine_source, metrics, platform_docinfo/get_document/versions) — остаются 14 уникальных
+  (hybrid/semantic_search, dev_standards_*, its_*/artifact_*, impact_analysis, call_path,
+  list_configurations, ping/neo4j_health/whoami); `PEER_LITE_KEEP` возвращает выбранные,
+  `DISABLED_TOOLS` скрывает произвольные в любом режиме (сильнее KEEP); механика — декоратор
+  `@_tool` (гейт `_published(name, settings)`), функции остаются импортируемыми (CLI/тесты);
+  instructions per-режим (`PEER_LITE_INSTRUCTIONS` шлёт структурные вопросы в onec-lite);
+  standalone (default) — без изменений, все 29. 2) **поиск до векторизации отвечает ЯВНО**:
+  `semantic/hybrid_search` (и dev_standards_search) → `status:"not_vectorized"`+`message`
+  (у тенанта нет чанков и общий тенант пуст/выключен; ранний выход ДО эмбеддинга — модель не
+  грузится; сюда же маппится ClientError «no such … index» от Neo4j) либо
+  `status:"shared_corpora_only"` (тенант пуст, но shared-корпуса искались; `tenant_vectorized:false`);
+  у векторизованного тенанта форма ответа прежняя (без status). `get_routine_source` при полном
+  отсутствии code-чанков → `code_vectorized:false`+note. 3) **честная готовность слоёв**:
+  `queries.tenant_layers` → блок `layers` (`state: empty|structural_only|vectorized`,
+  graph_objects/callgraph_routines/callgraph_built/chunks/code_chunks/vectorized/code_vectorized/
+  chunks_by_kind/chunks_by_source) в `metrics` (всегда tenant-wide, даже при subsystem-scope) и в
+  `list_configurations` (опубликован и в peer-режиме → tenant-health оркестратора отличает
+  «слой не построен» от ошибки). `store.has_chunks(tenant, chunk_kind?)` — LIMIT-1 проба.
+  Тесты: `tests/test_peer_lite.py` (19: гейт, реальная регистрация через reload с PEER_LITE=true,
+  статусы на фейк-сторе, layers). Доки: MCP_USAGE §1/§2/§4/§7, `.env.example`, compose (app-env).
 - **onec-lite (2026-07-12…15) — MCP по ЖИВОЙ рабочей копии, нулевая инфраструктура** (`lite/`,
   ветка `claude/vibrant-lewin-84215a`): без Neo4j и векторов — источник истины = файлы на диске,
   ниша «машина разработчика: свежесть важнее семантики» (big-сервер = снимок+семантика, ut_mcp вытеснен).
@@ -237,13 +262,15 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 
 ## 7. Карта кода (`src/onec_vecgraph/`)
 
-- `config.py` — Settings (pydantic-settings, .env).
+- `config.py` — Settings (pydantic-settings, .env; +`peer_lite`/`peer_lite_keep`/`disabled_tools`).
 - `tenancy.py` — TenantContext, `resolve(ctx, settings)` (заголовки→tenant, require_tenant).
 - `cli.py` — Typer: version, health, serve, **serve-write**, **serve-admin**, index, ls, show (+`--detail`),
   deps, usages, vectorize, search (+`--kind/--chunk-kind/--subsystem/--source/--expand`), **handlers**,
   **metrics**, **ingest**, **index-overlay**, callgraph, callers, callees, path, snapshot, snapshot-diff.
   `_flush_exit()`=os._exit (см. гочи).
-- `server.py` — FastMCP read-only, 29 инструментов (см. п.8), stateless_http.
+- `server.py` — FastMCP read-only, 29 инструментов (см. п.8), stateless_http; **условная публикация**:
+  декоратор `@_tool` + гейт `_published` (env `PEER_LITE`/`PEER_LITE_KEEP`/`DISABLED_TOOLS`,
+  набор `LITE_COVERED_TOOLS`), instructions per-режим (`INSTRUCTIONS`/`PEER_LITE_INSTRUCTIONS`).
 - `write_server.py` — FastMCP overlay-WRITE (opt-in, :8001), единств. тул `index_overlay`; `overlay.py`/
   `overlay_index.py` — драйвер overlay-дельты; модель — `docs/OVERLAY.md`.
 - `admin_server.py` — FastMCP admin/baseline (opt-in, :8002): `reindex_baseline` (fire-and-poll) +
@@ -265,8 +292,12 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   cAST/**subsystem**/**role**), `search_tokens`, `classify_entry_point`, `_split_code`, KIND_RU.
 - `queries.py` — list_metadata, get_object (+`detail`), **get_object_properties**/`_object_details` (из `:Detail`),
   get_dependencies (+WRITES_TO), impact_analysis, find_type_usages, semantic_search/hybrid_search (фильтры+expand;
-  `_vector_retrievers` exact/index, `_dedup`/`_unit`/`_rrf_fuse`, `_fts_query`, `_expand`, `_rerank`),
-  find_callers/callees, **find_handlers**, call_path, **metrics**, **its_/artifact_find_related_docs**/**its_/artifact_get_document** (doc-корпуса),
+  `_vector_retrievers` exact/index, `_dedup`/`_unit`/`_rrf_fuse`, `_fts_query`, `_expand`, `_rerank`;
+  **явные статусы** `not_vectorized`/`shared_corpora_only` через `has_chunks`-пробу + маппинг
+  «no such index» ClientError, `_not_vectorized`/`_shared_only_note`/`_is_missing_index_error`),
+  find_callers/callees, **find_handlers**, call_path, **metrics** (+`layers`), **tenant_layers**
+  (readiness-снимок: state/chunks/code_chunks/callgraph_built; также в list_configurations),
+  **its_/artifact_find_related_docs**/**its_/artifact_get_document** (doc-корпуса),
   `semantic_search`/`hybrid_search` (+`source`-фильтр; `_expand` имеет doc-ветку с `links`).
 - `sources/` — мультиисточник: `base` (`Source` ABC, `DocUnit`, `owner_fqn`, `sha1_text`), `git_repo`
   (`materialize` — локальный path / `git clone --depth 1` системным git; `iter_files`), `markdown`
@@ -285,7 +316,8 @@ MCP-сервер: **векторизация конфигураций 1С (из 
 - `storage/neo4j_store.py` — драйвер: health, read/write, ensure_schema, write_graph, counts,
   delete_tenant (батч), incremental (object_versions, scoped_delete_object, delete_object_full),
   vectors (**write_chunks(owner_label=Object|Document|Artifact)** 2 вектора+text_tokens,
-  create_vector_index/fulltext[text,text_tokens], stale_chunk_owners, delete_chunks_for, vector_search/
+  create_vector_index/fulltext[text,text_tokens], stale_chunk_owners, delete_chunks_for,
+  **has_chunks(tenant, chunk_kind?)** LIMIT-1 проба готовности, vector_search/
   fulltext_search/**exact_vector_search**/**filtered_chunk_count** — фильтры **source**/kinds/chunk_kinds/subsystem,
   владелец любой), doc-корпуса (**write_documents**, **doc_versions**, **delete_docs**, **delete_source**,
   **existing_object_fqns**, **write_mentions**, **write_relates**), callgraph (routine_modules, write_routines,
@@ -304,10 +336,13 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   BM25, unit_map, инкремент по mtime), `admin` (чистые рендеры/персист состояния), `server` (FastMCP,
   30 тулов + маршруты /admin, /admin.json; воркспейсы: `_WORKSPACES`/`default_workspace_name`).
 
-## 8. MCP-инструменты (29)
+## 8. MCP-инструменты (29 standalone; 14 в peer-lite)
 
 > Консьюмер-гайд (подключение/заголовки/fqn/словари/карта инструментов/сценарии): `docs/MCP_USAGE.md`.
-> Сервер отдаёт тот же overview клиенту в `instructions` (FastMCP) при `initialize` — `server.INSTRUCTIONS`.
+> Сервер отдаёт тот же overview клиенту в `instructions` (FastMCP) при `initialize` — `server.INSTRUCTIONS`
+> (в peer-lite режиме — `server.PEER_LITE_INSTRUCTIONS`). При `PEER_LITE=true` публикуются только
+> уникальные 14 (semantic/hybrid_search, dev_standards_*, its_*/artifact_*, impact_analysis, call_path,
+> list_configurations, ping/neo4j_health/whoami) — остальное закрывает onec-lite (см. milestone 2026-07-22).
 
 ping, neo4j_health, whoami, **list_configurations** (слои config_id тенанта: base+ext:<имя>+релизы),
 list_metadata, get_object (+`detail`), **get_object_properties**

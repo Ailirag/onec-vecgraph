@@ -30,6 +30,11 @@ x-app-environment: &app-environment
   #   AUTH_ENABLED=true  AUTH_TOKENS="tok_abc=acme,tok_xyz=globex:ext_crm"
   AUTH_ENABLED: "${AUTH_ENABLED:-false}"
   AUTH_TOKENS: "${AUTH_TOKENS:-}"
+  # Peer-lite: when an onec-lite MCP serves the structural tools (live working copy), set
+  # PEER_LITE=true so this server publishes only its unique semantics/knowledge tools.
+  PEER_LITE: "${PEER_LITE:-false}"
+  PEER_LITE_KEEP: "${PEER_LITE_KEEP:-}"
+  DISABLED_TOOLS: "${DISABLED_TOOLS:-}"
   # Runtime-provisioned bearer tokens (Neo4j-backed). Read/write servers consult the token store on
   # an env-token miss; TTL bounds revoke/rotate propagation. PROVISIONING_ENABLED gates the admin
   # provisioning tools (provision_tenant / list_tenants / revoke_tenant_token).
