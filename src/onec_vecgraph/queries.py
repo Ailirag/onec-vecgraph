@@ -118,6 +118,7 @@ def get_object(store: Neo4jStore, tenant_id: str, q: str, detail: bool = False) 
         "MATCH (o:Object {tenant_id: $t, fqn: $fqn})-[:HAS_TABULAR_SECTION]->(ts:TabularSection) "
         "OPTIONAL MATCH (ts)-[:HAS_ATTRIBUTE]->(f:Field) "
         "RETURN ts.name AS name, ts.synonym AS synonym, "
+        "       coalesce(ts.required, false) AS required, "
         "       collect(DISTINCT {name: f.name, type: f.type_text, "
         "                         required: coalesce(f.required, false)}) AS fields ORDER BY ts.name",
         t=tenant_id, fqn=fqn,

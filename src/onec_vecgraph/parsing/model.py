@@ -29,6 +29,7 @@ class TabularSection:
     synonym: str = ""
     comment: str = ""
     uuid: str | None = None
+    fill_checking: str = ""  # 'ShowError' = ТЧ обязательна (≥1 строка); '' / 'DontCheck' = нет
     fields: list[Field] = field(default_factory=list)
 
 

@@ -379,6 +379,7 @@ def _object_payload(ws: Workspace, obj: MetaObject, detail: bool) -> dict:
             {
                 "name": t.name,
                 "synonym": t.synonym,
+                **({"required": True} if t.fill_checking == "ShowError" else {}),
                 "attributes": [
                     {"name": f.name, "synonym": f.synonym, "type": f.type_text,
                      **({"required": True} if f.fill_checking == "ShowError" else {})}

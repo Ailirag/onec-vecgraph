@@ -137,7 +137,8 @@ class _Builder:
                 "TabularSection",
                 ts.fqn,
                 {"name": ts.name, "synonym": ts.synonym, "comment": ts.comment,
-                 "uuid": ts.uuid, "config_id": obj.config_id},
+                 "uuid": ts.uuid, "config_id": obj.config_id,
+                 "fill_checking": ts.fill_checking, "required": ts.fill_checking == "ShowError"},
             )
             self.edge("HAS_TABULAR_SECTION", "Object", obj.fqn, "TabularSection", ts.fqn, soft=False)
             for fld in ts.fields:

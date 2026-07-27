@@ -51,6 +51,19 @@ def test_configurator_field_reads_fill_checking() -> None:
     assert fld2.fill_checking == ""
 
 
+def test_configurator_tabular_reads_fill_checking() -> None:
+    """Конфигураторный <FillChecking> на самой ТЧ → TabularSection.fill_checking (ТЧ обязательна)."""
+    from onec_vecgraph.parsing.objects import _parse_tabular
+
+    xml = (
+        '<TabularSection xmlns="http://v8.1c.ru/8.3/MDClasses" uuid="t1">'
+        "<Properties><Name>Строки</Name>"
+        "<FillChecking>ShowError</FillChecking></Properties></TabularSection>"
+    )
+    ts = _parse_tabular(etree.fromstring(xml), "Catalog.Контрагенты")
+    assert ts.name == "Строки" and ts.fill_checking == "ShowError"
+
+
 @pytest.mark.skipif(not DUMP.is_dir(), reason="sample dump not present on this machine")
 def test_parse_sample_dump_finds_base_and_extension() -> None:
     parsed = parse_config(DUMP, tenant_id="test")

@@ -69,6 +69,7 @@ _CATALOG = f"""<?xml version="1.0" encoding="UTF-8"?>
   <tabularSections uuid="bbbb1111-0000-0000-0000-000000000001">
     <name>КонтактныеЛица</name>
     <synonym><key>ru</key><value>Контактные лица</value></synonym>
+    <fillChecking>ShowError</fillChecking>
     <attributes uuid="cccc1111-0000-0000-0000-000000000001">
       <name>Должность</name>
       <type><types>String</types></type>
@@ -203,6 +204,7 @@ def test_parse_catalog_metadata(tmp_path: Path) -> None:
     assert inn.fill_checking == "ShowError"
     assert mgr.fill_checking == ""
     assert cat.tabular and cat.tabular[0].name == "КонтактныеЛица"
+    assert cat.tabular[0].fill_checking == "ShowError"  # обязательность самой ТЧ (≥1 строка)
     ts_attr = cat.tabular[0].fields[0]
     assert ts_attr.name == "Должность" and ts_attr.fill_checking == "ShowError"
     assert {m.module_type for m in cat.modules} == {"ObjectModule"}
@@ -211,8 +213,8 @@ def test_parse_catalog_metadata(tmp_path: Path) -> None:
 
 
 def test_field_required_flag_flows_to_graph(tmp_path: Path) -> None:
-    """<fillChecking>ShowError доезжает до узла Field как fill_checking + булев required,
-    чтобы get_object и семантические чанки отдавали обязательность реквизита (issue #1)."""
+    """<fillChecking>ShowError доезжает до узлов Field и TabularSection как fill_checking +
+    булев required, чтобы get_object и чанки отдавали обязательность реквизита и ТЧ (issue #1)."""
     root = _make_workspace(tmp_path)
     graph = build_graph(parse_config(root, tenant_id="t"))
     fields = {n["fqn"]: n for n in graph.nodes.get("Field", [])}
@@ -220,6 +222,10 @@ def test_field_required_flag_flows_to_graph(tmp_path: Path) -> None:
     assert inn["fill_checking"] == "ShowError" and inn["required"] is True
     mgr = fields["Catalog.Контрагенты.Attribute.ОсновнойМенеджер"]
     assert mgr["required"] is False
+    ts = {n["fqn"]: n for n in graph.nodes.get("TabularSection", [])}[
+        "Catalog.Контрагенты.TabularSection.КонтактныеЛица"
+    ]
+    assert ts["fill_checking"] == "ShowError" and ts["required"] is True
 
 
 def test_edt_predefined_parsed_recursively(tmp_path: Path) -> None:

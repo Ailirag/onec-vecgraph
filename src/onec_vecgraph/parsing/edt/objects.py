@@ -128,7 +128,7 @@ def _parse_tabular(el: etree._Element, owner_fqn: str) -> TabularSection:
     fqn = f"{owner_fqn}.TabularSection.{name}"
     ts = TabularSection(
         name=name, fqn=fqn, synonym=synonym(el), comment=child_text(el, "comment"),
-        uuid=el.get("uuid"),
+        uuid=el.get("uuid"), fill_checking=child_text(el, "fillChecking"),
     )
     for attr in el.findall("attributes"):
         ts.fields.append(_parse_field(attr, "Attribute", fqn))

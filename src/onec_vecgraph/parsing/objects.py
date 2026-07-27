@@ -98,6 +98,7 @@ def _parse_tabular(el: etree._Element, owner_fqn: str) -> TabularSection:
         synonym=synonym(props),
         comment=text(props, q(MD, "Comment")),
         uuid=el.get("uuid"),
+        fill_checking=text(props, q(MD, "FillChecking")),
     )
     children = _children(el)
     if children is not None:
