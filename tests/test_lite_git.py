@@ -124,7 +124,26 @@ def test_changed_objects_against_ref_and_non_git(git_ws: Workspace, tmp_path: Pa
     _w(plain / "conf" / "src" / "Catalogs" / "Т" / "Т.mdo", _CATALOG)
     res2 = gitview.changed_objects(Workspace(plain))
     assert res2["objects"] == []
-    assert any("не git-репозиторий" in r.get("error", "") for r in res2["repos"])
+    assert any("недоступен" in r.get("error", "") for r in res2["repos"])
+
+
+def test_git_invocation_opts_out_of_dubious_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_git всегда передаёт safe.directory=* — иначе git отказывает ("dubious ownership")
+    на смонтированных в контейнер репозиториях с чужим владельцем (корневая причина
+    пустого дифа на песочнице ГТ: serve-lite в Docker под uid != владельца /dumps)."""
+    captured: dict[str, list[str]] = {}
+
+    class _Proc:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_run(argv: list[str], **_kw: object) -> _Proc:
+        captured["argv"] = argv
+        return _Proc()
+
+    monkeypatch.setattr(gitview.subprocess, "run", fake_run)
+    gitview._git(["rev-parse", "--show-toplevel"], Path("."))
+    assert captured["argv"][0] == "git"
+    assert "safe.directory=*" in captured["argv"]
 
 
 def test_review_set_maps_hunks_to_routines_and_callers(git_ws: Workspace) -> None:

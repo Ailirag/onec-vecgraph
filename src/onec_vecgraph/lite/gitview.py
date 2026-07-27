@@ -26,8 +26,12 @@ _MAX_ROUTINES = 60  # cap on routines expanded with callers in one review_set
 def _git(args: list[str], cwd: Path) -> tuple[int, str]:
     try:
         proc = subprocess.run(
-            # quotepath=off: иначе git экранирует кириллицу окталями и пути не мапятся
-            ["git", "-c", "core.quotepath=off", *args],
+            # quotepath=off: иначе git экранирует кириллицу окталями и пути не мапятся.
+            # safe.directory=*: рабочая копия часто смонтирована в контейнер (serve-lite в
+            # Docker, ro-монт) и принадлежит другому uid, чем процесс сервера — без этого git
+            # на ЛЮБОЙ команде отвечает "detected dubious ownership" и отказывает. Команды
+            # здесь только читающие, репозиторий доверенный (примонтирован оператором).
+            ["git", "-c", "core.quotepath=off", "-c", "safe.directory=*", *args],
             cwd=str(cwd),
             capture_output=True,
             text=True,
@@ -43,9 +47,13 @@ def _git(args: list[str], cwd: Path) -> tuple[int, str]:
     return proc.returncode, proc.stdout if proc.returncode == 0 else (proc.stderr or proc.stdout)
 
 
-def _repo_root(path: Path) -> Path | None:
+def _repo_root(path: Path) -> tuple[Path | None, str]:
+    """(git toplevel, "") при успехе; (None, <сообщение git>) иначе. Ищет .git вверх по
+    дереву от path, поэтому источник в подпапке (…/conf/src) с .git уровнем выше — корректно."""
     code, out = _git(["rev-parse", "--show-toplevel"], path)
-    return Path(out.strip()) if code == 0 and out.strip() else None
+    if code == 0 and out.strip():
+        return Path(out.strip()), ""
+    return None, out.strip()
 
 
 def _branch(root: Path) -> str:
@@ -58,10 +66,14 @@ def _repos(sources: list[LiteSource]) -> tuple[dict[Path, list[LiteSource]], lis
     by_root: dict[Path, list[LiteSource]] = {}
     missing: list[dict] = []
     for s in sources:
-        root = _repo_root(s.files_root)
+        root, err = _repo_root(s.files_root)
         if root is None:
-            missing.append({"source": s.name, "root": str(s.root),
-                            "error": "не git-репозиторий (или git не найден)"})
+            missing.append({
+                "source": s.name, "root": str(s.root),
+                "error": "git по источнику недоступен: не рабочая копия под git, git не "
+                         "установлен, или каталог с чужим владельцем (dubious ownership)."
+                         + (f" git: {err}" if err else ""),
+            })
         else:
             by_root.setdefault(root, []).append(s)
     return by_root, missing
@@ -193,7 +205,7 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
     for src, abs_path, srel, status in rows:
         if not srel.endswith(".bsl"):
             continue
-        repo = _repo_root(src.files_root)
+        repo, _ = _repo_root(src.files_root)
         if repo is None:
             continue
         rel_in_repo = str(abs_path.relative_to(repo)).replace("\\", "/")
