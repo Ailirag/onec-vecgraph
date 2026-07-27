@@ -368,7 +368,8 @@ def _object_payload(ws: Workspace, obj: MetaObject, detail: bool) -> dict:
         out["flags"] = obj.flags
     if obj.fields:
         out["attributes"] = [
-            {"name": f.name, "synonym": f.synonym, "role": f.role, "type": f.type_text}
+            {"name": f.name, "synonym": f.synonym, "role": f.role, "type": f.type_text,
+             **({"required": True} if f.fill_checking == "ShowError" else {})}
             for f in obj.fields[:100]
         ]
         if len(obj.fields) > 100:
@@ -379,7 +380,8 @@ def _object_payload(ws: Workspace, obj: MetaObject, detail: bool) -> dict:
                 "name": t.name,
                 "synonym": t.synonym,
                 "attributes": [
-                    {"name": f.name, "synonym": f.synonym, "type": f.type_text}
+                    {"name": f.name, "synonym": f.synonym, "type": f.type_text,
+                     **({"required": True} if f.fill_checking == "ShowError" else {})}
                     for f in t.fields[:60]
                 ],
             }

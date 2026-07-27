@@ -110,6 +110,7 @@ def get_object(store: Neo4jStore, tenant_id: str, q: str, detail: bool = False) 
         "MATCH (o:Object {tenant_id: $t, fqn: $fqn})-[m:HAS_ATTRIBUTE|HAS_DIMENSION|HAS_RESOURCE]->(f:Field) "
         "OPTIONAL MATCH (f)-[:REFERENCES]->(ref:Object) "
         "RETURN f.name AS name, f.role AS role, f.synonym AS synonym, f.type_text AS type, "
+        "       coalesce(f.required, false) AS required, "
         "       collect(DISTINCT ref.fqn) AS references ORDER BY f.role, f.name",
         t=tenant_id, fqn=fqn,
     )
@@ -117,7 +118,8 @@ def get_object(store: Neo4jStore, tenant_id: str, q: str, detail: bool = False) 
         "MATCH (o:Object {tenant_id: $t, fqn: $fqn})-[:HAS_TABULAR_SECTION]->(ts:TabularSection) "
         "OPTIONAL MATCH (ts)-[:HAS_ATTRIBUTE]->(f:Field) "
         "RETURN ts.name AS name, ts.synonym AS synonym, "
-        "       collect(DISTINCT {name: f.name, type: f.type_text}) AS fields ORDER BY ts.name",
+        "       collect(DISTINCT {name: f.name, type: f.type_text, "
+        "                         required: coalesce(f.required, false)}) AS fields ORDER BY ts.name",
         t=tenant_id, fqn=fqn,
     )
     enum_values = store.read(

@@ -59,6 +59,7 @@ _CATALOG = f"""<?xml version="1.0" encoding="UTF-8"?>
     <name>ИНН</name>
     <synonym><key>ru</key><value>ИНН</value></synonym>
     <type><types>String</types><stringQualifiers><length>12</length></stringQualifiers></type>
+    <fillChecking>ShowError</fillChecking>
   </attributes>
   <attributes uuid="aaaa1111-0000-0000-0000-000000000002">
     <name>ОсновнойМенеджер</name>
@@ -71,6 +72,7 @@ _CATALOG = f"""<?xml version="1.0" encoding="UTF-8"?>
     <attributes uuid="cccc1111-0000-0000-0000-000000000001">
       <name>Должность</name>
       <type><types>String</types></type>
+      <fillChecking>ShowError</fillChecking>
     </attributes>
   </tabularSections>
   <forms uuid="dddd1111-0000-0000-0000-000000000001"><name>ФормаЭлемента</name></forms>
@@ -196,10 +198,28 @@ def test_parse_catalog_metadata(tmp_path: Path) -> None:
     assert {"ИНН", "ОсновнойМенеджер"} <= names
     mgr = next(f for f in cat.fields if f.name == "ОсновнойМенеджер")
     assert any(t.category == "reference" and t.ref_fqn == "Catalog.Пользователи" for t in mgr.types)
+    # Признак обязательности заполнения (<fillChecking>): выставлен у ИНН, отсутствует у менеджера.
+    inn = next(f for f in cat.fields if f.name == "ИНН")
+    assert inn.fill_checking == "ShowError"
+    assert mgr.fill_checking == ""
     assert cat.tabular and cat.tabular[0].name == "КонтактныеЛица"
+    ts_attr = cat.tabular[0].fields[0]
+    assert ts_attr.name == "Должность" and ts_attr.fill_checking == "ShowError"
     assert {m.module_type for m in cat.modules} == {"ObjectModule"}
     form = cat.forms[0]
     assert form.name == "ФормаЭлемента" and form.module_path and form.form_path
+
+
+def test_field_required_flag_flows_to_graph(tmp_path: Path) -> None:
+    """<fillChecking>ShowError доезжает до узла Field как fill_checking + булев required,
+    чтобы get_object и семантические чанки отдавали обязательность реквизита (issue #1)."""
+    root = _make_workspace(tmp_path)
+    graph = build_graph(parse_config(root, tenant_id="t"))
+    fields = {n["fqn"]: n for n in graph.nodes.get("Field", [])}
+    inn = fields["Catalog.Контрагенты.Attribute.ИНН"]
+    assert inn["fill_checking"] == "ShowError" and inn["required"] is True
+    mgr = fields["Catalog.Контрагенты.Attribute.ОсновнойМенеджер"]
+    assert mgr["required"] is False
 
 
 def test_edt_predefined_parsed_recursively(tmp_path: Path) -> None:

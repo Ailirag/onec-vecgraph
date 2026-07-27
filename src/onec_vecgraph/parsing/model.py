@@ -19,6 +19,7 @@ class Field:
     uuid: str | None = None
     types: list[TypeRef] = field(default_factory=list)
     type_text: str = ""
+    fill_checking: str = ""  # 'ShowError' = обязательное заполнение; '' / 'DontCheck' = нет
 
 
 @dataclass

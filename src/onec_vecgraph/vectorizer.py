@@ -87,7 +87,8 @@ def _iter_chunks(store: Neo4jStore, tenant_id: str, only: list[str] | None = Non
         "RETURN o.fqn AS fqn, o.kind AS kind, o.name AS name, o.synonym AS synonym, "
         "       o.comment AS comment, o.config_id AS config_id, o.config_version AS config_version, "
         "       collect({fqn: f.fqn, name: f.name, syn: f.synonym, role: f.role, "
-        "                type: f.type_text, comment: f.comment}) AS fields",
+        "                type: f.type_text, comment: f.comment, "
+        "                required: coalesce(f.required, false)}) AS fields",
         t=tenant_id, only=only,
     )
     for o in objects:
@@ -100,7 +101,8 @@ def _iter_chunks(store: Neo4jStore, tenant_id: str, only: list[str] | None = Non
         "RETURN o.fqn AS owner_fqn, o.kind AS owner_kind, o.name AS owner_name, "
         "       o.synonym AS owner_syn, o.config_version AS config_version, ts.name AS ts_name, "
         "       ts.synonym AS ts_syn, f.fqn AS field_fqn, f.name AS field_name, "
-        "       f.synonym AS field_syn, f.type_text AS type, o.config_id AS config_id",
+        "       f.synonym AS field_syn, f.type_text AS type, o.config_id AS config_id, "
+        "       coalesce(f.required, false) AS required",
         t=tenant_id, only=only,
     ):
         yield chunking.tabular_attribute_chunk(row)

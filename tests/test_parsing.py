@@ -31,6 +31,26 @@ def test_parse_type_distinguishes_references_from_primitives() -> None:
     assert sum(1 for r in desc.refs if r.category == "primitive") == 1
 
 
+def test_configurator_field_reads_fill_checking() -> None:
+    """Конфигураторный <FillChecking> внутри <Properties> реквизита → Field.fill_checking (issue #1)."""
+    from onec_vecgraph.parsing.objects import _parse_field
+
+    required = (
+        '<Attribute xmlns="http://v8.1c.ru/8.3/MDClasses" uuid="u1">'
+        "<Properties><Name>ИНН</Name>"
+        "<FillChecking>ShowError</FillChecking></Properties></Attribute>"
+    )
+    fld = _parse_field(etree.fromstring(required), "Attribute", "Catalog.Контрагенты")
+    assert fld.name == "ИНН" and fld.fill_checking == "ShowError"
+
+    optional = (
+        '<Attribute xmlns="http://v8.1c.ru/8.3/MDClasses" uuid="u2">'
+        "<Properties><Name>Комментарий</Name></Properties></Attribute>"
+    )
+    fld2 = _parse_field(etree.fromstring(optional), "Attribute", "Catalog.Контрагенты")
+    assert fld2.fill_checking == ""
+
+
 @pytest.mark.skipif(not DUMP.is_dir(), reason="sample dump not present on this machine")
 def test_parse_sample_dump_finds_base_and_extension() -> None:
     parsed = parse_config(DUMP, tenant_id="test")

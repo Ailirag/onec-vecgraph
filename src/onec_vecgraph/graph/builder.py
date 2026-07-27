@@ -89,6 +89,8 @@ class _Builder:
                 "type_text": fld.type_text,
                 "is_reference": bool(refs),
                 "config_id": config_id,
+                "fill_checking": fld.fill_checking,
+                "required": fld.fill_checking == "ShowError",
             },
         )
         self.edge(_ROLE_REL.get(fld.role, "HAS_ATTRIBUTE"), owner_label, owner_fqn, "Field", fld.fqn, soft=False)

@@ -187,6 +187,8 @@ def attribute_chunks(o: dict[str, Any]) -> list[Chunk]:
         syn = _clean(f.get("syn")) or f["name"]
         role = _ROLE_RU.get(f.get("role", "Attribute"), "реквизит")
         text = f"{prefix} ▸ {role} «{syn}» ({f['name']}): {_clean(f.get('type')) or '—'}"
+        if f.get("required"):
+            text += " [обязательный реквизит]"
         if _clean(f.get("comment")):
             text += f". {_clean(f['comment'])}"
         out.append(
@@ -213,6 +215,8 @@ def tabular_attribute_chunk(row: dict[str, Any]) -> Chunk:
         f"{kind_ru(row['owner_kind'])} «{owner_syn}» ▸ табличная часть «{ts_syn}» ▸ "
         f"реквизит «{syn}» ({row['field_name']}): {_clean(row.get('type')) or '—'}"
     )
+    if row.get("required"):
+        text += " [обязательный реквизит]"
     return Chunk(
         fqn=f"{row['field_fqn']}#tsattr",
         owner_fqn=row["owner_fqn"],

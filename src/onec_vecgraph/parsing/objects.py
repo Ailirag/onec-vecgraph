@@ -84,6 +84,7 @@ def _parse_field(el: etree._Element, role: str, owner_fqn: str) -> Field:
         uuid=el.get("uuid"),
         types=type_desc.refs,
         type_text=type_desc.render(),
+        fill_checking=text(props, q(MD, "FillChecking")),
     )
 
 
