@@ -281,3 +281,47 @@ def test_runner_classifies_warning_and_failure() -> None:
     snap2 = r2.store.get(j2["job_id"]).snapshot()
     assert snap2["status"] == STATUS_FAILED and "mount blew up" in snap2["error"]
     r2.shutdown()
+
+
+# ── reset/incremental must reach ALL steps ──────────────────────────────
+def _stub_steps(monkeypatch, tmp_path, calls: dict) -> None:
+    """Replace the three heavy steps with recorders and make the dump path look real."""
+    import onec_vecgraph.baseline as bl
+    import onec_vecgraph.callgrapher as cg
+    import onec_vecgraph.indexer as ix
+    import onec_vecgraph.vectorizer as vz
+
+    monkeypatch.setattr(bl, "discover_parts", lambda p: ["part"], raising=False)
+    monkeypatch.setattr("onec_vecgraph.parsing.discover_parts", lambda p: ["part"])
+
+    def fake_index(path, tenant_id, s, reset=True):
+        calls["index"] = {"reset": reset}
+        return {"counts": {"real_objects": 1}, "written": {"nodes": 1, "edges": 1}, "parse_errors": 0}
+
+    def fake_callgraph(tenant_id, s, reset=True, incremental=False):
+        calls["callgraph"] = {"reset": reset, "incremental": incremental}
+        return {"routines": 1}
+
+    def fake_vectorize(tenant_id, s, reset=True, incremental=False, code=False):
+        calls["vectorize"] = {"reset": reset, "incremental": incremental}
+        return {"chunks_written": 1, "dimensions": 8, "model": "stub"}
+
+    monkeypatch.setattr(ix, "index_dump", fake_index)
+    monkeypatch.setattr(cg, "build_call_graph", fake_callgraph)
+    monkeypatch.setattr(vz, "vectorize", fake_vectorize)
+
+
+@pytest.mark.parametrize("reset_flag", [False, True])
+def test_reset_flag_reaches_callgraph_and_vectorize(monkeypatch, tmp_path, reset_flag) -> None:
+    """Regression: callgraph/vectorize used to hardcode reset=True, so `reset:false` (the nightly
+    incremental refresh) silently re-embedded the whole tenant — hours of work per run."""
+    from onec_vecgraph.baseline import run_baseline_reindex
+
+    calls: dict = {}
+    _stub_steps(monkeypatch, tmp_path, calls)
+    run_baseline_reindex(Settings(), tenant_id="t1", path=str(tmp_path),
+                         options={"reset": reset_flag, "confirm_reset": reset_flag})
+
+    assert calls["index"]["reset"] is reset_flag
+    assert calls["callgraph"] == {"reset": reset_flag, "incremental": not reset_flag}
+    assert calls["vectorize"] == {"reset": reset_flag, "incremental": not reset_flag}

@@ -192,11 +192,20 @@ def run_baseline_reindex(
             report(phase=PHASE_INDEX, percent=int(100 * done / total), empty_graph=summary["empty_graph"],
                    counts={"objects": objects, "nodes": nodes, "edges": edges})
 
+        # `reset=false` means "refresh this tenant incrementally" — and `index` above already
+        # honours it. The callgraph/vectorize steps used to pass reset=True unconditionally, so a
+        # nightly refresh silently became a FULL rebuild: every chunk re-embedded from scratch
+        # (observed: a 460k-chunk tenant re-embedding for 14+ hours at ~7 chunks/s, while the next
+        # scheduled runs piled up behind it). Both steps already implement an incremental mode
+        # keyed on configVersion (stale_routine_owners / stale_chunk_owners, which also pick up
+        # objects whose chunks are missing), so the caller's intent must simply reach them.
+        incremental = not reset
+
         if "callgraph" in steps:
             from .callgrapher import build_call_graph
 
             report(phase=PHASE_CALLGRAPH, detail=None)
-            res = build_call_graph(tenant_id, s, reset=True)
+            res = build_call_graph(tenant_id, s, reset=reset, incremental=incremental)
             routines = res.get("routines")
             summary.update(routines=routines, graph_updated=True)
             done += 1
@@ -206,7 +215,7 @@ def run_baseline_reindex(
             from .vectorizer import vectorize
 
             report(phase=PHASE_VECTORIZE, detail=None)
-            res = vectorize(tenant_id, s, reset=True, code=True)
+            res = vectorize(tenant_id, s, reset=reset, incremental=incremental, code=True)
             chunks = res.get("chunks_written")
             summary.update(chunks=chunks, embedding_dim=res.get("dimensions"),
                            embedding_model=res.get("model", s.embedding_model))
