@@ -185,6 +185,7 @@ def _meta_owner(rel: str) -> str | None:
 
 def type_usages(
     ws: Workspace, kind: str, name: str, *, max_results: int = 200, source: str = "",
+    offset: int = 0,
 ) -> dict:
     """Где тип объекта упоминается в МЕТАДАННЫХ: реквизиты объектов и форм, подписки,
     определяемые типы. Матчит `<Вид>Ref.<Имя>` и `<Вид>Object.<Имя>` в .xml/.mdo/.form."""
@@ -199,21 +200,20 @@ def type_usages(
         for g in (("*.mdo", "*.form") if s.fmt == "edt" else ("*.xml",)):
             if g not in globs:
                 globs.append(g)
-    rows: list[dict] = []
-    truncated = False
+    # Собираем ВСЕ использования, потом отдаём окно: раньше обход прекращался на max_results и
+    # ответ не сообщал ни полного счёта, ни offset — у ходового типа было видно 50 из 1129
+    # (96% скрыто), и агент считал выдачу исчерпывающей.
+    all_rows: list[dict] = []
     _engine, it = search.stream(
         ws, pattern, sources=srcs, kinds=None, glob=globs, regex=True,
-        max_hits=max_results + 1,
+        max_hits=_COMPLETE_MAX_HITS,
     )
     for abs_path, line_no, text in it:
         src_name, rel = ws.source_of_path(Path(abs_path))
         owner = _meta_owner(rel)
         if owner is None:
             continue
-        if len(rows) >= max_results:
-            truncated = True
-            break
-        rows.append({
+        all_rows.append({
             "source": src_name,
             "object": owner,
             "artifact": artifact_of(rel),
@@ -222,8 +222,21 @@ def type_usages(
             # 120 симв. хватает на строку объявления типа; полный контекст — read_file по path
             "text": text.strip()[:120],
         })
-    return {"type": f"{kind}.{name}", "match_count": len(rows), "truncated": truncated,
-            "usages": rows}
+    by_object: dict[str, int] = {}
+    for r in all_rows:
+        by_object[r["object"]] = by_object.get(r["object"], 0) + 1
+    start = max(0, offset)
+    window = all_rows[start: start + max(1, max_results)]
+    return {
+        "type": f"{kind}.{name}",
+        "usage_count": len(all_rows),          # ВСЕГО использований
+        "match_count": len(window),
+        "offset": start,
+        "truncated": start + len(window) < len(all_rows),
+        "by_object": [{"object": o, "count": n}
+                      for o, n in sorted(by_object.items(), key=lambda kv: -kv[1])[:40]],
+        "usages": window,
+    }
 
 
 def subscriptions_for(ws: Workspace, kind: str, name: str, source: str = "") -> list[dict]:
@@ -828,7 +841,7 @@ def find_callers_batch(
 
 def find_declarations(
     ws: Workspace, routine_name: str, *, exported_only: bool = False, max_results: int = 50,
-    source: str = "", decl_offset: int = 0,
+    source: str = "", decl_offset: int = 0, substring: bool = False,
 ) -> dict:
     """Where a procedure/function with this exact name is declared (all sources).
 
@@ -840,7 +853,8 @@ def find_declarations(
         return {"error": err}
     try:
         from . import fts as _fts
-        indexed = _fts.index_for(ws).declarations(routine_name, exported_only=exported_only)
+        indexed = _fts.index_for(ws).declarations(
+            routine_name, exported_only=exported_only, substring=substring)
     except Exception:  # noqa: BLE001
         indexed = None
     if indexed is not None:
@@ -867,12 +881,14 @@ def find_declarations(
             "engine": "index",
             "declarations": window,
         }
-    pattern = rf"^[ \t]*{_KW}[ \t]+{re.escape(routine_name)}[ \t]*\("
+    pattern = (rf"^[ \t]*{_KW}[ \t]+\w*{re.escape(routine_name)}\w*[ \t]*\(" if substring
+               else rf"^[ \t]*{_KW}[ \t]+{re.escape(routine_name)}[ \t]*\(")
     files, truncated = _candidate_files(ws, pattern, srcs, None, cap=max_results * 4)
     rows: list[dict] = []
     for path in files:
         for rt in routines_of(path):
-            if rt.name.lower() != routine_name.lower():
+            low_rt, low_q = rt.name.lower(), routine_name.lower()
+            if (low_q not in low_rt) if substring else (low_rt != low_q):
                 continue
             if exported_only and not rt.export:
                 continue

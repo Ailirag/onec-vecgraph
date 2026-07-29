@@ -676,8 +676,14 @@ class FtsIndex:
                         "_abs": path, "_stale": _is_stale(path, idx_mtime)})
         return out
 
-    def declarations(self, name: str, *, exported_only: bool = False) -> list[dict] | None:
-        """Где объявлена рутина с этим именем — из индекса (None, если индекса нет)."""
+    def declarations(self, name: str, *, exported_only: bool = False,
+                     substring: bool = False) -> list[dict] | None:
+        """Где объявлена рутина с этим именем — из индекса (None, если индекса нет).
+
+        substring=True — поиск по ЧАСТИ имени: сообщение об ошибке инструмента предлагало
+        «find_routine покажет объявления по подстроке имени», но такого режима не было (в SQL
+        стояло точное равенство), и штатный путь восстановления агента после опечатки вёл в
+        тупик «не найдено»."""
         if not self.has_symbols():
             return None
         try:
@@ -686,7 +692,7 @@ class FtsIndex:
                 sql = ("SELECT source, object, module, path, name, start_line, end_line, export,"
                        "       directive,"
                        "       (SELECT mtime FROM files WHERE files.path = symbols.path)"
-                       " FROM symbols WHERE name_low = ?")
+                       " FROM symbols WHERE name_low " + ("LIKE ?" if substring else "= ?"))
                 if exported_only:
                     sql += " AND export = 1"
                 # Порядок значимости, а не алфавита: экспортные и общие модули выше — иначе
@@ -698,7 +704,8 @@ class FtsIndex:
                         "      WHEN object LIKE 'Configuration%' THEN 1"
                         "      WHEN object LIKE 'Document.%' THEN 2"
                         "      WHEN object LIKE 'Catalog.%' THEN 3 ELSE 4 END, object, module")
-                rows = con.execute(sql, (name.lower(),)).fetchall()
+                needle = f"%{name.lower()}%" if substring else name.lower()
+                rows = con.execute(sql, (needle,)).fetchall()
             finally:
                 con.close()
         except sqlite3.Error:

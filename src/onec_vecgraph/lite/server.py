@@ -724,7 +724,8 @@ def _locate_routine(ws: Workspace, routine_name: str, source: str = "") -> tuple
 
 @mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
 def find_routine(routine_name: str, exported_only: bool = False, max_results: int = 50,
-                 source: str = "", offset: int = 0, workspace: str = "") -> dict:
+                 source: str = "", offset: int = 0, substring: bool = False,
+                 workspace: str = "") -> dict:
     """Где ОБЪЯВЛЕНА процедура/функция с этим именем (по всем источникам, точный парс).
 
     declaration_count — сколько объявлений ВСЕГО (у типовых обработчиков вроде
@@ -733,7 +734,7 @@ def find_routine(routine_name: str, exported_only: bool = False, max_results: in
     индекс или живой скан."""
     return code_intel.find_declarations(
         _ws(workspace), routine_name, exported_only=exported_only, max_results=max_results,
-        source=source, decl_offset=offset,
+        source=source, decl_offset=offset, substring=substring,
     )
 
 
@@ -888,13 +889,17 @@ def get_dependencies(kind: str, name: str, source: str = "", workspace: str = ""
 
 
 @mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
-def find_type_usages(kind: str, name: str, max_results: int = 100, source: str = "", workspace: str = "") -> dict:
+def find_type_usages(kind: str, name: str, max_results: int = 100, source: str = "",
+                     offset: int = 0, workspace: str = "") -> dict:
     """Где используется ТИП объекта в метаданных: реквизиты объектов и форм, подписки,
-    определяемые типы — точные строки файлов (`<Вид>Ref.<Имя>`/`<Вид>Object.<Имя>`)."""
+    определяемые типы — точные строки файлов (`<Вид>Ref.<Имя>`/`<Вид>Object.<Имя>`).
+
+    usage_count — сколько использований ВСЕГО (у ходовых типов это больше тысячи), отдаётся
+    окно max_results от offset; by_object — распределение по объектам-владельцам."""
     if err := _kind_ok(kind):
         return _err(err)
     return code_intel.type_usages(_ws(workspace), kind, name, max_results=max_results,
-                                  source=source)
+                                  source=source, offset=offset)
 
 
 # --------------------------------------------------------------------------- #
