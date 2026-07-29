@@ -109,6 +109,12 @@ claude mcp add onec-lite --scope user -- uv run --directory "D:\путь\к\ре
 
 Админка не аутентифицируется — держите её на loopback (дефолт) или за прокси.
 
+**ripgrep (ускорение поиска).** Порядок поиска rg: `ONEC_LITE_RG` → **бандл в установке**
+(`~/.onec-lite/bin/rg[.exe]` или `<пакет>/lite/vendor/rg[.exe]`) → PATH → WinGet / cargo /
+chocolatey → ripgrep из VS Code. Чтобы «зашить» rg в установку и не зависеть от PATH — положите
+бинарь в `~/.onec-lite/bin/`. Без rg всё работает на Python-фолбэке, но на больших
+конфигурациях заметно медленнее (`find_callers`/`call_graph`/`search_code`).
+
 ## Несколько конфигураций (воркспейсы)
 
 Один lite-сервер держит **несколько рабочих копий** как именованные воркспейсы: таблица в

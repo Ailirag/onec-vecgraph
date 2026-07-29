@@ -43,18 +43,38 @@ def rg_path() -> str | None:
     return _discover_rg()
 
 
+def _state_dir() -> Path:
+    """~/.onec-lite (или каталог ONEC_LITE_STATE) — без импорта admin, чтобы не плодить цикл."""
+    state = os.environ.get("ONEC_LITE_STATE", "").strip()
+    return Path(state).parent if state else Path(os.path.expanduser("~")) / ".onec-lite"
+
+
 @lru_cache(maxsize=1)
 def _discover_rg() -> str | None:
+    """Порядок: env → бандл (в установке) → PATH → известные места установки → VS Code.
+
+    «Бандл» (`~/.onec-lite/bin/rg` и `<пакет>/lite/vendor/rg`) идёт раньше PATH, чтобы
+    инструмент работал самодостаточно, не полагаясь на системный rg. Положить бинарь туда —
+    и rg-ускорение включается на любой машине (см. docs/LITE_USAGE.md → ripgrep)."""
     env = os.environ.get("ONEC_LITE_RG", "").strip()
     if env:
         return env if Path(env).is_file() else None
+    exe = "rg.exe" if os.name == "nt" else "rg"
+    # Бандл в установке onec-lite — самодостаточно, без PATH.
+    for cand in (_state_dir() / "bin" / exe,
+                 Path(__file__).resolve().parent / "vendor" / exe):
+        if cand.is_file():
+            return str(cand)
     found = shutil.which("rg")
     if found:
         return found
     local = Path(os.environ.get("LOCALAPPDATA", ""))
-    links = local / "Microsoft" / "WinGet" / "Links" / "rg.exe"
-    if links.is_file():
-        return str(links)
+    home = Path(os.path.expanduser("~"))
+    for cand in (local / "Microsoft" / "WinGet" / "Links" / exe,
+                 home / ".cargo" / "bin" / exe,
+                 Path(r"C:\ProgramData\chocolatey\bin") / exe):
+        if cand.is_file():
+            return str(cand)
     # VS Code bundles ripgrep; the install dir may contain a versioned hash folder.
     vscode = local / "Programs" / "Microsoft VS Code"
     if vscode.is_dir():
