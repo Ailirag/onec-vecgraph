@@ -31,6 +31,7 @@ _MODULES: dict[str, tuple[float, list[Routine]]] = {}
 _MODULES_MAX = 8000
 
 _MAX_CANDIDATE_FILES = 300  # cap on files re-parsed per callers query (быстрый режим)
+_BY_OBJECT_TOP = 20  # сколько объектов показываем в сводке by_object (+ by_object_total)
 _COMPLETE_MAX_HITS = 200_000  # предохранитель для complete-сканов (полный обход без обрезки)
 
 
@@ -517,7 +518,10 @@ def find_callers(
             "engine": "index",
             # Сводка по объектам — по всему множеству; агенту её обычно достаточно, чтобы
             # решить, куда смотреть, без вычитывания строк вызовов.
-            "by_object": stats.get("by_object", []),
+            # Сводку тоже надо ограничивать: у платформенного хука это 810 объектов и
+            # ~19.7 тыс. токенов на ДЕФОЛТНОМ вызове, ровно там, где обещаны «десятки».
+            "by_object": (stats.get("by_object") or [])[:_BY_OBJECT_TOP],
+            "by_object_total": len(stats.get("by_object") or []),
             "callers": [] if summary_only else rows,
         }
     pattern = rf"\b{re.escape(routine_name)}\s*\("

@@ -20,7 +20,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 from ..chunking import KIND_RU
-from ..parsing.dump import TYPE_FOLDERS
+from ..parsing.dump import CODE_FOLDERS, TYPE_FOLDERS
 from ..parsing.model import MetaObject
 from . import admin as lite_admin
 from . import code_intel, fts, gitops, gitview, metaview, platform_help, search
@@ -283,10 +283,13 @@ def _err(msg: str) -> dict:
     return {"error": msg}
 
 
-def _kind_ok(kind: str) -> str | None:
-    if kind in set(TYPE_FOLDERS.values()):
+def _kind_ok(kind: str) -> str | None:  # noqa: D401
+    # CODE_FOLDERS, а не TYPE_FOLDERS: иначе kind="Configuration" отвергался, и модули
+    # приложения/сеанса были ВИДИМЫ поиску, но нечитаемы (read_routine/list_routines/read_module
+    # отвечали «неизвестный вид»), хотя find_routine их уже находил.
+    if kind in set(CODE_FOLDERS.values()):
         return None
-    near = ", ".join(sorted(k for k in TYPE_FOLDERS.values() if kind.lower() in k.lower())[:5])
+    near = ", ".join(sorted(k for k in CODE_FOLDERS.values() if kind.lower() in k.lower())[:5])
     return f"Неизвестный вид метаданных '{kind}'." + (f" Похожие: {near}." if near else "")
 
 
@@ -501,19 +504,54 @@ def get_object(kind: str, name: str, source: str = "", detail: bool = False,
     ws = _ws(workspace)
     if err := _kind_ok(kind):
         return _err(err)
-    src, ref, also, err2 = ws.find_object(kind, name, source)
+    if source:
+        found, err2 = ws.find_objects(kind, name, source)
+    else:
+        found, err2 = ws.find_objects(kind, name)
     if err2:
         return _err(err2)
-    assert src is not None and ref is not None
-    try:
-        obj = ws.parse_object(src, ref)
-    except ValueError as exc:
-        return _err(str(exc))
+    parsed: list[tuple[str, MetaObject]] = []
+    for cand_src, cand_ref in found:
+        try:
+            parsed.append((cand_src.name, ws.parse_object(cand_src, cand_ref)))
+        except ValueError:
+            continue
+    if not parsed:
+        return _err(f"Не удалось разобрать {kind}.{name}")
+    # Заимствованный объект хранится в расширении ОГРЫЗКОМ: только изменённые части. Резолв
+    # «расширения раньше базы» отдавал этот огрызок как всю структуру — на боевом документе это
+    # 36 реквизитов из 49, НОЛЬ типов и ни одного признака обязательности, без всякой пометки.
+    # Отдаём платформенное представление: объединение копий, значения расширения приоритетны.
+    obj, merged_from = _merge_object_copies(parsed)
     payload = _object_payload(ws, obj, detail)
-    payload["source"] = src.name
-    if also:
-        payload["also_in"] = also
+    payload["source"] = merged_from[0]
+    if len(merged_from) > 1:
+        payload["merged_from"] = merged_from  # как это видит платформа: база + расширения
     return payload
+
+
+def _merge_object_copies(parsed: list[tuple[str, MetaObject]]) -> tuple[MetaObject, list[str]]:
+    """Копии одного объекта (расширения + база) -> одна структура «как видит платформа».
+
+    Основой берём самую полную копию (у заимствованного объекта это база), затем добавляем
+    то, чего в ней нет: реквизиты, ТЧ, формы и модули из расширений. Порядок имён источников
+    сохраняем как в резолве (расширения раньше базы) — он попадает в ответ."""
+    names = [n for n, _ in parsed]
+    base_name, base = max(parsed, key=lambda p: (len(p[1].fields), len(p[1].tabular)))
+    if len(parsed) == 1:
+        return base, names
+    have_fields = {f.name.lower() for f in base.fields}
+    have_tab = {t.name.lower() for t in base.tabular}
+    have_forms = {f.name.lower() for f in base.forms}
+    have_mods = {m.module_type.lower() for m in base.modules}
+    for name, other in parsed:
+        if name == base_name:
+            continue
+        base.fields += [f for f in other.fields if f.name.lower() not in have_fields]
+        base.tabular += [t for t in other.tabular if t.name.lower() not in have_tab]
+        base.forms += [f for f in other.forms if f.name.lower() not in have_forms]
+        base.modules += [m for m in other.modules if m.module_type.lower() not in have_mods]
+    return base, names
 
 
 # --------------------------------------------------------------------------- #
@@ -528,6 +566,26 @@ def _resolve_module(ws: Workspace, kind: str, name: str, module: str, source: st
     hooks, so a base routine must fall through to the base module instead of erroring."""
     if err := _kind_ok(kind):
         return None, None, None, _err(err)
+    if kind == "Configuration":
+        # Модули приложения и сеанса лежат прямо в папке Configuration и НЕ являются объектом
+        # метаданных, поэтому обычный резолв по перечислению объектов их не находит. Ищем файл
+        # напрямую и берём копию с непустым содержимым: у расширений это обычно заглушка.
+        srcs, serr = ws.resolve_sources(source)
+        if serr:
+            return None, None, None, _err(serr)
+        stem = module or name or "ManagedApplicationModule"
+        best: tuple[int, object, Path] | None = None
+        for s in srcs:
+            cand = s.files_root / "Configuration" / f"{stem}.bsl"
+            if cand.is_file():
+                size = len(read_text(cand).splitlines())
+                if best is None or size > best[0]:
+                    best = (size, s, cand)
+        if best is None:
+            return None, None, None, _err(
+                f"Модуль конфигурации '{stem}' не найден. Доступны: ManagedApplicationModule, "
+                "OrdinaryApplicationModule, SessionModule, ExternalConnectionModule.")
+        return ws, best[1], best[2], None
     cands, err2 = ws.find_objects(kind, name, source)
     if err2:
         return None, None, None, _err(err2)
@@ -637,16 +695,28 @@ def read_file(rel_path: str, start_line: int = 1, max_lines: int = 400, source: 
     srcs, serr = ws.resolve_sources(source)
     if serr:
         return _err(serr)
+    # Файл может существовать в нескольких источниках, причём у расширения это часто ПУСТАЯ
+    # заглушка (напр. Configuration/SessionModule.bsl). Победа «первого попавшегося» давала
+    # total_lines=0 и пустой text БЕЗ ошибки — агент делал вывод «кода нет». Поэтому среди
+    # найденных копий выбираем непустую, а прочие перечисляем в also_in.
+    hits: list[tuple[str, Path, list[str]]] = []
     for s in srcs:
         path, _msg = ws.safe_path(s, rel_path)
         if path is not None:
-            lines = read_text(path).splitlines()
-            start = max(1, start_line)
-            chunk = lines[start - 1 : start - 1 + max(1, max_lines)]
-            return {"source": s.name, "path": rel_path, "total_lines": len(lines),
-                    "start_line": start, "end_line": start + len(chunk) - 1,
-                    "text": "\n".join(chunk)}
-    return _err(f"Файл не найден ни в одном источнике: {rel_path}")
+            hits.append((s.name, path, read_text(path).splitlines()))
+    if not hits:
+        return _err(f"Файл не найден ни в одном источнике: {rel_path}")
+    src_name, _path, lines = max(hits, key=lambda h: len(h[2]))
+    start = max(1, start_line)
+    chunk = lines[start - 1 : start - 1 + max(1, max_lines)]
+    out = {"source": src_name, "path": rel_path, "total_lines": len(lines),
+           "start_line": start, "end_line": start + len(chunk) - 1,
+           "text": "\n".join(chunk)}
+    others = [n for n, _p, ls in hits if n != src_name]
+    if others:
+        out["also_in"] = others
+        out["empty_copies"] = [n for n, _p, ls in hits if n != src_name and not ls]
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -818,9 +888,10 @@ def find_callers(routine_name: str = "", object_hint: str = "", kinds: list[str]
     """Места ВЫЗОВА рутины (проверено парсером: объявления и строки/комментарии исключены).
 
     object_hint — имя общего модуля/объекта для отсечения одноимённых методов.
-    Всегда отдаётся сводка: call_sites_total (полный счёт) + by_object (разбивка по объектам);
-    строки вызовов — до max_results, у каждой есть call_line. summary_only=True возвращает
-    только сводку: на «горячих» методах конфигурации это десятки токенов вместо тысяч.
+    Всегда отдаётся сводка: call_rows_total (сколько записей вызова всего), distinct_callers
+    (сколько различных рутин вызывают) и by_object (топ объектов + by_object_total).
+    Строки вызовов — до max_results, у каждой есть call_line; summary_only=True отдаёт только
+    сводку. engine показывает, отвечал индекс или живой скан (scan — без полного счёта).
     Имя рутины принимается как routine_name (основное) или name — синоним."""
     routine_name = routine_name or name
     if not routine_name:
