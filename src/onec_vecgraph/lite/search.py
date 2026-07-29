@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from ..parsing.dump import TYPE_FOLDERS
+from ..parsing.dump import CODE_FOLDERS, TYPE_FOLDERS
 from .workspace import LiteSource, Workspace, read_text
 
 _MAX_FILE_BYTES = 4_000_000  # python fallback: skip pathological files
@@ -89,9 +89,9 @@ def _discover_rg() -> str | None:
 
 def _search_dirs(sources: list[LiteSource], kinds: set[str] | None) -> list[str]:
     folders = (
-        sorted(TYPE_FOLDERS)
+        sorted(CODE_FOLDERS)
         if kinds is None
-        else sorted(f for f, k in TYPE_FOLDERS.items() if k in kinds)
+        else sorted(f for f, k in CODE_FOLDERS.items() if k in kinds)
     )
     dirs: list[str] = []
     for s in sources:

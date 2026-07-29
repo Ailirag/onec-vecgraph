@@ -313,10 +313,12 @@ class Workspace:
             hit = self._bsl.get(src.name)
             if hit and not fresh and now - hit[0] < 4 * _LIST_TTL:
                 return hit[1]
-        from ..parsing.dump import TYPE_FOLDERS
+        from ..parsing.dump import CODE_FOLDERS
 
-        wanted = set(TYPE_FOLDERS) if kinds is None else {
-            folder for folder, kind in TYPE_FOLDERS.items() if kind in kinds
+        # CODE_FOLDERS, а не TYPE_FOLDERS: иначе модули приложения и сеанса
+        # (Configuration/SessionModule.bsl и др.) не попадают ни в поиск, ни в индекс.
+        wanted = set(CODE_FOLDERS) if kinds is None else {
+            folder for folder, kind in CODE_FOLDERS.items() if kind in kinds
         }
         out: list[Path] = []
         for folder in sorted(wanted):

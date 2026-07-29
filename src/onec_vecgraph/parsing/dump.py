@@ -63,6 +63,15 @@ TYPE_FOLDERS: dict[str, str] = {
     "Subsystems": "Subsystem",
 }
 
+# Папки, в которых лежит ИСПОЛНЯЕМЫЙ КОД конфигурации. Это TYPE_FOLDERS (объекты метаданных)
+# плюс `Configuration`: модули приложения и сеанса (ManagedApplicationModule,
+# OrdinaryApplicationModule, SessionModule, ExternalConnectionModule) формально не объект
+# метаданных, но исполняет их платформа. Пока эта папка не входила в обход, они были невидимы
+# для поиска, индекса, метрик и ревью — например find_routine("УстановкаПараметровСеанса")
+# возвращал десятки одноимённых методов объектов и НИ ОДНОГО настоящего обработчика сеанса.
+# TYPE_FOLDERS намеренно оставлена как есть: на ней держится перечисление объектов.
+CODE_FOLDERS: dict[str, str] = {**TYPE_FOLDERS, "Configuration": "Configuration"}
+
 
 def discover_parts(root: Path) -> list[ConfigPart]:
     """Find directories that contain a Configuration.xml (base + extensions)."""

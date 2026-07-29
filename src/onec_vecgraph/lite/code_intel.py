@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ..bsl.parser import Routine, parse_module
 from ..chunking import classify_entry_point
-from ..parsing.dump import TYPE_FOLDERS
+from ..parsing.dump import CODE_FOLDERS, TYPE_FOLDERS
 from ..parsing.forms import parse_form_handlers
 from . import search
 from .workspace import LiteSource, Workspace, read_text
@@ -139,8 +139,13 @@ def routine_body(path: Path, rt: Routine) -> str:
 def describe_bsl_path(src: LiteSource, rel: str) -> dict:
     """Map a source-relative .bsl path to {kind, object, module} (best effort)."""
     parts = rel.replace("\\", "/").split("/")
-    kind = TYPE_FOLDERS.get(parts[0], parts[0])
+    kind = CODE_FOLDERS.get(parts[0], parts[0])
     name = parts[1] if len(parts) > 1 else ""
+    if parts[0] == "Configuration":
+        # Модули приложения/сеанса лежат прямо в папке: объекта-владельца нет, объект — сама
+        # конфигурация, а имя файла (SessionModule и пр.) и есть модуль.
+        return {"kind": "Configuration", "object": "Configuration",
+                "module": Path(parts[-1]).stem}
     if parts[0] == "Subsystems":  # nested: Subsystems/A/Subsystems/B/...
         name = ".".join(p for p in parts[1:-1] if p not in ("Subsystems", "Ext"))
     module = Path(parts[-1]).stem
@@ -641,7 +646,7 @@ def _dirty_bsl_files(ws: Workspace) -> set[str]:
                 continue
             abs_path = repo / rel
             src_name, srel = ws.source_of_path(abs_path)
-            if src_name and srel.split("/", 1)[0] in TYPE_FOLDERS:
+            if src_name and srel.split("/", 1)[0] in CODE_FOLDERS:
                 out.add(str(abs_path))
     _DIRTY_CACHE[key] = (now, out)
     return out
@@ -1033,7 +1038,7 @@ def metrics(ws: Workspace, source: str = "") -> dict:
             except OSError:
                 pass
         decl = rf"^[ \t]*{_KW}[ \t]+[\wА-Яа-яЁё]+[ \t]*\("
-        routines = search.count_total(decl, [str(s.files_root / f) for f in sorted(TYPE_FOLDERS)
+        routines = search.count_total(decl, [str(s.files_root / f) for f in sorted(CODE_FOLDERS)
                                              if (s.files_root / f).is_dir()])
         row = {
             "source": s.name,
@@ -1046,7 +1051,7 @@ def metrics(ws: Workspace, source: str = "") -> dict:
         }
         if s.is_extension:
             row["override_annotations"] = search.count_total(
-                _OVERRIDE_RX, [str(s.files_root / f) for f in sorted(TYPE_FOLDERS)
+                _OVERRIDE_RX, [str(s.files_root / f) for f in sorted(CODE_FOLDERS)
                                if (s.files_root / f).is_dir()])
         per_source.append(row)
     return {"sources": per_source,

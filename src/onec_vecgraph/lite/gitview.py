@@ -18,7 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from ..chunking import classify_entry_point
-from ..parsing.dump import TYPE_FOLDERS
+from ..parsing.dump import CODE_FOLDERS
 from . import code_intel
 from .workspace import LiteSource, Workspace
 
@@ -175,7 +175,7 @@ def _map_changes(ws: Workspace, sources: list[LiteSource], ref: str,
             src_name, srel = ws.source_of_path(abs_path)
             if not src_name or src_name not in wanted:
                 continue
-            if srel.split("/", 1)[0] not in TYPE_FOLDERS:
+            if srel.split("/", 1)[0] not in CODE_FOLDERS:
                 continue  # DT-INF, docs и прочее вне метаданных
             src = next(s for s in ws.sources if s.name == src_name)
             rows.append((src, abs_path, srel, status))
