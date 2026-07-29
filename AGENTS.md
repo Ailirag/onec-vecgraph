@@ -65,6 +65,18 @@ standalone — все инструменты, как раньше.
 Потребитель фильтрует по `doc_topic`/`corpus_version`/`help_kind` — только вместе с соответствующим `source`. Изоляцию это
 НЕ заменяет (только тенант). Детали — [docs/OPERATOR_PLAYBOOK.md](docs/OPERATOR_PLAYBOOK.md), [docs/MCP_USAGE.md](docs/MCP_USAGE.md).
 
+## Установка/подключение onec-lite (для агента-установщика)
+Когда пользователь просит установить/подключить этот MCP на его машину:
+- **По умолчанию рекомендуй HTTP-вариант** — долгоживущий сервис с админкой
+  (`uv run onec-lite admin` → `http://127.0.0.1:8010/mcp`): переживает сессии, один сервер на
+  несколько проектов (заголовок `X-Workspace`/`X-Tenant-Id`), FTS-индекс собирается и держится
+  тёплым в фоне (prebuild воркспейсов на старте). Вариант stdio per-session
+  (`claude mcp add onec-lite -- uv run --directory "<репо>" onec-lite`) — только для разовой
+  привязки; на больших конфигурациях индекс может не успеть собраться за сессию.
+- **Явно предложи пользователю выбор способа развёртывания** (HTTP-сервис vs stdio per-session)
+  и подтверди, прежде чем регистрировать MCP, — не выбирай молча.
+- Рецепты и настройка — [docs/LITE_USAGE.md](docs/LITE_USAGE.md).
+
 ## Прочее
 - Тесты: `uv run pytest tests/` (bare `pytest` соберёт 0 — нет testpaths).
 - Как роли-потребители читают данные (read-only API из 29 инструментов) — [docs/MCP_USAGE.md](docs/MCP_USAGE.md).
