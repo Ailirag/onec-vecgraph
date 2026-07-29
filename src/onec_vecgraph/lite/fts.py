@@ -36,7 +36,7 @@ from . import admin as lite_admin
 from . import code_intel
 from .workspace import LiteSource, Workspace, read_text
 
-_SCHEMA_VERSION = 3  # v3: +symbols/calls (индекс рутин и рёбер вызовов рядом с FTS)
+_SCHEMA_VERSION = 4  # v4: +symbols.directive (на индексном пути директива компиляции терялась)
 _REFRESH_TTL = 30.0  # seconds between implicit mtime rescans on search
 _BODY_CAP = 20_000  # per-unit body cap (защита от патологических рутин)
 _CYR = re.compile(r"[а-яё]", re.IGNORECASE)
@@ -99,6 +99,18 @@ def _release_build_lock(handle) -> None:
         pass
 
 
+def _is_stale(path: str, idx_mtime: float | None) -> bool:
+    """Разошёлся ли файл с тем, что записано в индексе (в т.ч. если файл удалён).
+
+    Индекс — не истина: между сборками файлы правят и удаляют. Без этой проверки
+    `find_declarations`/`find_overrides` отдавали координаты из старой версии файла (агент
+    читал по ним чужой код) и не видели только что добавленных рутин и хуков."""
+    try:
+        return idx_mtime is None or Path(path).stat().st_mtime != idx_mtime
+    except OSError:
+        return True  # файла нет — строка индекса заведомо неверна
+
+
 def fts_available() -> bool:
     try:
         con = sqlite3.connect(":memory:")
@@ -134,6 +146,10 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
         DROP TABLE IF EXISTS unit_map;
         DROP TABLE IF EXISTS files;
         DROP TABLE IF EXISTS meta;
+        -- symbols/calls появились в v3 без DROP, из-за чего миграция v3->v4 падала на
+        -- «table symbols already exists»: пересоздаём весь набор, а не часть.
+        DROP TABLE IF EXISTS calls;
+        DROP TABLE IF EXISTS symbols;
         CREATE VIRTUAL TABLE units USING fts5(
             title, tokens, body,
             display UNINDEXED, unit UNINDEXED, source UNINDEXED, object UNINDEXED,
@@ -154,6 +170,7 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
             path TEXT NOT NULL, source TEXT NOT NULL, object TEXT NOT NULL, module TEXT NOT NULL,
             name TEXT NOT NULL, name_low TEXT NOT NULL,
             start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, export INTEGER NOT NULL,
+            directive TEXT,
             override_mode TEXT, override_target TEXT, override_target_low TEXT
         );
         CREATE INDEX symbols_name ON symbols(name_low);
@@ -202,10 +219,10 @@ def _write_symbols(con: sqlite3.Connection, ws: Workspace, src: LiteSource, path
     for rt in code_intel.routines_of(path):
         cur = con.execute(
             "INSERT INTO symbols(path, source, object, module, name, name_low, start_line,"
-            " end_line, export, override_mode, override_target, override_target_low)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            " end_line, export, directive, override_mode, override_target,"
+            " override_target_low) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (key, src_name, descr.get("object", ""), descr.get("module", ""), rt.name,
-             rt.name.lower(), rt.start_line, rt.end_line, int(rt.export),
+             rt.name.lower(), rt.start_line, rt.end_line, int(rt.export), rt.directive,
              rt.override_mode, rt.override_target,
              (rt.override_target or "").lower() or None),
         )
@@ -640,7 +657,9 @@ class FtsIndex:
             try:
                 rows = con.execute(
                     "SELECT source, object, module, path, name, override_mode, override_target,"
-                    "       start_line, end_line FROM symbols"
+                    "       start_line, end_line, directive,"
+                    "       (SELECT mtime FROM files WHERE files.path = symbols.path) AS idx_mtime"
+                    " FROM symbols"
                     " WHERE override_mode IS NOT NULL ORDER BY object, name, path"
                 ).fetchall()
             finally:
@@ -648,11 +667,13 @@ class FtsIndex:
         except sqlite3.Error:
             return None
         out: list[dict] = []
-        for source, obj, module, path, name, mode, target, start, end in rows:
+        for (source, obj, module, path, name, mode, target, start, end,
+             directive, idx_mtime) in rows:
             _s, rel = self.ws.source_of_path(Path(path))
             out.append({"source": source, "object": obj, "module": module, "path": rel,
                         "routine": name, "mode": mode, "target": target,
-                        "directive": None, "lines": [start, end]})
+                        "directive": directive, "lines": [start, end],
+                        "_abs": path, "_stale": _is_stale(path, idx_mtime)})
         return out
 
     def declarations(self, name: str, *, exported_only: bool = False) -> list[dict] | None:
@@ -662,20 +683,34 @@ class FtsIndex:
         try:
             con = _connect(self.path)
             try:
-                sql = ("SELECT source, object, module, path, name, start_line, end_line, export"
+                sql = ("SELECT source, object, module, path, name, start_line, end_line, export,"
+                       "       directive,"
+                       "       (SELECT mtime FROM files WHERE files.path = symbols.path)"
                        " FROM symbols WHERE name_low = ?")
                 if exported_only:
                     sql += " AND export = 1"
-                rows = con.execute(sql + " ORDER BY object, module", (name.lower(),)).fetchall()
+                # Порядок значимости, а не алфавита: экспортные и общие модули выше — иначе
+                # окно из 50 строк у популярного имени целиком уходило на первые по алфавиту
+                # виды (AccumulationRegister/BusinessProcess), а Document/CommonModule были
+                # недостижимы ни при каких параметрах.
+                sql += (" ORDER BY export DESC,"
+                        " CASE WHEN object LIKE 'CommonModule.%' THEN 0"
+                        "      WHEN object LIKE 'Configuration%' THEN 1"
+                        "      WHEN object LIKE 'Document.%' THEN 2"
+                        "      WHEN object LIKE 'Catalog.%' THEN 3 ELSE 4 END, object, module")
+                rows = con.execute(sql, (name.lower(),)).fetchall()
             finally:
                 con.close()
         except sqlite3.Error:
             return None
         out: list[dict] = []
-        for source, obj, module, path, rt_name, start, end, export in rows:
+        for (source, obj, module, path, rt_name, start, end, export,
+             directive, idx_mtime) in rows:
             _s, rel = self.ws.source_of_path(Path(path))
             out.append({"source": source, "object": obj, "module": module, "path": rel,
-                        "name": rt_name, "lines": [start, end], "export": bool(export)})
+                        "name": rt_name, "lines": [start, end], "export": bool(export),
+                        "directive": directive,
+                        "_abs": path, "_stale": _is_stale(path, idx_mtime)})
         return out
 
     def call_totals(self, names: list[str], *, source_names: set[str] | None = None,

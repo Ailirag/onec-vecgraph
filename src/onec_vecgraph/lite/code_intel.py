@@ -464,6 +464,10 @@ def find_callers(
     kindset = set(kinds) if kinds else None
     indexed = _index_callers(ws, [routine_name], max_per_name=max_results, source=source,
                              kinds=kindset)
+    # «Нет вызывающих» — самый дорогой неверный ответ (агент решит, что правка безопасна), а из
+    # индекса он мог означать «имя добавили после сборки». Пустой результат подтверждаем сканом.
+    if indexed is not None and not indexed.get(routine_name):
+        indexed = None
     if indexed is not None:
         rows = indexed.get(routine_name, [])
         hint_low = object_hint.lower()
@@ -661,6 +665,68 @@ def _dirty_bsl_files(ws: Workspace) -> set[str]:
     return out
 
 
+def _merge_live_overrides(ws: Workspace, rows: list[dict]) -> list[dict]:
+    """Заменить строки индекса по «грязным»/расходящимся файлам на живой разбор аннотаций.
+
+    Иначе только что добавленный в расширении хук `&Вместо(...)` невидим для find_overrides и
+    для `review_set.overridden_by` — то есть ревью не покажет перехват собственной правки."""
+    dirty = _dirty_bsl_files(ws)
+    suspect = {r["_abs"] for r in rows if r.get("_stale") and r.get("_abs")} | dirty
+    kept = [r for r in rows if r.get("_abs") not in suspect]
+    ext_names = {s.name for s in ws.sources if s.is_extension}
+    for abs_path in suspect:
+        path = Path(abs_path)
+        src_name, rel = ws.source_of_path(path)
+        if src_name not in ext_names:
+            continue  # переопределения живут только в расширениях
+        src = next((s for s in ws.sources if s.name == src_name), None)
+        if src is None:
+            continue
+        descr = describe_bsl_path(src, rel)
+        for rt in routines_of(path):
+            if not rt.override_mode:
+                continue
+            kept.append({"source": src_name, "object": descr.get("object"),
+                         "module": descr.get("module"), "path": rel, "routine": rt.name,
+                         "mode": rt.override_mode, "target": rt.override_target,
+                         "directive": rt.directive,
+                         "lines": [rt.start_line, rt.end_line]})
+    for r in kept:
+        r.pop("_abs", None)
+        r.pop("_stale", None)
+    return kept
+
+
+def _merge_live_declarations(ws: Workspace, rows: list[dict], routine_name: str,
+                             exported_only: bool, srcs: list[LiteSource]) -> list[dict]:
+    """Заменить строки индекса по «грязным»/расходящимся файлам на живой разбор."""
+    dirty = _dirty_bsl_files(ws)
+    suspect = {r["_abs"] for r in rows if r.get("_stale") and r.get("_abs")} | dirty
+    kept = [r for r in rows if r.get("_abs") not in suspect]
+    low = routine_name.lower()
+    keep_names = {s.name for s in srcs}
+    for abs_path in suspect:
+        path = Path(abs_path)
+        src_name, rel = ws.source_of_path(path)
+        if src_name not in keep_names:
+            continue
+        src = next((s for s in ws.sources if s.name == src_name), None)
+        if src is None:
+            continue
+        descr = describe_bsl_path(src, rel)
+        for rt in routines_of(path):
+            if rt.name.lower() != low or (exported_only and not rt.export):
+                continue
+            kept.append({"source": src_name, "object": descr.get("object"),
+                         "module": descr.get("module"), "path": rel, "name": rt.name,
+                         "lines": [rt.start_line, rt.end_line], "export": rt.export,
+                         "directive": rt.directive})
+    for r in kept:
+        r.pop("_abs", None)
+        r.pop("_stale", None)
+    return kept
+
+
 def _index_call_stats(ws: Workspace, name: str, *, source_names: set[str] | None = None,
                       kinds: set[str] | None = None) -> dict:
     """Полная статистика вызовов из индекса: строки, различные вызывающие, разбивка по объектам.
@@ -740,7 +806,7 @@ def find_callers_batch(
 
 def find_declarations(
     ws: Workspace, routine_name: str, *, exported_only: bool = False, max_results: int = 50,
-    source: str = "",
+    source: str = "", decl_offset: int = 0,
 ) -> dict:
     """Where a procedure/function with this exact name is declared (all sources).
 
@@ -758,12 +824,24 @@ def find_declarations(
     if indexed is not None:
         keep = {s.name for s in srcs}
         indexed = [r for r in indexed if r.get("source") in keep]
-        window = indexed[: max(1, max_results)]
+        # Индекс — не истина: строки по изменённым/удалённым файлам выбрасываем и
+        # доразбираем эти файлы живьём (иначе агент получает координаты чужого кода, а
+        # только что добавленная рутина «не существует»).
+        indexed = _merge_live_declarations(ws, indexed, routine_name, exported_only, srcs)
+        # ПУСТОЙ ответ индекса не авторитетен: имени может не быть в индексе просто потому, что
+        # рутину добавили после сборки (перепроверять по строкам индекса тогда нечего). «Не
+        # найдено» — самый дорогой неверный ответ, поэтому подтверждаем его живым сканом.
+        if not indexed:
+            indexed = None
+    if indexed is not None:
+        offset = max(0, decl_offset)
+        window = indexed[offset: offset + max(1, max_results)]
         return {
             "routine": routine_name,
             "declaration_count": len(indexed),
             "returned": len(window),
-            "truncated": len(window) < len(indexed),
+            "offset": offset,
+            "truncated": offset + len(window) < len(indexed),
             "engine": "index",
             "declarations": window,
         }
@@ -783,8 +861,24 @@ def find_declarations(
                 "source": src_name, "path": rel, **descr, **routine_row(path, rt),
             })
             if len(rows) >= max_results:
-                return {"routine": routine_name, "declarations": rows, "truncated": True}
-    return {"routine": routine_name, "declarations": rows, "truncated": truncated}
+                return _decl_answer(routine_name, rows, truncated=True)
+    return _decl_answer(routine_name, rows, truncated=truncated)
+
+
+def _decl_answer(routine_name: str, rows: list[dict], *, truncated: bool) -> dict:
+    """Ответ скан-пути в ТОЙ ЖЕ форме, что и индексного (declaration_count/returned/engine).
+
+    Раньше формы расходились, и вызывающий, получив фолбэк, не находил ожидаемых полей —
+    а по `engine` нельзя было понять, полон ли ответ."""
+    return {
+        "routine": routine_name,
+        "declaration_count": len(rows),
+        "returned": len(rows),
+        "offset": 0,
+        "truncated": truncated,
+        "engine": "scan",
+        "declarations": rows,
+    }
 
 
 def call_graph(
@@ -862,6 +956,7 @@ def override_index(ws: Workspace, source: str = "") -> list[dict]:
         else:
             ext = {s.name for s in ws.sources if s.is_extension}
             indexed = [r for r in indexed if r.get("source") in ext]
+        indexed = _merge_live_overrides(ws, indexed)
         _OVERRIDE_INDEX[key] = (now, indexed)
         return indexed
     if source:

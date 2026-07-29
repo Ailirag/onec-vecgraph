@@ -219,3 +219,32 @@ def test_index_sees_fresh_work_without_waiting_for_refresh(ws: Workspace) -> Non
     callers = {c["routine"] for c in after["callers"]}
     assert after["match_count"] == before + 1, after
     assert "СвежийВызов" in callers
+
+
+def test_index_is_not_truth_for_declarations_and_overrides(ws: Workspace) -> None:
+    """Индекс не должен считаться истиной: удалённая рутина не выдаётся, добавленная видна.
+
+    Критика круга 3: `declarations()`/`overrides()`, в отличие от `callers_of`, не проверяли ни
+    mtime, ни «грязный» набор. Доказанные последствия: после удаления рутины инструмент отдавал
+    её прежние координаты (агент читал по ним ЧУЖОЙ код), после добавления экспортной рутины —
+    «такой рутины нет», а новый хук `&Вместо(...)` в расширении оставался невидим (и не попадал
+    в review_set.overridden_by)."""
+    from onec_vecgraph.lite import code_intel
+
+    module = ws.root / "conf" / "src" / "CommonModules" / "РасчетЗатрат" / "Module.bsl"
+    idx = fts.index_for(ws)
+    assert "error" not in idx.build()
+    assert idx.has_symbols()
+    assert code_intel.find_declarations(ws, "РассчитатьСебестоимость")["declaration_count"] == 1
+
+    # рутину переименовали: старого имени больше нет, новое — есть, индекс ещё не пересобран
+    module.write_text(
+        "Функция ПереименованнаяСебестоимость(Номенклатура) Экспорт\n    Возврат 0;\nКонецФункции\n",
+        encoding="utf-8")
+    code_intel.clear_caches()
+
+    gone = code_intel.find_declarations(ws, "РассчитатьСебестоимость")
+    assert gone["declaration_count"] == 0, gone      # прежние координаты не выдаются
+    fresh = code_intel.find_declarations(ws, "ПереименованнаяСебестоимость")
+    assert fresh["declaration_count"] == 1, fresh    # добавленная рутина видна сразу
+    assert fresh["declarations"][0]["lines"] == [1, 3]

@@ -724,11 +724,16 @@ def _locate_routine(ws: Workspace, routine_name: str, source: str = "") -> tuple
 
 @mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
 def find_routine(routine_name: str, exported_only: bool = False, max_results: int = 50,
-                 source: str = "", workspace: str = "") -> dict:
-    """Где ОБЪЯВЛЕНА процедура/функция с этим именем (по всем источникам, точный парс)."""
+                 source: str = "", offset: int = 0, workspace: str = "") -> dict:
+    """Где ОБЪЯВЛЕНА процедура/функция с этим именем (по всем источникам, точный парс).
+
+    declaration_count — сколько объявлений ВСЕГО (у типовых обработчиков вроде
+    ПриСозданииНаСервере их тысячи), отдаётся окно max_results от offset; окно упорядочено по
+    значимости (экспортные и общие модули выше), а не по алфавиту. engine показывает, отвечал
+    индекс или живой скан."""
     return code_intel.find_declarations(
         _ws(workspace), routine_name, exported_only=exported_only, max_results=max_results,
-        source=source,
+        source=source, decl_offset=offset,
     )
 
 
