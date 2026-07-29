@@ -558,7 +558,8 @@ class FtsIndex:
             return False
 
     def callers_of(self, names: list[str], *, max_per_name: int = 100,
-                   kinds: set[str] | None = None) -> dict[str, list[dict]]:
+                   kinds: set[str] | None = None,
+                   source_names: set[str] | None = None) -> dict[str, list[dict]]:
         """Места вызова для набора имён — одной SQL-выборкой по индексу.
 
         Возвращает ВСЕ найденные вызовы (без обрезки по числу файлов-кандидатов, как в
@@ -582,6 +583,11 @@ class FtsIndex:
                 # фильтр kinds стоил секунды и вместе с индексом терял полный счёт.
                 kind_sql = " AND (" + " OR ".join("s.object LIKE ?" for _ in kinds) + ")"
                 args += [f"{k}.%" for k in sorted(kinds)]
+            if source_names:
+                # source тоже в SQL: фильтрация ПОСЛЕ выборки отсекала уже обрезанное окно —
+                # запрос по одному расширению возвращал ноль строк при непустом счёте.
+                kind_sql += " AND s.source IN (" + ",".join("?" for _ in source_names) + ")"
+                args += sorted(source_names)
             rows = con.execute(
                 "SELECT c.method_low, s.path, s.source, s.object, s.module, s.name,"
                 "       s.start_line, s.end_line, s.export, c.qualifier, c.line,"
@@ -670,6 +676,55 @@ class FtsIndex:
             _s, rel = self.ws.source_of_path(Path(path))
             out.append({"source": source, "object": obj, "module": module, "path": rel,
                         "name": rt_name, "lines": [start, end], "export": bool(export)})
+        return out
+
+    def call_totals(self, names: list[str], *, source_names: set[str] | None = None,
+                    kinds: set[str] | None = None) -> dict[str, dict]:
+        """Полная статистика мест вызова: {имя: {rows, distinct_callers, by_object[...]}}.
+
+        Считается по ВСЕМУ множеству одним запросом, а не по окну выдачи: сводка `by_object`,
+        построенная из обрезанных строк, показывала распределение по 2% данных (первые объекты
+        по алфавиту) — агент планировал по ней и получал неверную картину. Фильтры source/kinds
+        учитываются здесь же, иначе счёт не соответствует отданным строкам."""
+        out: dict[str, dict] = {}
+        if not names or not self.has_symbols():
+            return out
+        try:
+            con = _connect(self.path)
+        except sqlite3.Error:
+            return out
+        try:
+            wanted = {n.lower(): n for n in names}
+            marks = ",".join("?" for _ in wanted)
+            args: list = list(wanted)
+            extra = ""
+            if source_names:
+                extra += " AND s.source IN (" + ",".join("?" for _ in source_names) + ")"
+                args += sorted(source_names)
+            if kinds:
+                extra += " AND (" + " OR ".join("s.object LIKE ?" for _ in kinds) + ")"
+                args += [f"{k}.%" for k in sorted(kinds)]
+            rows = con.execute(
+                "SELECT c.method_low, s.object, count(*) AS rows_n,"
+                "       count(DISTINCT s.id) AS callers_n"
+                " FROM calls c JOIN symbols s ON s.id = c.caller_id"
+                f" WHERE c.method_low IN ({marks})"
+                " AND NOT (c.qualifier IS NULL AND s.name_low = c.method_low)"
+                f"{extra} GROUP BY c.method_low, s.object ORDER BY rows_n DESC",
+                args,
+            ).fetchall()
+        except sqlite3.Error:
+            return out
+        finally:
+            con.close()
+        for method_low, obj, rows_n, callers_n in rows:
+            name = wanted.get(method_low)
+            if name is None:
+                continue
+            acc = out.setdefault(name, {"rows": 0, "distinct_callers": 0, "by_object": []})
+            acc["rows"] += rows_n
+            acc["distinct_callers"] += callers_n
+            acc["by_object"].append({"object": obj, "count": rows_n})
         return out
 
     def call_counts(self, names: list[str]) -> dict[str, int]:

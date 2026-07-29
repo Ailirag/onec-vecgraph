@@ -472,21 +472,28 @@ def find_callers(
                     if (r.get("qualifier") or "").lower() == hint_low
                     or (r.get("qualifier") is None
                         and hint_low in (r.get("object") or "").lower())]
-        # Полный счёт корректен только для несуженной выборки: при hint/kinds его не заявляем.
-        total = None if (hint_low or kindset) else _index_call_total(ws, routine_name)
-        by_object: dict[str, int] = {}
-        for r in rows:
-            by_object[r.get("object") or "?"] = by_object.get(r.get("object") or "?", 0) + 1
+        # Сводка и счёт берутся по ВСЕМУ множеству (одним GROUP BY), а не по окну выдачи:
+        # иначе by_object показывал распределение по первым по алфавиту объектам, и агент
+        # планировал по 2% данных. Фильтры source/kinds входят в сам запрос, поэтому счёт
+        # всегда соответствует отданным строкам. object_hint — фильтр по квалификатору
+        # вызова, в SQL его нет, поэтому при нём счётчики не заявляем.
+        stats: dict = {}
+        if not hint_low:
+            src_names = {s.name for s in srcs} if source else None
+            stats = _index_call_stats(ws, routine_name, source_names=src_names, kinds=kindset)
+        rows_total = stats.get("rows")
         return {
             "routine": routine_name,
             "match_count": len(rows),
-            "call_sites_total": total,
-            "truncated": bool(total and len(rows) < total),
+            # честные имена: в calls хранится по одной записи на (рутина, квалификатор, метод),
+            # поэтому это «строк вызова», а не «текстовых вхождений»
+            "call_rows_total": rows_total,
+            "distinct_callers": stats.get("distinct_callers"),
+            "truncated": bool(rows_total and len(rows) < rows_total),
             "engine": "index",
-            # Сводка по объектам идёт всегда: агенту обычно достаточно её, чтобы решить,
-            # куда смотреть, — вместо вычитывания всех строк вызовов.
-            "by_object": [{"object": o, "count": n}
-                          for o, n in sorted(by_object.items(), key=lambda kv: -kv[1])],
+            # Сводка по объектам — по всему множеству; агенту её обычно достаточно, чтобы
+            # решить, куда смотреть, без вычитывания строк вызовов.
+            "by_object": stats.get("by_object", []),
             "callers": [] if summary_only else rows,
         }
     pattern = rf"\b{re.escape(routine_name)}\s*\("
@@ -554,7 +561,9 @@ def _index_callers(
         idx = _fts.index_for(ws)
         if not idx.has_symbols():
             return None
-        found = idx.callers_of(names, max_per_name=max_per_name, kinds=kinds)
+        src_names = {s.name for s in ws.resolve_sources(source)[0]} if source else None
+        found = idx.callers_of(names, max_per_name=max_per_name, kinds=kinds,
+                               source_names=src_names)
     except Exception:  # noqa: BLE001 — индекс не должен ломать ответ, есть скан-фолбэк
         return None
     if source:
@@ -652,13 +661,18 @@ def _dirty_bsl_files(ws: Workspace) -> set[str]:
     return out
 
 
-def _index_call_total(ws: Workspace, name: str) -> int | None:
-    """Полное число мест вызова из индекса (для summary-first: «всего N, показано K»)."""
+def _index_call_stats(ws: Workspace, name: str, *, source_names: set[str] | None = None,
+                      kinds: set[str] | None = None) -> dict:
+    """Полная статистика вызовов из индекса: строки, различные вызывающие, разбивка по объектам.
+
+    Считается по всему множеству с теми же фильтрами, что и выдача, — чтобы счётчики в ответе
+    означали именно то, что написано (см. find_callers)."""
     try:
         from . import fts as _fts
-        return _fts.index_for(ws).call_counts([name]).get(name)
+        return _fts.index_for(ws).call_totals(
+            [name], source_names=source_names, kinds=kinds).get(name, {})
     except Exception:  # noqa: BLE001
-        return None
+        return {}
 
 
 def find_callers_batch(
