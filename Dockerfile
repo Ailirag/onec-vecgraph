@@ -29,9 +29,24 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # `git` is needed to clone artifact/ITS source repos during ingest.
-RUN apt-get update && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --upgrade pip
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Corporate TLS interception: behind a MITM proxy every pip download fails with
+# CERTIFICATE_VERIFY_FAILED ("self-signed certificate in certificate chain"), because the container
+# trusts only the public roots. Drop the corporate root(s) into ./certs/*.crt before building and
+# they are installed here — BEFORE THE FIRST pip CALL, otherwise even `pip install --upgrade pip`
+# already fails against pypi.org. The directory ships empty, so builds on the open internet are
+# unaffected.
+#   cp /etc/pki/tls/certs/ca-bundle.crt certs/corp.crt && docker build -t onec-vecgraph .
+COPY certs/ /usr/local/share/ca-certificates/
+RUN if ls /usr/local/share/ca-certificates/*.crt >/dev/null 2>&1; then update-ca-certificates; fi
+# Make Python/pip/requests use that same store (pip does not read the system store by default).
+ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+RUN pip install --upgrade pip
 
 # Install dependencies against project metadata first (better layer caching), then the source.
 COPY pyproject.toml README.md ./

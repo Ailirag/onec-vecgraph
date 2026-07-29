@@ -36,3 +36,6 @@ snapshots/
 # local agent / code-graph tool dirs
 .agents/
 .codegraph/
+
+# Корпоративные CA для сборки за MITM-прокси — локальные, не в репозиторий.
+certs/*.crt
