@@ -545,11 +545,24 @@ def read_module(kind: str, name: str, module: str = "Module", start_line: int = 
 
 
 @mcp.tool()
-def read_routine(kind: str, name: str, routine_name: str, module: str = "Module",
+def read_routine(kind: str = "", name: str = "", routine_name: str = "", module: str = "Module",
                  source: str = "", workspace: str = "") -> dict:
-    """Тело одной процедуры/функции модуля по имени (для заимствованных объектов рутина
-    ищется по источникам: расширения, затем база)."""
-    ws, src, path, err = _resolve_module(_ws(workspace), kind, name, module, source,
+    """Тело одной процедуры/функции по имени (для заимствованных объектов рутина ищется по
+    источникам: расширения, затем база).
+
+    Достаточно одного routine_name — объект и модуль находятся сами (по индексу символов;
+    без индекса — поиском объявления). kind+name+module указывают, только если нужно снять
+    неоднозначность одноимённых рутин; при неоднозначности ответ перечислит кандидатов."""
+    if not routine_name:
+        return _err("read_routine требует routine_name=<имя процедуры/функции>; "
+                    "kind/name/module необязательны (объект находится сам).")
+    ws0 = _ws(workspace)
+    if not (kind and name):
+        found, ferr = _locate_routine(ws0, routine_name, source)
+        if ferr:
+            return ferr
+        kind, name, module = found
+    ws, src, path, err = _resolve_module(ws0, kind, name, module, source,
                                          routine=routine_name)
     if err:
         return err
@@ -589,13 +602,19 @@ def read_file(rel_path: str, start_line: int = 1, max_lines: int = 400, source: 
 # --------------------------------------------------------------------------- #
 
 @mcp.tool()
-def search_code(pattern: str, kinds: list[str] | None = None, name_filter: str = "",
+def search_code(pattern: str = "", kinds: list[str] | None = None, name_filter: str = "",
                 regex: bool = True, case_sensitive: bool = False, max_results: int = 100,
-                source: str = "", workspace: str = "") -> dict:
+                source: str = "", query: str = "", workspace: str = "") -> dict:
     """Полнотекстовый поиск по BSL-модулям (ripgrep; без rg — Python-фолбэк).
 
     kinds — ограничить видами (['CommonModule','Document']); name_filter — подстрока
-    имени объекта-владельца; source — один источник."""
+    имени объекта-владельца; source — один источник. Искомое можно передать как pattern
+    (основное имя) или query — синоним на случай путаницы с search_metadata/fts_search."""
+    pattern = pattern or query
+    if not pattern:
+        return _err("search_code требует pattern=<подстрока или regex по коду>, например "
+                    "pattern=\"ПроверитьЗаполнение\\\\s*\\\\(\". Для поиска ОБЪЕКТОВ — "
+                    "search_metadata(query=…), для ранжированного поиска — fts_search(query=…).")
     ws = _ws(workspace)
     kindset = set(kinds) if kinds else None
     if kindset and (bad := kindset - set(TYPE_FOLDERS.values())):
@@ -628,6 +647,29 @@ def fts_search(query: str, limit: int = 20, unit: str = "", source: str = "", wo
     return res
 
 
+def _locate_routine(ws: Workspace, routine_name: str, source: str = "") -> tuple:
+    """(kind, name, module) объекта, где объявлена рутина — чтобы вызывающему не требовалось
+    знать kind/name заранее (в пилоте это была частая причина отказов инструмента).
+
+    Неоднозначность не угадываем: если объявлений несколько в разных объектах, возвращаем
+    ошибку со списком кандидатов, чтобы агент уточнил одним следующим вызовом."""
+    decl = code_intel.find_declarations(ws, routine_name, max_results=10, source=source)
+    rows = decl.get("declarations", [])
+    if not rows:
+        return None, _err(
+            f"Рутина '{routine_name}' не найдена ни в одном источнике. "
+            "Проверьте имя (find_routine покажет объявления по подстроке имени).")
+    uniq = {(r.get("object"), r.get("module")) for r in rows}
+    if len(uniq) > 1:
+        listed = "; ".join(f"{o} ▸ {m}" for o, m in sorted(uniq, key=lambda x: str(x)))
+        return None, _err(
+            f"Рутина '{routine_name}' объявлена в нескольких местах: {listed}. "
+            "Уточните kind+name (+module).")
+    obj, module = next(iter(uniq))
+    kind, _, name = str(obj).partition(".")
+    return (kind, name, module or "Module"), None
+
+
 @mcp.tool()
 def find_routine(routine_name: str, exported_only: bool = False, max_results: int = 50,
                  source: str = "", workspace: str = "") -> dict:
@@ -639,12 +681,17 @@ def find_routine(routine_name: str, exported_only: bool = False, max_results: in
 
 
 @mcp.tool()
-def search_metadata(query: str, kinds: list[str] | None = None, max_results: int = 100,
-                    source: str = "", workspace: str = "") -> dict:
+def search_metadata(query: str = "", kinds: list[str] | None = None, max_results: int = 100,
+                    source: str = "", pattern: str = "", workspace: str = "") -> dict:
     """Поиск объектов по имени и по тексту метаданных (синонимы и пр.).
 
     Сначала совпадения по имени (список объектов), затем текстовые совпадения в
-    файлах метаданных (.xml/.mdo) с привязкой к объекту."""
+    файлах метаданных (.xml/.mdo) с привязкой к объекту. Текст можно передать как query
+    (основное имя) или pattern — синоним на случай путаницы с search_code."""
+    query = query or pattern
+    if not query:
+        return _err("search_metadata требует query=<часть имени или текста метаданных>, "
+                    "например query=\"Претензия\". Для поиска по КОДУ — search_code(pattern=…).")
     ws = _ws(workspace)
     kindset = set(kinds) if kinds else None
     srcs, serr = ws.resolve_sources(source)
@@ -707,15 +754,19 @@ def find_callees(kind: str, name: str, routine_name: str, module: str = "Module"
 
 
 @mcp.tool()
-def find_callers(routine_name: str, object_hint: str = "", kinds: list[str] | None = None,
+def find_callers(routine_name: str = "", object_hint: str = "", kinds: list[str] | None = None,
                  max_results: int = 20, source: str = "", summary_only: bool = False,
-                 workspace: str = "") -> dict:
+                 name: str = "", workspace: str = "") -> dict:
     """Места ВЫЗОВА рутины (проверено парсером: объявления и строки/комментарии исключены).
 
     object_hint — имя общего модуля/объекта для отсечения одноимённых методов.
     Всегда отдаётся сводка: call_sites_total (полный счёт) + by_object (разбивка по объектам);
     строки вызовов — до max_results, у каждой есть call_line. summary_only=True возвращает
-    только сводку: на «горячих» методах конфигурации это десятки токенов вместо тысяч."""
+    только сводку: на «горячих» методах конфигурации это десятки токенов вместо тысяч.
+    Имя рутины принимается как routine_name (основное) или name — синоним."""
+    routine_name = routine_name or name
+    if not routine_name:
+        return _err("find_callers требует routine_name=<имя процедуры/функции>.")
     return code_intel.find_callers(
         _ws(workspace), routine_name, object_hint=object_hint, kinds=kinds,
         max_results=max_results, source=source, summary_only=summary_only,
