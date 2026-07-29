@@ -37,6 +37,8 @@ _COMPLETE_MAX_HITS = 200_000  # предохранитель для complete-с�
 def clear_caches() -> None:
     """Drop the parsed-module cache (admin refresh; mtime already guards staleness)."""
     _MODULES.clear()
+    _LINES_CACHE.clear()
+    _OVERRIDE_INDEX.clear()
 
 
 def routines_of(path: Path) -> list[Routine]:
@@ -57,11 +59,38 @@ def routines_of(path: Path) -> list[Routine]:
     return routines
 
 
-def _signature(path: Path, rt: Routine) -> str:
-    """Declaration line(s) of a routine up to the closing paren (max 5 lines)."""
+_LINES_CACHE: dict[str, tuple[float, list[str]]] = {}
+_LINES_CACHE_MAX = 64  # строки нужны пачками по одному модулю; держим последние
+
+
+def _module_lines(path: Path) -> list[str]:
+    """Строки модуля с mtime-кэшем.
+
+    Без кэша `_signature` читал и декодировал ФАЙЛ ЦЕЛИКОМ на КАЖДУЮ рутину: на крупнейшем
+    общем модуле УТ (7.6 МБ, 1825 рутин) это 1825 чтений и 68 с на один list_routines."""
+    key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return []
+    hit = _LINES_CACHE.get(key)
+    if hit and hit[0] == mtime:
+        return hit[1]
     try:
         lines = read_text(path).splitlines()
     except OSError:
+        return []
+    if len(_LINES_CACHE) >= _LINES_CACHE_MAX:
+        for old in list(_LINES_CACHE)[: _LINES_CACHE_MAX // 4]:
+            _LINES_CACHE.pop(old, None)
+    _LINES_CACHE[key] = (mtime, lines)
+    return lines
+
+
+def _signature(path: Path, rt: Routine) -> str:
+    """Declaration line(s) of a routine up to the closing paren (max 5 lines)."""
+    lines = _module_lines(path)
+    if not lines:
         return rt.name
     out: list[str] = []
     depth = 0
@@ -635,10 +664,31 @@ def find_declarations(
     ws: Workspace, routine_name: str, *, exported_only: bool = False, max_results: int = 50,
     source: str = "",
 ) -> dict:
-    """Where a procedure/function with this exact name is declared (all sources)."""
+    """Where a procedure/function with this exact name is declared (all sources).
+
+    При готовом индексе символов счёт объявлений ПОЛНЫЙ (declaration_count), а не «сколько
+    успели найти до обрезки по файлам-кандидатам»: у популярных имён вроде ПриСозданииНаСервере
+    объявлений тысячи, и произвольная выборка вводила в заблуждение."""
     srcs, err = ws.resolve_sources(source)
     if err:
         return {"error": err}
+    try:
+        from . import fts as _fts
+        indexed = _fts.index_for(ws).declarations(routine_name, exported_only=exported_only)
+    except Exception:  # noqa: BLE001
+        indexed = None
+    if indexed is not None:
+        keep = {s.name for s in srcs}
+        indexed = [r for r in indexed if r.get("source") in keep]
+        window = indexed[: max(1, max_results)]
+        return {
+            "routine": routine_name,
+            "declaration_count": len(indexed),
+            "returned": len(window),
+            "truncated": len(window) < len(indexed),
+            "engine": "index",
+            "declarations": window,
+        }
     pattern = rf"^[ \t]*{_KW}[ \t]+{re.escape(routine_name)}[ \t]*\("
     files, truncated = _candidate_files(ws, pattern, srcs, None, cap=max_results * 4)
     rows: list[dict] = []
@@ -720,6 +770,22 @@ def override_index(ws: Workspace, source: str = "") -> list[dict]:
     hit = _OVERRIDE_INDEX.get(key)
     if hit and now - hit[0] < _OVERRIDE_INDEX_TTL:
         return hit[1]
+    # Индекс символов уже содержит override_mode/override_target — берём оттуда, вместо
+    # полного текстового скана расширений с повторным разбором модулей.
+    try:
+        from . import fts as _fts
+        indexed = _fts.index_for(ws).overrides()
+    except Exception:  # noqa: BLE001 — падение индекса не должно ломать ответ
+        indexed = None
+    if indexed is not None:
+        if source:
+            keep = {s.name for s in ws.resolve_sources(source)[0]}
+            indexed = [r for r in indexed if r.get("source") in keep]
+        else:
+            ext = {s.name for s in ws.sources if s.is_extension}
+            indexed = [r for r in indexed if r.get("source") in ext]
+        _OVERRIDE_INDEX[key] = (now, indexed)
+        return indexed
     if source:
         srcs, err = ws.resolve_sources(source)
         if err:

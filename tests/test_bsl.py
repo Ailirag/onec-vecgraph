@@ -69,3 +69,25 @@ def test_parse_module_captures_override_annotations() -> None:
 
     # An ordinary routine carries no override annotation.
     assert r["Обычная"].override_mode is None and r["Обычная"].override_target is None
+
+
+def test_export_on_multiline_signature() -> None:
+    """`Экспорт` стоит после ЗАКРЫВАЮЩЕЙ скобки, а параметры в 1С часто переносят на строки.
+
+    Поиск только по строке объявления помечал такие рутины неэкспортными — на живой УТ так
+    врал каждый 25-й экспортный метод: find_routine(exported_only=True) их не находил, а
+    review_set недооценивал риск (export — первый ключ ранжирования)."""
+    src = (
+        "Функция Многострочная(Знач Первый,\n"
+        "    Знач Второй,\n"
+        "    Знач Третий) Экспорт\n"
+        "    Возврат 1;\n"
+        "КонецФункции\n"
+        "\n"
+        "Процедура БезЭкспорта(А)\n"
+        "    Возврат;\n"
+        "КонецПроцедуры\n"
+    )
+    routines = {x.name: x for x in parse_module(src)}
+    assert routines["Многострочная"].export is True
+    assert routines["БезЭкспорта"].export is False

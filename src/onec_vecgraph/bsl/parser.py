@@ -18,6 +18,7 @@ _DECL_RE = re.compile(
 )
 _END_RE = re.compile(r"^\s*(КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)\b", re.IGNORECASE)
 _CALL_RE = re.compile(rf"(?:({_IDENT})\s*\.\s*)?({_IDENT})\s*\(")
+_DECL_MAX_LINES = 30  # сколько строк сигнатуры досматриваем в поисках `)` и `Экспорт`
 # &Directive, optionally with a quoted argument: &Вместо("БазовыйМетод").
 _DIRECTIVE_RE = re.compile(r'^\s*&([A-Za-zА-Яа-яЁё]+)\s*(?:\(\s*"([^"]*)"\s*\))?')
 
@@ -157,14 +158,23 @@ def parse_module(text: str) -> list[Routine]:
             if decl:
                 keyword, name = decl.group(1), decl.group(2)
                 kind = "Function" if keyword.lower() in ("функция", "function") else "Procedure"
-                export = bool(re.search(r"\)\s*(Экспорт|Export)\b", line, re.IGNORECASE))
+                # `Экспорт` стоит после ЗАКРЫВАЮЩЕЙ скобки, а список параметров в 1С часто
+                # переносят на несколько строк — поиск только по строке объявления помечал
+                # такие рутины неэкспортными (на УТ так врал каждый 25-й экспортный метод).
+                decl_text, depth = line, line.count("(") - line.count(")")
+                scan = idx
+                while depth > 0 and scan + 1 < len(lines) and scan - idx < _DECL_MAX_LINES:
+                    scan += 1
+                    decl_text += " " + lines[scan]
+                    depth += lines[scan].count("(") - lines[scan].count(")")
+                export = bool(re.search(r"\)\s*(Экспорт|Export)\b", decl_text, re.IGNORECASE))
                 current = Routine(name=name, kind=kind, export=export, start_line=idx + 1,
                                   end_line=idx + 1, region=region, directive=pending_directive,
                                   override_mode=pending_override[0] if pending_override else None,
                                   override_target=pending_override[1] if pending_override else None)
                 pending_directive = None
                 pending_override = None
-                body_start = idx + 1
+                body_start = scan + 1  # тело начинается после всей (возможно многострочной) сигнатуры
         else:
             if _END_RE.match(line):
                 current.end_line = idx + 1

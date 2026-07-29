@@ -612,6 +612,56 @@ class FtsIndex:
             })
         return out
 
+    def overrides(self) -> list[dict] | None:
+        """Все override-аннотации расширений из индекса (None — индекса нет).
+
+        Таблица symbols уже несёт override_mode/override_target, поэтому полный список берётся
+        SQL-выборкой вместо текстового скана расширений с разбором (на УТ это 3+ с холодных)."""
+        if not self.has_symbols():
+            return None
+        try:
+            con = _connect(self.path)
+            try:
+                rows = con.execute(
+                    "SELECT source, object, module, path, name, override_mode, override_target,"
+                    "       start_line, end_line FROM symbols"
+                    " WHERE override_mode IS NOT NULL ORDER BY object, name, path"
+                ).fetchall()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return None
+        out: list[dict] = []
+        for source, obj, module, path, name, mode, target, start, end in rows:
+            _s, rel = self.ws.source_of_path(Path(path))
+            out.append({"source": source, "object": obj, "module": module, "path": rel,
+                        "routine": name, "mode": mode, "target": target,
+                        "directive": None, "lines": [start, end]})
+        return out
+
+    def declarations(self, name: str, *, exported_only: bool = False) -> list[dict] | None:
+        """Где объявлена рутина с этим именем — из индекса (None, если индекса нет)."""
+        if not self.has_symbols():
+            return None
+        try:
+            con = _connect(self.path)
+            try:
+                sql = ("SELECT source, object, module, path, name, start_line, end_line, export"
+                       " FROM symbols WHERE name_low = ?")
+                if exported_only:
+                    sql += " AND export = 1"
+                rows = con.execute(sql + " ORDER BY object, module", (name.lower(),)).fetchall()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return None
+        out: list[dict] = []
+        for source, obj, module, path, rt_name, start, end, export in rows:
+            _s, rel = self.ws.source_of_path(Path(path))
+            out.append({"source": source, "object": obj, "module": module, "path": rel,
+                        "name": rt_name, "lines": [start, end], "export": bool(export)})
+        return out
+
     def call_counts(self, names: list[str]) -> dict[str, int]:
         """Сколько всего мест вызова у каждого имени (для summary-first ответа)."""
         if not names:

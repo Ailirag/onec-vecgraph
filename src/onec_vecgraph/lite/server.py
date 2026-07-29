@@ -512,16 +512,30 @@ def _resolve_module(ws: Workspace, kind: str, name: str, module: str, source: st
 
 
 @mcp.tool()
-def list_routines(kind: str, name: str, module: str = "Module", source: str = "", workspace: str = "") -> dict:
+def list_routines(kind: str, name: str, module: str = "Module", source: str = "",
+                  max_results: int = 100, offset: int = 0, exported_only: bool = False,
+                  name_filter: str = "", workspace: str = "") -> dict:
     """Процедуры/функции модуля: сигнатуры, Экспорт, директивы, точки входа, override-аннотации.
 
-    module: Module|Object|Manager|RecordSet|Value|Command|Form:<Имя>|<имя .bsl>."""
+    module: Module|Object|Manager|RecordSet|Value|Command|Form:<Имя>|<имя .bsl>.
+    В крупных модулях 1С бывает больше тысячи рутин, поэтому ответ ограничен бюджетом:
+    routine_count — всего в модуле, отдаётся окно max_results от offset; сузить можно
+    exported_only=True или name_filter=<подстрока имени>."""
     ws, src, path, err = _resolve_module(_ws(workspace), kind, name, module, source)
     if err:
         return err
-    rows = [code_intel.routine_row(path, rt) for rt in code_intel.routines_of(path)]
+    routines = code_intel.routines_of(path)
+    flt = name_filter.lower()
+    selected = [rt for rt in routines
+                if (not exported_only or rt.export) and (not flt or flt in rt.name.lower())]
+    start = max(0, offset)
+    window = selected[start: start + max(1, max_results)]
+    rows = [code_intel.routine_row(path, rt) for rt in window]
     return {"source": src.name, "object": f"{kind}.{name}", "module": module,
-            "path": ws.source_of_path(path)[1], "routine_count": len(rows), "routines": rows}
+            "path": ws.source_of_path(path)[1],
+            "routine_count": len(routines), "matched": len(selected),
+            "offset": start, "returned": len(rows),
+            "truncated": start + len(rows) < len(selected), "routines": rows}
 
 
 @mcp.tool()
