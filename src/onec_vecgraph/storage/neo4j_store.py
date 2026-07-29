@@ -574,25 +574,97 @@ class Neo4jStore:
         )
 
     def stale_routine_owners(self, tenant_id: str) -> list[tuple[str, str]]:
-        """Objects with modules whose routines are missing or built from a different version."""
+        """Objects whose call graph was never built, or was built from another config version.
+
+        Decided by the `graph_built`/`graph_version` stamps the callgrapher writes, NOT by
+        counting routines. Counting cannot tell "not built yet" from "built, declares nothing":
+        EDT omits Module.bsl for an empty common module, so such an object had zero routines
+        forever, stayed stale forever and — through the CommonModule fallback — forced a FULL
+        rebuild on every run. Measured on the sandbox: 33 such modules in bp, 3 in do, 2 in zup,
+        which is why a no-op nightly refresh still cost ~27 minutes.
+        """
         rows = self.read(
-            "MATCH (o:Object {tenant_id: $t})-[:HAS_MODULE]->(:Module) "
-            "WITH DISTINCT o "
-            "OPTIONAL MATCH (o)-[:HAS_MODULE]->(:Module)-[:DECLARES]->(rt:Routine) "
-            "WITH o, count(rt) AS nr, collect(DISTINCT rt.config_version) AS cvs "
-            "WHERE nr = 0 OR NOT (o.config_version IN cvs) "
-            "RETURN o.fqn AS fqn, o.kind AS kind",
+            "MATCH (o:Object {tenant_id: $t})-[:HAS_MODULE|HAS_FORM]->(c) "
+            # Both halves must be parenthesised: AND binds tighter than OR in Cypher, so without
+            # them this reads as "any Module, or a stale form" — i.e. everything is always stale.
+            "WHERE (c:Module OR c.module_path IS NOT NULL) "  # a form without a module holds no routines
+            "  AND (coalesce(c.graph_built, false) = false "
+            "       OR coalesce(c.graph_version, '') <> coalesce(o.config_version, '')) "
+            "RETURN DISTINCT o.fqn AS fqn, o.kind AS kind",
             t=tenant_id,
         )
         return [(r["fqn"], r["kind"]) for r in rows]
 
-    def delete_routines_for(self, tenant_id: str, fqns: list[str]) -> None:
+    def mark_modules_built(self, tenant_id: str, rows: list[dict]) -> int:
+        """Record that these modules are reflected in the graph at the given config version.
+
+        Stamped on ATTEMPT, not on success: a module whose .bsl is absent contributes no
+        routines, and re-reading it at the SAME version would fail identically — retrying it
+        every run is exactly the loop this replaces. A changed version un-stamps it naturally.
+        """
+        return self._mark_built(tenant_id, "Module", rows)
+
+    def mark_forms_built(self, tenant_id: str, rows: list[dict]) -> int:
+        return self._mark_built(tenant_id, "Form", rows)
+
+    def _mark_built(self, tenant_id: str, label: str, rows: list[dict]) -> int:
+        query = (
+            f"UNWIND $rows AS r MATCH (n:{label} {{tenant_id: $t, fqn: r.fqn}}) "
+            "SET n.graph_built = true, n.graph_version = r.version"
+        )
+        written = 0
+        for chunk in _chunks(rows, 2000):
+            self.write(query, t=tenant_id, rows=chunk)
+            written += len(chunk)
+        return written
+
+    def clear_graph_built(self, tenant_id: str, batch: int = 25000) -> None:
+        """Drop every build stamp. A full rebuild calls this BEFORE deleting routines, so a crash
+        mid-rebuild leaves the tenant stale (and self-healing) rather than falsely up to date."""
+        for label in ("Module", "Form"):
+            while True:
+                rows = self.read(
+                    f"MATCH (n:{label} {{tenant_id: $t}}) WHERE n.graph_built IS NOT NULL "
+                    "WITH n LIMIT $b REMOVE n.graph_built, n.graph_version RETURN count(n) AS c",
+                    t=tenant_id, b=batch,
+                )
+                if not rows or rows[0]["c"] == 0:
+                    break
+
+    def clear_owned_edges_for(self, tenant_id: str, fqns: list[str]) -> None:
+        """Drop the edges these objects OWN (outgoing CALLS/OVERRIDES of their routines, HANDLES
+        of their forms) so an incremental pass can re-resolve them from scratch. Incoming CALLS
+        from unchanged callers are deliberately left in place: the pass does not re-parse those
+        callers, so deleting the edges would lose them until the next full rebuild."""
         for i in range(0, len(fqns), 500):
+            batch = fqns[i : i + 500]
             self.write(
-                "MATCH (o:Object {tenant_id: $t})-[:HAS_MODULE]->(:Module)-[:DECLARES]->(rt:Routine) "
-                "WHERE o.fqn IN $f DETACH DELETE rt",
+                "MATCH (o:Object {tenant_id: $t})-[:HAS_MODULE|HAS_FORM]->()-[:DECLARES]->"
+                "(:Routine)-[e:CALLS|OVERRIDES]->() WHERE o.fqn IN $f DELETE e",
+                t=tenant_id, f=batch,
+            )
+            self.write(
+                "MATCH (o:Object {tenant_id: $t})-[:HAS_FORM]->(:Form)-[h:HANDLES]->() "
+                "WHERE o.fqn IN $f DELETE h",
+                t=tenant_id, f=batch,
+            )
+
+    def prune_outdated_routines(self, tenant_id: str, fqns: list[str]) -> int:
+        """Delete routines of these objects that the current pass did NOT rewrite — their
+        config_version still differs from the owner's, i.e. they vanished from the source.
+        Called AFTER the writes, so surviving routines keep their identity and, with it, the
+        incoming CALLS from unchanged callers that a blanket delete used to destroy."""
+        deleted = 0
+        for i in range(0, len(fqns), 500):
+            rows = self.read(
+                "MATCH (o:Object {tenant_id: $t})-[:HAS_MODULE|HAS_FORM]->()-[:DECLARES]->"
+                "(rt:Routine) WHERE o.fqn IN $f "
+                "  AND coalesce(rt.config_version, '') <> coalesce(o.config_version, '') "
+                "WITH DISTINCT rt DETACH DELETE rt RETURN count(rt) AS c",
                 t=tenant_id, f=fqns[i : i + 500],
             )
+            deleted += rows[0]["c"] if rows else 0
+        return deleted
 
     def common_module_routine_index(self, tenant_id: str) -> dict[str, dict[str, str]]:
         rows = self.read(
@@ -618,12 +690,14 @@ class Neo4jStore:
             index.setdefault(r["object"], {})[r["method"]] = r["fqn"]
         return index
 
-    def form_modules(self, tenant_id: str) -> list[dict[str, Any]]:
+    def form_modules(self, tenant_id: str, only: list[str] | None = None) -> list[dict[str, Any]]:
         return self.read(
             "MATCH (o:Object {tenant_id: $t})-[:HAS_FORM]->(f:Form) WHERE f.module_path IS NOT NULL "
+            "AND ($only IS NULL OR o.fqn IN $only) "
             "RETURN o.fqn AS owner_fqn, o.kind AS owner_kind, o.name AS owner_name, "
+            "       o.config_version AS config_version, "
             "       f.fqn AS form_fqn, f.module_path AS path, f.form_path AS form_path",
-            t=tenant_id,
+            t=tenant_id, only=only,
         )
 
     def write_form_routines(self, tenant_id: str, rows: list[dict]) -> int:

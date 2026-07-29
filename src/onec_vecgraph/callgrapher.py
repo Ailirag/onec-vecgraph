@@ -3,6 +3,10 @@
 Supports full and incremental rebuilds. Incremental reprocesses only objects whose
 configVersion changed. A changed CommonModule has incoming CALLS from unchanged callers,
 so if any changed object is a CommonModule we fall back to a full rebuild (correctness).
+
+"Changed" is read off the `graph_built`/`graph_version` stamps this module writes onto every
+Module/Form it processes — never off the routine count, which cannot distinguish an object
+that was never built from one that legitimately declares nothing.
 """
 
 from __future__ import annotations
@@ -132,6 +136,7 @@ def _parse_form_modules(forms: list[dict], progress_label: str | None = None) ->
                 "name": rt.name, "routine_kind": rt.kind, "export": rt.export,
                 "region": rt.region, "directive": rt.directive, "object_fqn": f["owner_fqn"],
                 "object_kind": f["owner_kind"], "module_type": "FormModule",
+                "config_version": f.get("config_version"),
                 "entry_point": classify_entry_point(rt.name, form_event=ev["event"] if ev else None),
             }
             override_rows.extend(_override_edge(rfqn, ff, rt, props))
@@ -185,14 +190,24 @@ def _resolve(parsed: list[tuple], local_index: dict, common_index: dict,
     return call_rows, stats
 
 
+def _stamp_rows(items: list[dict], key: str) -> list[dict]:
+    """Build-stamp rows for every module/form the pass took on, readable or not (see
+    Neo4jStore.mark_modules_built for why an unreadable one must still be stamped)."""
+    return [{"fqn": i[key], "version": i.get("config_version")} for i in items]
+
+
 def _full(tenant_id: str, store: Neo4jStore, reason: str | None = None) -> dict[str, Any]:
     modules = store.routine_modules(tenant_id)
+    forms = store.form_modules(tenant_id)
     routine_rows, parsed, local_index, common_index, manager_index, override_rows, pstats = _parse_modules(
         modules, progress_label=f"callgraph:{tenant_id} модули")
     f_rows, f_parsed, f_local, handles_rows, f_override_rows, fstats = _parse_form_modules(
-        store.form_modules(tenant_id), progress_label=f"callgraph:{tenant_id} формы")
+        forms, progress_label=f"callgraph:{tenant_id} формы")
     local_index.update(f_local)
 
+    # Un-stamp first: if the process dies between here and the stamping below, the tenant reads
+    # as stale and the next run rebuilds it, instead of looking fresh with no routines.
+    store.clear_graph_built(tenant_id)
     store.delete_routines(tenant_id)
     store.write_routines(tenant_id, routine_rows)
     store.write_form_routines(tenant_id, f_rows)
@@ -200,6 +215,8 @@ def _full(tenant_id: str, store: Neo4jStore, reason: str | None = None) -> dict[
     written = store.write_calls(tenant_id, call_rows)
     handles = store.write_handles(tenant_id, handles_rows)
     overrides = store.write_overrides(tenant_id, override_rows + f_override_rows)
+    store.mark_modules_built(tenant_id, _stamp_rows(modules, "module_fqn"))
+    store.mark_forms_built(tenant_id, _stamp_rows(forms, "form_fqn"))
     return {"mode": "full", "tenant_id": tenant_id, "fallback_reason": reason,
             **pstats, **fstats, **rstats, "calls_written": written, "handles_written": handles,
             "overrides_written": overrides}
@@ -224,14 +241,29 @@ def build_call_graph(
 
         stale_fqns = [fqn for fqn, _ in stale]
         modules = store.routine_modules(tenant_id, only=stale_fqns)
-        routine_rows, parsed, local_index, _common, _manager, override_rows, pstats = _parse_modules(
+        forms = store.form_modules(tenant_id, only=stale_fqns)
+        routine_rows, parsed, local_index, _common, fresh_manager, override_rows, pstats = _parse_modules(
             modules, progress_label=f"callgraph:{tenant_id} модули (incr)")
-        common_index = store.common_module_routine_index(tenant_id)  # from graph (unchanged)
+        # Forms of a stale object must be re-parsed too: their routines carry the object's version,
+        # so skipping them would leave the object stamped fresh with a stale form module.
+        f_rows, f_parsed, f_local, handles_rows, f_override_rows, fstats = _parse_form_modules(
+            forms, progress_label=f"callgraph:{tenant_id} формы (incr)")
+        local_index.update(f_local)
+        common_index = store.common_module_routine_index(tenant_id)  # from graph (none is stale)
         manager_index = store.manager_module_routine_index(tenant_id)  # from graph (unchanged)
-        store.delete_routines_for(tenant_id, stale_fqns)
+        manager_index.update(fresh_manager)  # a re-parsed manager module wins over the graph copy
+
         store.write_routines(tenant_id, routine_rows)
-        call_rows, rstats = _resolve(parsed, local_index, common_index, manager_index)
+        store.write_form_routines(tenant_id, f_rows)
+        pruned = store.prune_outdated_routines(tenant_id, stale_fqns)
+        store.clear_owned_edges_for(tenant_id, stale_fqns)
+        call_rows, rstats = _resolve(parsed + f_parsed, local_index, common_index, manager_index)
         written = store.write_calls(tenant_id, call_rows)
-        overrides = store.write_overrides(tenant_id, override_rows)
+        handles = store.write_handles(tenant_id, handles_rows)
+        overrides = store.write_overrides(tenant_id, override_rows + f_override_rows)
+        store.mark_modules_built(tenant_id, _stamp_rows(modules, "module_fqn"))
+        store.mark_forms_built(tenant_id, _stamp_rows(forms, "form_fqn"))
         return {"mode": "incremental", "tenant_id": tenant_id, "stale_objects": len(stale),
-                **pstats, **rstats, "calls_written": written, "overrides_written": overrides}
+                **pstats, **fstats, **rstats, "calls_written": written,
+                "handles_written": handles, "overrides_written": overrides,
+                "routines_pruned": pruned}

@@ -7,7 +7,10 @@ requires-python = ">=3.12,<3.13"
 license = { text = "Proprietary" }
 authors = [{ name = "GrandTrade" }]
 dependencies = [
-    "mcp>=1.9.0",
+    # The upper bound is load-bearing: mcp 2.0 dropped `mcp.server.fastmcp`, which all four
+    # servers (server / write_server / admin_server / lite.server) import. An unpinned rebuild
+    # silently produced an image that could not start. Lift it only together with the 2.x port.
+    "mcp>=1.9.0,<2",
     "neo4j>=5.26",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
