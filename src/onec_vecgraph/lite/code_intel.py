@@ -425,7 +425,9 @@ def _candidate_files(
     files: list[Path] = []
     seen: set[str] = set()
     truncated = False
+    hits = 0
     for abs_path, _line, _text in it:
+        hits += 1
         if abs_path in seen:
             continue
         seen.add(abs_path)
@@ -435,6 +437,11 @@ def _candidate_files(
             break
     if complete:
         files.sort()
+        # Предохранитель исчерпан -> обход НЕ полон, и об этом надо сказать: раньше флаг
+        # выставлялся только в ветке с кэпом, поэтому complete-скан на массовом шаблоне
+        # («Если» даёт свыше 400 тыс. попаданий) молча возвращал truncated=False.
+        if hits >= _COMPLETE_MAX_HITS:
+            truncated = True
     return files, truncated
 
 
@@ -501,7 +508,10 @@ def find_callers(
             "callers": [] if summary_only else rows,
         }
     pattern = rf"\b{re.escape(routine_name)}\s*\("
-    files, files_truncated = _candidate_files(ws, pattern, srcs, kindset)
+    # Без индекса идём ПОЛНЫМ обходом: кэп в 300 файлов-кандидатов молча срезал две трети мест
+    # вызова (на УТ 81 вместо 248), и ответ было не отличить от исчерпывающего. Полнота
+    # приоритетнее скорости — здесь complete=True.
+    files, files_truncated = _candidate_files(ws, pattern, srcs, kindset, complete=True)
     rows: list[dict] = []
     hint = object_hint.lower()
     truncated = False
@@ -544,10 +554,22 @@ def find_callers(
                 break
         if truncated:
             break
+    by_object_scan: dict[str, int] = {}
+    for r in rows:
+        by_object_scan[r.get("object") or "?"] = by_object_scan.get(r.get("object") or "?", 0) + 1
     return {
         "routine": routine_name,
         "match_count": len(rows),
+        # На скан-пути полного счёта нет (обход останавливается на max_results), поэтому счётчик
+        # не выдумываем; зато честно говорим, каким движком отвечали и сколько файлов прочитали —
+        # раньше по ответу нельзя было понять, полон он или это треть множества.
+        "call_rows_total": None,
+        "engine": "scan",
+        "files_scanned": len(files),
+        "files_truncated": files_truncated,
         "truncated": truncated or files_truncated,
+        "by_object": [{"object": o, "count": n}
+                      for o, n in sorted(by_object_scan.items(), key=lambda kv: -kv[1])],
         "callers": rows,
     }
 

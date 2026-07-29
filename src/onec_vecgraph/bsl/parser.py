@@ -66,6 +66,8 @@ class Routine:
     # base method it hooks (e.g. &Вместо("ПередЗаписью") -> ("Вместо", "ПередЗаписью")).
     override_mode: str | None = None
     override_target: str | None = None
+    # Файл кончился без КонецПроцедуры/КонецФункции: рутина восстановлена по концу файла.
+    unterminated: bool = False
     calls: list[Call] = field(default_factory=list)
 
 
@@ -182,4 +184,13 @@ def parse_module(text: str) -> list[Routine]:
                 current.calls = _find_calls(body, body_start + 1)  # body_start — 0-based индекс
                 routines.append(current)
                 current = None
+    if current is not None:
+        # Файл кончился без КонецПроцедуры/КонецФункции (незакрытая последняя рутина — в УТ
+        # таких файлов 16). Раньше рутина просто не попадала в результат ВМЕСТЕ СО ВСЕМИ своими
+        # вызовами: она была невидима для поиска, индекса и ревью. Восстанавливаем по концу
+        # файла и помечаем unterminated, чтобы потребитель мог отличить её от корректной.
+        current.end_line = len(lines)
+        current.calls = _find_calls("\n".join(lines[body_start:]), body_start + 1)
+        current.unterminated = True
+        routines.append(current)
     return routines
