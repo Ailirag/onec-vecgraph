@@ -36,9 +36,12 @@ from . import admin as lite_admin
 from . import code_intel
 from .workspace import LiteSource, Workspace, read_text
 
-_SCHEMA_VERSION = 4  # v4: +symbols.directive (на индексном пути директива компиляции терялась)
+_SCHEMA_VERSION = 5  # v5: в юнит входит «шапка» комментариев над рутиной + region в токенах
+# (версия поднята сознательно: состав текста юнита изменился, а инкремент по mtime сам его не
+#  пересоберёт — файлы-то не менялись, поэтому нужна полная переиндексация)
 _REFRESH_TTL = 30.0  # seconds between implicit mtime rescans on search
-_BODY_CAP = 20_000  # per-unit body cap (защита от патологических рутин)
+_BODY_CAP = 40_000  # предел текста юнита (по замеру критика на 20k молча обрезалось 873 юнита)
+_DOC_HEAD_LINES = 40  # сколько строк «шапки» над объявлением берём в юнит (док-комментарий)
 _CYR = re.compile(r"[а-яё]", re.IGNORECASE)
 _BUILD_LOCK_STALE = 120.0  # сек без «касания» лока -> процесс-владелец умер, лок забираем
 _LOCK_HEARTBEAT = 20.0     # сек: как часто живая сборка обновляет mtime своего лока
@@ -198,13 +201,22 @@ def _bsl_units(ws: Workspace, src: LiteSource, path: Path) -> list[tuple]:
     text = read_text(path)
     lines = text.splitlines()
     rows: list[tuple] = []
-    for rt in code_intel.routines_of(path):
-        body = "\n".join(lines[rt.start_line - 1 : rt.end_line])[:_BODY_CAP]
-        tokens = search_tokens(rt.name, descr.get("object"), descr.get("module"))
+    routines = code_intel.routines_of(path)
+    prev_end = 0  # 1-based номер последней строки предыдущей рутины
+    for rt in routines:
+        # В юнит входит и «шапка» над объявлением — блок документирующих комментариев между
+        # концом предыдущей рутины и этой. Именно там лежит человеческое описание метода
+        # («// Возвращает себестоимость партии…»), а fts_search продаётся как лучший старт для
+        # запросов «где считается X». Раньше индексировалось только тело, и 13.8% строк модуля
+        # (в первую очередь эти комментарии) не искались вообще.
+        head_from = max(prev_end, rt.start_line - 1 - _DOC_HEAD_LINES)
+        body = "\n".join(lines[head_from: rt.end_line])[:_BODY_CAP]
+        tokens = search_tokens(rt.name, descr.get("object"), descr.get("module"), rt.region)
         rows.append((
             search_tokens(rt.name), tokens, body,
             rt.name, "routine", src_name, descr.get("object", ""), rel, rt.start_line,
         ))
+        prev_end = rt.end_line
     return rows
 
 
