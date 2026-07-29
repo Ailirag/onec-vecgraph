@@ -998,13 +998,18 @@ def _form_files(ws: Workspace, src, obj_dir: Path, kind: str, name: str,
 
 
 @mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
-def get_form(kind: str, name: str, form: str = "", source: str = "", workspace: str = "") -> dict:
+def get_form(kind: str, name: str, form: str = "", source: str = "", items_limit: int = 60,
+             summary: bool = False, workspace: str = "") -> dict:
     """Структура формы: реквизиты, команды (+обработчики), элементы (поля с dataPath,
     кнопки с командами, группы), обработчики событий формы/элементов с пометкой declared.
 
     Для CommonForm параметр form не нужен. Форма расширения затеняет одноимённую базовую;
     секции, которых в форме расширения нет (реквизиты/команды), дополняются из базовой
-    формы с пометкой attributes_source/commands_source — как их видит платформа."""
+    формы с пометкой attributes_source/commands_source — как их видит платформа.
+
+    counts всегда показывает полные размеры; дерево элементов ограничено items_limit и
+    упорядочено по «сигнальности» (обработчики, команды, dataPath — выше). items_limit=0 —
+    отдать все элементы; summary=True — только элементы, несущие логику."""
     ws = _ws(workspace)
     if err := _kind_ok(kind):
         return _err(err)
@@ -1059,6 +1064,25 @@ def get_form(kind: str, name: str, form: str = "", source: str = "", workspace: 
                 "items": len(data["items"]),
             },
         })
+        # Бюджет ответа: у ходовых форм 1С сотни элементов (у ФормаДокумента РТУ — 245), и
+        # полная выдача — это ~18 тыс. токенов в одном вызове. Счётчики выше сохраняются, а
+        # дерево элементов сужается: сперва то, что несёт логику (обработчики, dataPath,
+        # команды), затем остальное. Полный список — items_limit=0.
+        items = data.get("items") or []
+        if items_limit and len(items) > items_limit:
+            def _signal(it: dict) -> tuple:
+                return (bool(it.get("handlers")), bool(it.get("command")),
+                        bool(it.get("data_path")))
+            ranked = sorted(items, key=_signal, reverse=True)
+            data["items"] = ranked[:items_limit]
+            data["items_returned"] = len(data["items"])
+            data["items_ranked_by_signal"] = True
+        if summary:
+            # Только каркас: счётчики, реквизиты, команды и элементы с логикой.
+            data["items"] = [it for it in data["items"]
+                             if it.get("handlers") or it.get("command")]
+            data["items_returned"] = len(data["items"])
+            data["summary"] = True
         return data
     return _err(f"Форма '{form or name}' не найдена у {kind}.{name}. {_forms_hint(ws, cands)}")
 
