@@ -557,7 +557,8 @@ class FtsIndex:
         except sqlite3.Error:
             return False
 
-    def callers_of(self, names: list[str], *, max_per_name: int = 100) -> dict[str, list[dict]]:
+    def callers_of(self, names: list[str], *, max_per_name: int = 100,
+                   kinds: set[str] | None = None) -> dict[str, list[dict]]:
         """Места вызова для набора имён — одной SQL-выборкой по индексу.
 
         Возвращает ВСЕ найденные вызовы (без обрезки по числу файлов-кандидатов, как в
@@ -574,14 +575,21 @@ class FtsIndex:
         try:
             wanted = {n.lower(): n for n in names}
             marks = ",".join("?" for _ in wanted)
+            args: list = list(wanted)
+            kind_sql = ""
+            if kinds:
+                # Сужение по видам делаем В SQL, а не сбросом на текстовый скан: иначе
+                # фильтр kinds стоил секунды и вместе с индексом терял полный счёт.
+                kind_sql = " AND (" + " OR ".join("s.object LIKE ?" for _ in kinds) + ")"
+                args += [f"{k}.%" for k in sorted(kinds)]
             rows = con.execute(
                 "SELECT c.method_low, s.path, s.source, s.object, s.module, s.name,"
                 "       s.start_line, s.end_line, s.export, c.qualifier, c.line,"
                 "       (SELECT mtime FROM files WHERE files.path = s.path) AS idx_mtime"
                 f" FROM calls c JOIN symbols s ON s.id = c.caller_id"
-                f" WHERE c.method_low IN ({marks})"
+                f" WHERE c.method_low IN ({marks}){kind_sql}"
                 " ORDER BY s.object, s.name, c.line",
-                list(wanted),
+                args,
             ).fetchall()
         except sqlite3.Error:
             return out

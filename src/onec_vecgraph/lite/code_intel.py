@@ -455,34 +455,35 @@ def find_callers(
     if err:
         return {"error": err}
     # Индексный путь (если индекс символов готов): полный счёт мест вызова без обрезки по
-    # файлам-кандидатам и без текстового скана. kinds сужают корпус только в скан-режиме.
-    if not kinds:
-        indexed = _index_callers(ws, [routine_name], max_per_name=max_results, source=source)
-        if indexed is not None:
-            rows = indexed.get(routine_name, [])
-            hint_low = object_hint.lower()
-            if hint_low:
-                rows = [r for r in rows
-                        if (r.get("qualifier") or "").lower() == hint_low
-                        or (r.get("qualifier") is None
-                            and hint_low in (r.get("object") or "").lower())]
-            total = _index_call_total(ws, routine_name)
-            by_object: dict[str, int] = {}
-            for r in rows:
-                by_object[r.get("object") or "?"] = by_object.get(r.get("object") or "?", 0) + 1
-            return {
-                "routine": routine_name,
-                "match_count": len(rows),
-                "call_sites_total": total if not hint_low else None,
-                "truncated": bool(total and len(rows) < total and not hint_low),
-                "engine": "index",
-                # Сводка по объектам идёт всегда: агенту обычно достаточно её, чтобы решить,
-                # куда смотреть, — вместо вычитывания всех строк вызовов.
-                "by_object": [{"object": o, "count": n}
-                              for o, n in sorted(by_object.items(), key=lambda kv: -kv[1])],
-                "callers": [] if summary_only else rows,
-            }
+    # файлам-кандидатам и без текстового скана. kinds сужают выборку прямо в SQL.
     kindset = set(kinds) if kinds else None
+    indexed = _index_callers(ws, [routine_name], max_per_name=max_results, source=source,
+                             kinds=kindset)
+    if indexed is not None:
+        rows = indexed.get(routine_name, [])
+        hint_low = object_hint.lower()
+        if hint_low:
+            rows = [r for r in rows
+                    if (r.get("qualifier") or "").lower() == hint_low
+                    or (r.get("qualifier") is None
+                        and hint_low in (r.get("object") or "").lower())]
+        # Полный счёт корректен только для несуженной выборки: при hint/kinds его не заявляем.
+        total = None if (hint_low or kindset) else _index_call_total(ws, routine_name)
+        by_object: dict[str, int] = {}
+        for r in rows:
+            by_object[r.get("object") or "?"] = by_object.get(r.get("object") or "?", 0) + 1
+        return {
+            "routine": routine_name,
+            "match_count": len(rows),
+            "call_sites_total": total,
+            "truncated": bool(total and len(rows) < total),
+            "engine": "index",
+            # Сводка по объектам идёт всегда: агенту обычно достаточно её, чтобы решить,
+            # куда смотреть, — вместо вычитывания всех строк вызовов.
+            "by_object": [{"object": o, "count": n}
+                          for o, n in sorted(by_object.items(), key=lambda kv: -kv[1])],
+            "callers": [] if summary_only else rows,
+        }
     pattern = rf"\b{re.escape(routine_name)}\s*\("
     files, files_truncated = _candidate_files(ws, pattern, srcs, kindset)
     rows: list[dict] = []
@@ -537,6 +538,7 @@ def find_callers(
 
 def _index_callers(
     ws: Workspace, names: list[str], *, max_per_name: int, source: str,
+    kinds: set[str] | None = None,
 ) -> dict[str, list[dict]] | None:
     """Вызывающие из индекса символов (None — индекса нет, работаем текстовым сканом).
 
@@ -547,7 +549,7 @@ def _index_callers(
         idx = _fts.index_for(ws)
         if not idx.has_symbols():
             return None
-        found = idx.callers_of(names, max_per_name=max_per_name)
+        found = idx.callers_of(names, max_per_name=max_per_name, kinds=kinds)
     except Exception:  # noqa: BLE001 — индекс не должен ломать ответ, есть скан-фолбэк
         return None
     if source:
