@@ -247,12 +247,16 @@ def _touched_ranges_bulk(repo: Path, ref: str) -> dict[str, list[tuple[int, int]
     return per_file
 
 
-def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str = "") -> dict:
+def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str = "",
+               detail: bool = False, max_routines: int = 25) -> dict:
     """Ревью-набор: изменённые строки → затронутые рутины → их вызывающие и override-хуки.
 
     Для каждого изменённого .bsl: ханки `git diff -U0` мапятся на текущие рутины файла;
     untracked-модули включаются целиком. Каждая затронутая рутина получает callers
-    (парсер-верифицировано) и, для экспортных/заимствованных, — override-хуки расширений."""
+    (парсер-верифицировано) и, для экспортных/заимствованных, — override-хуки расширений.
+
+    По умолчанию вызывающие отдаются компактными строками `Объект▸Модуль▸Рутина:строка`
+    (кратно дешевле по токенам при той же информации); detail=True — полные записи."""
     sources, err = ws.resolve_sources(source)
     if err:
         return {"error": err}
@@ -310,6 +314,7 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
                 "status": status,
                 "overridden_by": [
                     {k: o.get(k) for k in ("source", "object", "routine", "mode")}
+                    if detail else f"{o.get('source')}▸{o.get('routine')}[{o.get('mode')}]"
                     for o in by_target.get(rt.name.lower(), [])
                     if (o.get("object") or "").lower() == descr["object"].lower()
                 ],
@@ -317,22 +322,56 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
         if truncated:
             break
 
-    # Проход 2: вызывающие для ВСЕХ затронутых рутин одним текстовым сканом (было: скан на
-    # каждую рутину — на УТ это десятки секунд на один review_set).
+    # Проход 2: вызывающие для ВСЕХ затронутых рутин одной выборкой (индекс) или одним
+    # текстовым сканом (фолбэк) — было по скану на каждую рутину.
     batch = code_intel.find_callers_batch(
         ws, sorted({r["routine"] for r in routines}), hints=hints,
         max_per_name=max_callers, source=source,
     )
     for row in routines:
         found = batch.get(row["routine"], [])
-        row["callers"] = found
+        row["callers_count"] = len(found)
+        if detail:
+            row["callers"] = found
+        else:
+            # Компактная форма: одна строка на вызывающего вместо словаря из восьми полей —
+            # на ревью-наборе это кратно меньше токенов при той же полезной информации.
+            row["callers"] = [
+                f"{c.get('object')}▸{c.get('module')}▸{c.get('routine')}"
+                + (f":{c['call_line']}" if c.get("call_line") else "")
+                for c in found
+            ]
         row["callers_truncated"] = len(found) >= max_callers
 
+    # Бюджет ответа: рутин в наборе бывает много (десятки), и агенту важны прежде всего
+    # рискованные — экспортные, точки входа и те, у кого много вызывающих или есть
+    # переопределения. Сортируем по риску и отдаём max_routines, сообщая полный счёт.
+    routines_total = len(routines)
+    if not detail and routines_total > max_routines:
+        def risk(r: dict) -> tuple:
+            return (bool(r.get("export")), bool(r.get("entry_point")),
+                    len(r.get("overridden_by") or []), r.get("callers_count", 0))
+        routines = sorted(routines, key=risk, reverse=True)[:max_routines]
+    if not detail:
+        for r in routines:  # переопределений у популярных хуков бывают десятки
+            ov = r.get("overridden_by") or []
+            if len(ov) > 3:
+                r["overridden_by"] = ov[:3]
+                r["overridden_by_total"] = len(ov)
+        # Компактный список изменённых объектов: «Объект: путь(статус), …» вместо словарей —
+        # рутины ниже и так несут детали, а метаданные-правки остаются видимыми.
+        changed_list = [
+            {"source": g["source"], "object": g["object"],
+             "changes": [f"{c['path']}({c['status']})" for c in g["changes"]]}
+            for g in changed_list
+        ]
     return {
         "ref": ref or "(незакоммиченные изменения)",
         "repos": repos_info,
         "changed_objects": changed_list,
-        "routine_count": len(routines),
+        "routine_count": routines_total,
+        "routines_returned": len(routines),
+        "routines_ranked_by_risk": routines_total > len(routines),
         "routines_truncated": truncated,
         "routines": routines,
     }

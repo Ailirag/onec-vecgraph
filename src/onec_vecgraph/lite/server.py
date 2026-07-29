@@ -708,13 +708,17 @@ def find_callees(kind: str, name: str, routine_name: str, module: str = "Module"
 
 @mcp.tool()
 def find_callers(routine_name: str, object_hint: str = "", kinds: list[str] | None = None,
-                 max_results: int = 100, source: str = "", workspace: str = "") -> dict:
+                 max_results: int = 20, source: str = "", summary_only: bool = False,
+                 workspace: str = "") -> dict:
     """Места ВЫЗОВА рутины (проверено парсером: объявления и строки/комментарии исключены).
 
-    object_hint — имя общего модуля/объекта для отсечения одноимённых методов."""
+    object_hint — имя общего модуля/объекта для отсечения одноимённых методов.
+    Всегда отдаётся сводка: call_sites_total (полный счёт) + by_object (разбивка по объектам);
+    строки вызовов — до max_results, у каждой есть call_line. summary_only=True возвращает
+    только сводку: на «горячих» методах конфигурации это десятки токенов вместо тысяч."""
     return code_intel.find_callers(
         _ws(workspace), routine_name, object_hint=object_hint, kinds=kinds,
-        max_results=max_results, source=source,
+        max_results=max_results, source=source, summary_only=summary_only,
     )
 
 
@@ -803,13 +807,16 @@ def changed_objects(ref: str = "", source: str = "", include_untracked: bool = T
 
 
 @mcp.tool()
-def review_set(ref: str = "", max_callers: int = 8, source: str = "", workspace: str = "") -> dict:
+def review_set(ref: str = "", max_callers: int = 5, source: str = "", detail: bool = False,
+               workspace: str = "") -> dict:
     """Ревью-набор изменений: изменённые строки → затронутые рутины → их вызывающие,
     точки входа и override-хуки расширений поверх них.
 
     Отвечает на «что я сломал этой правкой»: каждый вызывающий проверен парсером,
-    untracked-модули включаются целиком. ref как в changed_objects."""
-    return gitview.review_set(_ws(workspace), ref, max_callers=max_callers, source=source)
+    untracked-модули включаются целиком. ref как в changed_objects. Вызывающие по умолчанию —
+    компактные строки `Объект▸Модуль▸Рутина:строка`; detail=True даёт полные записи."""
+    return gitview.review_set(_ws(workspace), ref, max_callers=max_callers, source=source,
+                              detail=detail)
 
 
 # --------------------------------------------------------------------------- #

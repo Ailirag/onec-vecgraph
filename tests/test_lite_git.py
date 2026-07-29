@@ -152,8 +152,16 @@ def test_review_set_maps_hunks_to_routines_and_callers(git_ws: Workspace) -> Non
     # правленая строка попала в тело ПроверитьКод -> рутина в наборе, НеТронутая - нет
     touched = by_routine[("CommonModule.Проверки", "ПроверитьКод")]
     assert touched["export"] is True and touched["status"] == "M"
-    callers = {c["routine"] for c in touched["callers"]}
+    # по умолчанию вызывающие — компактные строки «Объект▸Модуль▸Рутина[:строка]»
+    assert any("ПередЗаписью" in c for c in touched["callers"])
+    assert touched["callers_count"] >= 1
+    # detail=True возвращает полные записи (с координатой вызова)
+    detailed = gitview.review_set(git_ws, detail=True)
+    d_touched = {(r["object"], r["routine"]): r for r in detailed["routines"]}[
+        ("CommonModule.Проверки", "ПроверитьКод")]
+    callers = {c["routine"] for c in d_touched["callers"]}
     assert "ПередЗаписью" in callers
+    assert all("call_line" in c for c in d_touched["callers"])
     assert ("CommonModule.Проверки", "НеТронутая") not in by_routine
     # untracked-модуль включается целиком
     new = by_routine[("Catalog.Товары", "НоваяФункция")]

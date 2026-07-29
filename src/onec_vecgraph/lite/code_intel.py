@@ -412,12 +412,14 @@ def _enclosing(routines: list[Routine], line: int) -> Routine | None:
 
 def find_callers(
     ws: Workspace, routine_name: str, *, object_hint: str = "", kinds: list[str] | None = None,
-    max_results: int = 100, source: str = "",
+    max_results: int = 100, source: str = "", summary_only: bool = False,
 ) -> dict:
     """Call sites of a routine by name: parser-verified, declarations excluded.
 
     object_hint narrows qualified calls to `Хинт.Метод(...)` (плюс неквалифицированные
-    вызовы внутри модулей самого объекта/модуля Хинт).
+    вызовы внутри модулей самого объекта/модуля Хинт). summary_only=True — только сводка
+    (полный счёт + разбивка по объектам) без строк: на «горячих» методах конфигурации это
+    десятки токенов вместо тысяч.
     """
     srcs, err = ws.resolve_sources(source)
     if err:
@@ -435,13 +437,20 @@ def find_callers(
                         or (r.get("qualifier") is None
                             and hint_low in (r.get("object") or "").lower())]
             total = _index_call_total(ws, routine_name)
+            by_object: dict[str, int] = {}
+            for r in rows:
+                by_object[r.get("object") or "?"] = by_object.get(r.get("object") or "?", 0) + 1
             return {
                 "routine": routine_name,
                 "match_count": len(rows),
                 "call_sites_total": total if not hint_low else None,
                 "truncated": bool(total and len(rows) < total and not hint_low),
                 "engine": "index",
-                "callers": rows,
+                # Сводка по объектам идёт всегда: агенту обычно достаточно её, чтобы решить,
+                # куда смотреть, — вместо вычитывания всех строк вызовов.
+                "by_object": [{"object": o, "count": n}
+                              for o, n in sorted(by_object.items(), key=lambda kv: -kv[1])],
+                "callers": [] if summary_only else rows,
             }
     kindset = set(kinds) if kinds else None
     pattern = rf"\b{re.escape(routine_name)}\s*\("
