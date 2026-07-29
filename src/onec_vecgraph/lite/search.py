@@ -14,7 +14,7 @@ import shutil
 import subprocess
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 from ..parsing.dump import TYPE_FOLDERS
 from .workspace import LiteSource, Workspace, read_text
@@ -102,11 +102,16 @@ def _search_dirs(sources: list[LiteSource], kinds: set[str] | None) -> list[str]
     return dirs
 
 
+def _globs(glob: str | Sequence[str]) -> list[str]:
+    """Одна маска или несколько (несколько --glob у rg = ИЛИ по включающим маскам)."""
+    return [glob] if isinstance(glob, str) else list(glob)
+
+
 def rg_stream(
     pattern: str,
     dirs: list[str],
     *,
-    glob: str = "*.bsl",
+    glob: str | Sequence[str] = "*.bsl",
     literal: bool = False,
     case_sensitive: bool = False,
     max_hits: int = 100,
@@ -120,7 +125,9 @@ def rg_stream(
         raise FileNotFoundError("ripgrep не найден")
     if not dirs:
         return
-    args = [rg, "--json", "--glob", glob, "--no-messages"]
+    args = [rg, "--json", "--no-messages"]
+    for g in _globs(glob):
+        args += ["--glob", g]
     args += ["-s"] if case_sensitive else ["-i"]
     if literal:
         args += ["-F"]
@@ -182,7 +189,7 @@ def stream(
     *,
     sources: list[LiteSource],
     kinds: set[str] | None = None,
-    glob: str = "*.bsl",
+    glob: str | Sequence[str] = "*.bsl",
     regex: bool = True,
     case_sensitive: bool = False,
     max_hits: int = 100,
@@ -199,14 +206,15 @@ def stream(
     flags = 0 if case_sensitive else re.IGNORECASE
     rx = re.compile(pattern if regex else re.escape(pattern), flags)
     files: list[Path] = []
-    if glob == "*.bsl":
+    globs = _globs(glob)
+    if globs == ["*.bsl"]:
         for s in sources:
             files.extend(ws.bsl_files(s, kinds))
     else:
-        suffix = glob.lstrip("*")
+        suffixes = tuple(g.lstrip("*") for g in globs)
         for d in dirs:
             for walk_root, _dirs, names in os.walk(d):
-                files.extend(Path(walk_root) / n for n in names if n.endswith(suffix))
+                files.extend(Path(walk_root) / n for n in names if n.endswith(suffixes))
     return "python", _python_stream(rx, files, max_hits)
 
 

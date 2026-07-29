@@ -148,35 +148,36 @@ def type_usages(
     if err:
         return {"error": err}
     pattern = rf"{kind}(?:Ref|Object)\.{re.escape(name)}\b"
+    # Один текстовый проход на ВСЕ источники и все маски метаданных: раньше здесь было до
+    # 10 запусков rg (5 источников × 2 маски), а каждый запуск на Windows стоит ~0.15 с.
+    globs: list[str] = []
+    for s in srcs:
+        for g in (("*.mdo", "*.form") if s.fmt == "edt" else ("*.xml",)):
+            if g not in globs:
+                globs.append(g)
     rows: list[dict] = []
     truncated = False
-    for s in srcs:
-        globs = ("*.mdo", "*.form") if s.fmt == "edt" else ("*.xml",)
-        for glob in globs:
-            _engine, it = search.stream(
-                ws, pattern, sources=[s], kinds=None, glob=glob, regex=True,
-                max_hits=max_results + 1,
-            )
-            for abs_path, line_no, text in it:
-                src_name, rel = ws.source_of_path(Path(abs_path))
-                owner = _meta_owner(rel)
-                if owner is None:
-                    continue
-                if len(rows) >= max_results:
-                    truncated = True
-                    break
-                rows.append({
-                    "source": src_name,
-                    "object": owner,
-                    "artifact": artifact_of(rel),
-                    "path": rel,
-                    "line": line_no,
-                    "text": text.strip()[:200],
-                })
-            if truncated:
-                break
-        if truncated:
+    _engine, it = search.stream(
+        ws, pattern, sources=srcs, kinds=None, glob=globs, regex=True,
+        max_hits=max_results + 1,
+    )
+    for abs_path, line_no, text in it:
+        src_name, rel = ws.source_of_path(Path(abs_path))
+        owner = _meta_owner(rel)
+        if owner is None:
+            continue
+        if len(rows) >= max_results:
+            truncated = True
             break
+        rows.append({
+            "source": src_name,
+            "object": owner,
+            "artifact": artifact_of(rel),
+            "path": rel,
+            "line": line_no,
+            # 120 симв. хватает на строку объявления типа; полный контекст — read_file по path
+            "text": text.strip()[:120],
+        })
     return {"type": f"{kind}.{name}", "match_count": len(rows), "truncated": truncated,
             "usages": rows}
 
@@ -453,6 +454,63 @@ def find_callers(
     }
 
 
+def find_callers_batch(
+    ws: Workspace, names: list[str], *, hints: dict[str, str] | None = None,
+    max_per_name: int = 8, source: str = "",
+) -> dict[str, list[dict]]:
+    """Callers для НЕСКОЛЬКИХ рутин за ОДИН текстовый скан (имена через альтернацию).
+
+    Раньше review_set/call_graph звали find_callers на каждое имя — это N полных проходов по
+    конфигурации (на УТ десятки секунд). Здесь скан один, а каждый файл-кандидат парсится один
+    раз (кэш по mtime) и вызовы раскладываются по запрошенным именам. Семантика строк —
+    как у find_callers (объявления/комментарии исключены парсером, hint сужает
+    квалифицированные вызовы)."""
+    out: dict[str, list[dict]] = {n: [] for n in names}
+    if not names:
+        return out
+    srcs, err = ws.resolve_sources(source)
+    if err:
+        return out
+    hints = {k.lower(): (v or "").lower() for k, v in (hints or {}).items()}
+    wanted = {n.lower(): n for n in names}
+    alternation = "|".join(sorted((re.escape(n) for n in names), key=len, reverse=True))
+    files, _trunc = _candidate_files(ws, rf"\b(?:{alternation})\s*\(", srcs, None)
+    for path in files:
+        routines = routines_of(path)
+        src_name, rel = ws.source_of_path(path)
+        src = next((s for s in ws.sources if s.name == src_name), None)
+        descr = describe_bsl_path(src, rel) if src else {"module": "?", "object": "?"}
+        obj_low = descr["object"].lower()
+        local_names = {r.name.lower() for r in routines}
+        for rt in routines:
+            rt_low = rt.name.lower()
+            for call in rt.calls:
+                target = wanted.get(call.method.lower())
+                if target is None:
+                    continue
+                low = target.lower()
+                if rt_low == low:
+                    continue  # своё же тело/объявление — не место вызова
+                rows = out[target]
+                if len(rows) >= max_per_name:
+                    continue
+                hint = hints.get(low, "")
+                if hint:
+                    q = (call.qualifier or "").lower()
+                    if not (q == hint or (call.qualifier is None and hint in obj_low)):
+                        continue
+                rows.append({
+                    "source": src_name,
+                    "path": rel,
+                    **{k: v for k, v in descr.items() if k in ("object", "module")},
+                    "routine": rt.name,
+                    "routine_lines": [rt.start_line, rt.end_line],
+                    "qualifier": call.qualifier,
+                    "local_target": call.qualifier is None and low in local_names,
+                })
+    return out
+
+
 def find_declarations(
     ws: Workspace, routine_name: str, *, exported_only: bool = False, max_results: int = 50,
     source: str = "",
@@ -493,12 +551,13 @@ def call_graph(
     for _ in range(depth):
         level_rows: list[dict] = []
         next_names: dict[str, str] = {}
-        for low, display in sorted(current.items()):
-            if low in visited:
-                continue
-            visited.add(low)
-            res = find_callers(ws, display, max_results=max_per_level, source=source)
-            for row in res.get("callers", []):
+        # Один текстовый скан на весь уровень (было: по одному на каждое имя — на большой
+        # конфигурации это десятки секунд на глубину 2+).
+        todo = [display for low, display in sorted(current.items()) if low not in visited]
+        visited.update(d.lower() for d in todo)
+        batch = find_callers_batch(ws, todo, max_per_name=max_per_level, source=source)
+        for display in todo:
+            for row in batch.get(display, []):
                 key = f"{row['path']}::{row['routine']}"
                 if key in visited:
                     continue

@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 
 from ..chunking import classify_entry_point
@@ -47,9 +50,14 @@ def _git(args: list[str], cwd: Path) -> tuple[int, str]:
     return proc.returncode, proc.stdout if proc.returncode == 0 else (proc.stderr or proc.stdout)
 
 
+@lru_cache(maxsize=64)
 def _repo_root(path: Path) -> tuple[Path | None, str]:
     """(git toplevel, "") при успехе; (None, <сообщение git>) иначе. Ищет .git вверх по
-    дереву от path, поэтому источник в подпапке (…/conf/src) с .git уровнем выше — корректно."""
+    дереву от path, поэтому источник в подпапке (…/conf/src) с .git уровнем выше — корректно.
+
+    Кэш по пути: у воркспейса 5+ источников обычно в ОДНОМ репозитории, а каждый вызов git на
+    Windows — сотни миллисекунд; без кэша это лишний git-процесс на каждый источник на каждый
+    вызов тула (changed_objects/review_set)."""
     code, out = _git(["rev-parse", "--show-toplevel"], path)
     if code == 0 and out.strip():
         return Path(out.strip()), ""
@@ -96,7 +104,14 @@ def _status_files(repo: Path) -> tuple[list[tuple[str, str]], str | None]:
 
 
 def _diff_files(repo: Path, ref: str) -> tuple[list[tuple[str, str]], str | None]:
-    code, out = _git(["diff", "--name-status", "--find-renames", ref, "--", "."], repo)
+    # Обход untracked дороже самого диффа (на УТ ~1.4 с против ~0.4 с) и от него не зависит,
+    # поэтому обе команды git идут параллельно: стена = максимум, а не сумма.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_diff = pool.submit(
+            _git, ["diff", "--name-status", "--find-renames", ref, "--", "."], repo)
+        fut_new = pool.submit(_git, ["ls-files", "--others", "--exclude-standard"], repo)
+        code, out = fut_diff.result()
+        code2, out2 = fut_new.result()
     if code != 0:
         return [], out.strip()
     rows: list[tuple[str, str]] = []
@@ -104,10 +119,29 @@ def _diff_files(repo: Path, ref: str) -> tuple[list[tuple[str, str]], str | None
         parts = line.split("\t")
         if len(parts) >= 2:
             rows.append((parts[0][:1], parts[-1].strip()))
-    code2, out2 = _git(["ls-files", "--others", "--exclude-standard"], repo)
     if code2 == 0:
         rows.extend(("??", p.strip()) for p in out2.splitlines() if p.strip())
     return rows, None
+
+
+_FILE_LIST_TTL = 10.0  # с: агент часто зовёт changed_objects и review_set подряд
+_FILE_LISTS: dict[tuple[str, str], tuple[float, list[tuple[str, str]], str | None]] = {}
+
+
+def _file_list(repo: Path, ref: str) -> tuple[list[tuple[str, str]], str | None]:
+    """git-список изменённых файлов с коротким TTL-кэшем.
+
+    Один и тот же набор нужен и changed_objects, и review_set (и агент обычно вызывает их
+    подряд) — а git diff + обход untracked на УТ это ~1.8 с. Кэш живёт секунды, поэтому
+    свежесть рабочей копии практически не страдает."""
+    key = (str(repo), ref)
+    now = time.monotonic()
+    hit = _FILE_LISTS.get(key)
+    if hit and now - hit[0] < _FILE_LIST_TTL:
+        return hit[1], hit[2]
+    files, err = _diff_files(repo, ref) if ref else _status_files(repo)
+    _FILE_LISTS[key] = (now, files, err)
+    return files, err
 
 
 _artifact = code_intel.artifact_of
@@ -120,7 +154,7 @@ def _map_changes(ws: Workspace, sources: list[LiteSource], ref: str):
     rows: list[tuple[LiteSource, Path, str, str]] = []
     wanted = {s.name for s in sources}
     for repo, _repo_sources in by_root.items():
-        files, err = _diff_files(repo, ref) if ref else _status_files(repo)
+        files, err = _file_list(repo, ref)
         repos_info.append({"repo": str(repo), "branch": _branch(repo),
                            **({"error": err} if err else {"files": len(files)})})
         if err:
@@ -146,6 +180,18 @@ def changed_objects(ws: Workspace, ref: str = "", source: str = "") -> dict:
     if err:
         return {"error": err}
     rows, repos_info = _map_changes(ws, sources, ref)
+    objects = _group_objects(rows)
+    return {
+        "ref": ref or "(незакоммиченные изменения)",
+        "repos": repos_info,
+        "object_count": len(objects),
+        "objects": objects,
+    }
+
+
+def _group_objects(rows: list[tuple[LiteSource, Path, str, str]]) -> list[dict]:
+    """Изменённые файлы -> объекты метаданных. Общая часть changed_objects и review_set,
+    чтобы review_set не повторял весь git-проход второй раз (на УТ это ~1.8 с впустую)."""
     grouped: dict[tuple[str, str], dict] = {}
     for src, _abs_path, srel, status in rows:
         descr = code_intel.describe_bsl_path(src, srel)
@@ -156,13 +202,7 @@ def changed_objects(ws: Workspace, ref: str = "", source: str = "") -> dict:
         })
         g["changes"].append({"path": srel, "status": status, "artifact": _artifact(srel),
                              "module": descr["module"] if srel.endswith(".bsl") else None})
-    objects = sorted(grouped.values(), key=lambda g: (g["source"], g["object"]))
-    return {
-        "ref": ref or "(незакоммиченные изменения)",
-        "repos": repos_info,
-        "object_count": len(objects),
-        "objects": objects,
-    }
+    return sorted(grouped.values(), key=lambda g: (g["source"], g["object"]))
 
 
 def _touched_ranges(repo: Path, rel: str, ref: str) -> list[tuple[int, int]] | None:
@@ -191,7 +231,7 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
     if err:
         return {"error": err}
     rows, repos_info = _map_changes(ws, sources, ref)
-    changed = changed_objects(ws, ref, source)
+    changed_list = _group_objects(rows)  # из своих же rows — без второго git-прохода
 
     all_overrides = code_intel.find_overrides(ws).get("overrides", [])
     by_target: dict[str, list[dict]] = {}
@@ -200,8 +240,10 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
         if target:
             by_target.setdefault(target, []).append(o)
 
+    # Проход 1: какие рутины затронуты (без поиска вызывающих).
     routines: list[dict] = []
     truncated = False
+    hints: dict[str, str] = {}
     for src, abs_path, srel, status in rows:
         if not srel.endswith(".bsl"):
             continue
@@ -222,8 +264,8 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
                 truncated = True
                 break
             hint = descr["object"].partition(".")[2] if descr["kind"] == "CommonModule" else ""
-            callers = code_intel.find_callers(
-                ws, rt.name, object_hint=hint, max_results=max_callers)
+            if hint:
+                hints.setdefault(rt.name, hint)
             routines.append({
                 "source": src.name,
                 "object": descr["object"],
@@ -233,8 +275,6 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
                 "export": rt.export,
                 "entry_point": classify_entry_point(rt.name),
                 "status": status,
-                "callers": callers.get("callers", []),
-                "callers_truncated": callers.get("truncated", False),
                 "overridden_by": [
                     {k: o.get(k) for k in ("source", "object", "routine", "mode")}
                     for o in by_target.get(rt.name.lower(), [])
@@ -243,10 +283,22 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
             })
         if truncated:
             break
+
+    # Проход 2: вызывающие для ВСЕХ затронутых рутин одним текстовым сканом (было: скан на
+    # каждую рутину — на УТ это десятки секунд на один review_set).
+    batch = code_intel.find_callers_batch(
+        ws, sorted({r["routine"] for r in routines}), hints=hints,
+        max_per_name=max_callers, source=source,
+    )
+    for row in routines:
+        found = batch.get(row["routine"], [])
+        row["callers"] = found
+        row["callers_truncated"] = len(found) >= max_callers
+
     return {
         "ref": ref or "(незакоммиченные изменения)",
         "repos": repos_info,
-        "changed_objects": changed.get("objects", []),
+        "changed_objects": changed_list,
         "routine_count": len(routines),
         "routines_truncated": truncated,
         "routines": routines,
