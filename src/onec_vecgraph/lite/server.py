@@ -315,7 +315,45 @@ def overview(workspace: str = "") -> dict:
             for s in ws.sources
         ],
         "resolution_order": [s.name for s in ws.sources],
+        **({"unattached_sources": unattached,
+            "warning": "Рядом с рабочей копией есть проекты 1С, НЕ подключённые к воркспейсу — "
+                       "их код и изменения не попадают ни в один ответ (включая ревью). "
+                       "Добавьте пути в «Корни расширений» в админке (/admin)."}
+           if (unattached := _unattached_projects(ws)) else {}),
     }
+
+
+def _unattached_projects(ws: Workspace) -> list[dict]:
+    """Проекты 1С в дереве репозитория, которые НЕ входят в воркспейс.
+
+    Молчаливая слепая зона: расширение лежит рядом с выгруженной конфигурацией, но не указано в
+    ext_roots — его объекты не находятся, а его изменения отфильтровываются в changed_objects/
+    review_set без единого предупреждения (на боевом УТ так пропадало расширение на 689 .bsl)."""
+    known = {str(s.root).lower() for s in ws.sources}
+    out: list[dict] = []
+    try:
+        from . import gitview as _gv
+        roots = list(_gv._repos(ws.sources)[0]) or [ws.root]  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        roots = [ws.root]
+    seen: set[str] = set()
+    for repo in roots:
+        try:
+            candidates = [p for p in repo.iterdir() if p.is_dir() and not p.name.startswith(".")]
+        except OSError:
+            continue
+        for cand in candidates:
+            key = str(cand).lower()
+            if key in known or key in seen:
+                continue
+            seen.add(key)
+            mdo = cand / "src" / "Configuration" / "Configuration.mdo"
+            cfg_xml = cand / "Configuration.xml"
+            if mdo.is_file() or cfg_xml.is_file():
+                bsl = sum(1 for _ in cand.rglob("*.bsl"))
+                out.append({"path": str(cand), "format": "edt" if mdo.is_file() else "configurator",
+                            "bsl_files": bsl})
+    return out
 
 
 @mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
