@@ -103,15 +103,22 @@ def _status_files(repo: Path) -> tuple[list[tuple[str, str]], str | None]:
     return rows, None
 
 
-def _diff_files(repo: Path, ref: str) -> tuple[list[tuple[str, str]], str | None]:
-    # Обход untracked дороже самого диффа (на УТ ~1.4 с против ~0.4 с) и от него не зависит,
-    # поэтому обе команды git идут параллельно: стена = максимум, а не сумма.
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_diff = pool.submit(
-            _git, ["diff", "--name-status", "--find-renames", ref, "--", "."], repo)
-        fut_new = pool.submit(_git, ["ls-files", "--others", "--exclude-standard"], repo)
-        code, out = fut_diff.result()
-        code2, out2 = fut_new.result()
+def _diff_files(repo: Path, ref: str, *, untracked: bool = False) -> tuple[list[tuple[str, str]], str | None]:
+    """Изменения против ref. untracked=True добавляет неотслеживаемые файлы.
+
+    Обход untracked стоит дороже самого диффа (на УТ ~1.4 с против ~0.4 с) и для вопроса
+    «что изменилось относительно ref» обычно не нужен, поэтому по умолчанию выключен; когда
+    он запрошен — идёт параллельно диффу (стена = максимум, а не сумма)."""
+    if not untracked:
+        code, out = _git(["diff", "--name-status", "--find-renames", ref, "--", "."], repo)
+        code2, out2 = 1, ""
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_diff = pool.submit(
+                _git, ["diff", "--name-status", "--find-renames", ref, "--", "."], repo)
+            fut_new = pool.submit(_git, ["ls-files", "--others", "--exclude-standard"], repo)
+            code, out = fut_diff.result()
+            code2, out2 = fut_new.result()
     if code != 0:
         return [], out.strip()
     rows: list[tuple[str, str]] = []
@@ -124,22 +131,23 @@ def _diff_files(repo: Path, ref: str) -> tuple[list[tuple[str, str]], str | None
     return rows, None
 
 
-_FILE_LIST_TTL = 10.0  # с: агент часто зовёт changed_objects и review_set подряд
-_FILE_LISTS: dict[tuple[str, str], tuple[float, list[tuple[str, str]], str | None]] = {}
+_FILE_LIST_TTL = 60.0  # с: агент часто зовёт changed_objects и review_set подряд
+_FILE_LISTS: dict[tuple[str, str, bool], tuple[float, list[tuple[str, str]], str | None]] = {}
 
 
-def _file_list(repo: Path, ref: str) -> tuple[list[tuple[str, str]], str | None]:
+def _file_list(repo: Path, ref: str, *, untracked: bool = False) -> tuple[list[tuple[str, str]], str | None]:
     """git-список изменённых файлов с коротким TTL-кэшем.
 
     Один и тот же набор нужен и changed_objects, и review_set (и агент обычно вызывает их
     подряд) — а git diff + обход untracked на УТ это ~1.8 с. Кэш живёт секунды, поэтому
     свежесть рабочей копии практически не страдает."""
-    key = (str(repo), ref)
+    key = (str(repo), ref, untracked)
     now = time.monotonic()
     hit = _FILE_LISTS.get(key)
     if hit and now - hit[0] < _FILE_LIST_TTL:
         return hit[1], hit[2]
-    files, err = _diff_files(repo, ref) if ref else _status_files(repo)
+    # ref пуст -> git status --porcelain и так включает untracked, доп. обход не нужен
+    files, err = _diff_files(repo, ref, untracked=untracked) if ref else _status_files(repo)
     _FILE_LISTS[key] = (now, files, err)
     return files, err
 
@@ -147,14 +155,15 @@ def _file_list(repo: Path, ref: str) -> tuple[list[tuple[str, str]], str | None]
 _artifact = code_intel.artifact_of
 
 
-def _map_changes(ws: Workspace, sources: list[LiteSource], ref: str):
+def _map_changes(ws: Workspace, sources: list[LiteSource], ref: str,
+                 *, untracked: bool = False):
     """Yield (source, abs_path, source-relative path, status) for files inside kind folders."""
     by_root, missing = _repos(sources)
     repos_info: list[dict] = list(missing)
     rows: list[tuple[LiteSource, Path, str, str]] = []
     wanted = {s.name for s in sources}
     for repo, _repo_sources in by_root.items():
-        files, err = _file_list(repo, ref)
+        files, err = _file_list(repo, ref, untracked=untracked)
         repos_info.append({"repo": str(repo), "branch": _branch(repo),
                            **({"error": err} if err else {"files": len(files)})})
         if err:
@@ -171,15 +180,19 @@ def _map_changes(ws: Workspace, sources: list[LiteSource], ref: str):
     return rows, repos_info
 
 
-def changed_objects(ws: Workspace, ref: str = "", source: str = "") -> dict:
+def changed_objects(ws: Workspace, ref: str = "", source: str = "",
+                    include_untracked: bool = True) -> dict:
     """Изменённые объекты рабочей копии: git status (или diff против ref) → объекты.
 
-    ref пуст — незакоммиченные изменения (staged+unstaged+untracked); иначе — против
-    ref (ветка/коммит/HEAD~1), плюс текущие untracked-файлы."""
+    ref пуст — незакоммиченные изменения (staged+unstaged+untracked, они уже в git status);
+    иначе — против ref (ветка/коммит/HEAD~1) ПЛЮС неотслеживаемые файлы. Обход untracked —
+    отдельный проход по дереву (на большой выгрузке ~1.4 с), но без него из ревью молча
+    исчезают только что созданные модули, поэтому по умолчанию он включён;
+    include_untracked=False убирает его, когда важна скорость, а не полнота."""
     sources, err = ws.resolve_sources(source)
     if err:
         return {"error": err}
-    rows, repos_info = _map_changes(ws, sources, ref)
+    rows, repos_info = _map_changes(ws, sources, ref, untracked=include_untracked)
     objects = _group_objects(rows)
     return {
         "ref": ref or "(незакоммиченные изменения)",
@@ -205,20 +218,33 @@ def _group_objects(rows: list[tuple[LiteSource, Path, str, str]]) -> list[dict]:
     return sorted(grouped.values(), key=lambda g: (g["source"], g["object"]))
 
 
-def _touched_ranges(repo: Path, rel: str, ref: str) -> list[tuple[int, int]] | None:
-    """New-side line ranges of the file's diff; None когда дифф недоступен (untracked)."""
-    args = ["diff", "-U0", ref or "HEAD", "--", rel]
-    code, out = _git(args, repo)
+_DIFF_HEAD_RE = re.compile(r'^\+\+\+ (?:b/)?(.+)$')
+
+
+def _touched_ranges_bulk(repo: Path, ref: str) -> dict[str, list[tuple[int, int]]] | None:
+    """{repo-relative путь: диапазоны изменённых строк} ОДНИМ `git diff -U0` на весь набор.
+
+    Раньше review_set делал отдельный git-процесс на каждый изменённый файл (13 файлов ≈ 0.9 с
+    только на запуск процессов); один общий дифф отдаёт то же за ~0.45 с."""
+    code, out = _git(["diff", "-U0", ref or "HEAD", "--", "."], repo)
     if code != 0:
         return None
-    ranges: list[tuple[int, int]] = []
+    per_file: dict[str, list[tuple[int, int]]] = {}
+    current: str | None = None
     for line in out.splitlines():
+        head = _DIFF_HEAD_RE.match(line)
+        if head:
+            path = head.group(1).strip().strip('"')
+            current = None if path == "/dev/null" else path
+            if current:
+                per_file.setdefault(current, [])
+            continue
         m = _HUNK_RE.match(line)
-        if m:
+        if m and current:
             start = int(m.group(1))
             count = int(m.group(2)) if m.group(2) is not None else 1
-            ranges.append((start, start + max(count, 1) - 1))
-    return ranges
+            per_file[current].append((start, start + max(count, 1) - 1))
+    return per_file
 
 
 def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str = "") -> dict:
@@ -233,7 +259,10 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
     rows, repos_info = _map_changes(ws, sources, ref)
     changed_list = _group_objects(rows)  # из своих же rows — без второго git-прохода
 
-    all_overrides = code_intel.find_overrides(ws).get("overrides", [])
+    # Полный детерминированный индекс переопределений (TTL-кэш): раньше здесь был скан с
+    # обрезкой по 300 файлам в недетерминированном порядке — переопределения изменённых
+    # рутин могли молча не попасть в ревью-набор.
+    all_overrides = code_intel.override_index(ws)
     by_target: dict[str, list[dict]] = {}
     for o in all_overrides:
         target = (o.get("target") or "").lower()
@@ -244,6 +273,7 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
     routines: list[dict] = []
     truncated = False
     hints: dict[str, str] = {}
+    bulk_ranges: dict[Path, dict[str, list[tuple[int, int]]] | None] = {}
     for src, abs_path, srel, status in rows:
         if not srel.endswith(".bsl"):
             continue
@@ -251,7 +281,10 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 8, source: str =
         if repo is None:
             continue
         rel_in_repo = str(abs_path.relative_to(repo)).replace("\\", "/")
-        ranges = None if status == "??" else _touched_ranges(repo, rel_in_repo, ref)
+        if repo not in bulk_ranges:
+            bulk_ranges[repo] = _touched_ranges_bulk(repo, ref)
+        per_file = bulk_ranges[repo]
+        ranges = None if status == "??" or per_file is None else per_file.get(rel_in_repo, [])
         parsed = code_intel.routines_of(abs_path)
         if ranges is None:
             touched = list(parsed)  # новый файл: затронуто всё

@@ -728,12 +728,15 @@ def call_graph(routine_name: str, depth: int = 2, max_per_level: int = 40,
 
 
 @mcp.tool()
-def find_overrides(kind: str = "", name: str = "", method: str = "", source: str = "", workspace: str = "") -> dict:
+def find_overrides(kind: str = "", name: str = "", method: str = "", source: str = "",
+                   max_results: int = 100, offset: int = 0, workspace: str = "") -> dict:
     """Переопределения расширений (&Вместо/&Перед/&После/&ИзменениеИКонтроль) с целями.
 
-    Фильтры: kind+name — заимствованный объект; method — базовый метод; source — расширение."""
+    Фильтры: kind+name — заимствованный объект; method — базовый метод; source — расширение.
+    override_count — всего найдено (полный детерминированный счёт), отдаётся окно
+    offset..offset+max_results; truncated=true означает «есть ещё», доборка — увеличить offset."""
     return code_intel.find_overrides(_ws(workspace), kind=kind, name=name, method=method,
-                                     source=source)
+                                     source=source, max_results=max_results, offset=offset)
 
 
 @mcp.tool()
@@ -787,12 +790,16 @@ def find_type_usages(kind: str, name: str, max_results: int = 100, source: str =
 # --------------------------------------------------------------------------- #
 
 @mcp.tool()
-def changed_objects(ref: str = "", source: str = "", workspace: str = "") -> dict:
+def changed_objects(ref: str = "", source: str = "", include_untracked: bool = True,
+                    workspace: str = "") -> dict:
     """Что изменено в рабочей копии: git status (ref пуст) или diff против ref
     (ветка/коммит/'HEAD~1'), сгруппировано по объектам метаданных.
 
-    У каждого изменения — файл, git-статус и вид артефакта (module/meta/form_layout)."""
-    return gitview.changed_objects(_ws(workspace), ref, source)
+    У каждого изменения — файл, git-статус и вид артефакта (module/meta/form_layout).
+    include_untracked=False убирает обход неотслеживаемых файлов (он дороже самого диффа) —
+    быстрее, но новые, ещё не добавленные в git модули в ответ не попадут."""
+    return gitview.changed_objects(_ws(workspace), ref, source,
+                                   include_untracked=include_untracked)
 
 
 @mcp.tool()

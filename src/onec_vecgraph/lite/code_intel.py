@@ -9,6 +9,7 @@ annotations, entry points — instead of raw text lines. No Neo4j, no embeddings
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 from ..bsl.parser import Routine, parse_module
@@ -24,8 +25,13 @@ _KW = r"(?:Процедура|Функция|Procedure|Function)"
 # The name index for qualifier resolution lives in Workspace.name_index(): configuration
 # names are NOT unique across repositories, so a module-level cache would collide.
 _MODULES: dict[str, tuple[float, list[Routine]]] = {}
+# Границы кэша: в HTTP-сервере на несколько воркспейсов он иначе растёт без предела (сотни
+# тысяч рутин по 15k файлов на конфигурацию). Вытесняем самые старые вставки (FIFO ≈ LRU для
+# обхода файлов), сохраняя дешёвую проверку свежести по mtime.
+_MODULES_MAX = 8000
 
-_MAX_CANDIDATE_FILES = 300  # cap on files re-parsed per callers/overrides query
+_MAX_CANDIDATE_FILES = 300  # cap on files re-parsed per callers query (быстрый режим)
+_COMPLETE_MAX_HITS = 200_000  # предохранитель для complete-сканов (полный обход без обрезки)
 
 
 def clear_caches() -> None:
@@ -44,6 +50,9 @@ def routines_of(path: Path) -> list[Routine]:
     if hit and hit[0] == mtime:
         return hit[1]
     routines = parse_module(read_text(path))
+    if len(_MODULES) >= _MODULES_MAX:
+        for old in list(_MODULES)[: _MODULES_MAX // 4]:  # чистим пачкой, а не по одному
+            _MODULES.pop(old, None)
     _MODULES[key] = (mtime, routines)
     return routines
 
@@ -365,11 +374,18 @@ def find_callees(
 
 def _candidate_files(
     ws: Workspace, pattern: str, sources: list[LiteSource], kinds: set[str] | None,
-    cap: int = _MAX_CANDIDATE_FILES,
+    cap: int = _MAX_CANDIDATE_FILES, complete: bool = False,
 ) -> tuple[list[Path], bool]:
-    """Distinct files with a text-level match, in stream order; (files, truncated)."""
+    """Distinct files with a text-level match; (files, truncated).
+
+    complete=False — поток rg с ранним выходом по cap (быстро, но порядок обхода у rg
+    параллельный, поэтому набор при обрезке НЕ детерминирован). complete=True — поток
+    вычитывается до конца и файлы сортируются: ответ воспроизводим и полон. Для сканов, чей
+    результат агент считает исчерпывающим (переопределения расширений), обязателен режим
+    complete — иначе одинаковый запрос даёт разные ответы."""
     _engine, it = search.stream(
-        ws, pattern, sources=sources, kinds=kinds, regex=True, max_hits=cap * 40,
+        ws, pattern, sources=sources, kinds=kinds, regex=True,
+        max_hits=(_COMPLETE_MAX_HITS if complete else cap * 40),
     )
     files: list[Path] = []
     seen: set[str] = set()
@@ -379,9 +395,11 @@ def _candidate_files(
             continue
         seen.add(abs_path)
         files.append(Path(abs_path))
-        if len(files) >= cap:
+        if not complete and len(files) >= cap:
             truncated = True
             break
+    if complete:
+        files.sort()
     return files, truncated
 
 
@@ -404,6 +422,27 @@ def find_callers(
     srcs, err = ws.resolve_sources(source)
     if err:
         return {"error": err}
+    # Индексный путь (если индекс символов готов): полный счёт мест вызова без обрезки по
+    # файлам-кандидатам и без текстового скана. kinds сужают корпус только в скан-режиме.
+    if not kinds:
+        indexed = _index_callers(ws, [routine_name], max_per_name=max_results, source=source)
+        if indexed is not None:
+            rows = indexed.get(routine_name, [])
+            hint_low = object_hint.lower()
+            if hint_low:
+                rows = [r for r in rows
+                        if (r.get("qualifier") or "").lower() == hint_low
+                        or (r.get("qualifier") is None
+                            and hint_low in (r.get("object") or "").lower())]
+            total = _index_call_total(ws, routine_name)
+            return {
+                "routine": routine_name,
+                "match_count": len(rows),
+                "call_sites_total": total if not hint_low else None,
+                "truncated": bool(total and len(rows) < total and not hint_low),
+                "engine": "index",
+                "callers": rows,
+            }
     kindset = set(kinds) if kinds else None
     pattern = rf"\b{re.escape(routine_name)}\s*\("
     files, files_truncated = _candidate_files(ws, pattern, srcs, kindset)
@@ -436,6 +475,7 @@ def find_callers(
                     "routine": rt.name,
                     "routine_lines": [rt.start_line, rt.end_line],
                     "qualifier": call.qualifier,
+                    "call_line": call.line or None,  # точная строка вызова (не только рутина)
                     "local_target": call.qualifier is None
                     and any(r.name.lower() == routine_name.lower() for r in routines),
                 })
@@ -452,6 +492,67 @@ def find_callers(
         "truncated": truncated or files_truncated,
         "callers": rows,
     }
+
+
+def _index_callers(
+    ws: Workspace, names: list[str], *, max_per_name: int, source: str,
+) -> dict[str, list[dict]] | None:
+    """Вызывающие из индекса символов (None — индекса нет, работаем текстовым сканом).
+
+    Импорт fts здесь, а не сверху: fts импортирует code_intel (наполняет индекс тем же
+    разбором), верхний импорт замкнул бы цикл."""
+    try:
+        from . import fts as _fts
+        idx = _fts.index_for(ws)
+        if not idx.has_symbols():
+            return None
+        found = idx.callers_of(names, max_per_name=max_per_name)
+    except Exception:  # noqa: BLE001 — индекс не должен ломать ответ, есть скан-фолбэк
+        return None
+    if source:
+        keep = {s.name for s in ws.resolve_sources(source)[0]}
+        found = {n: [r for r in rows if r.get("source") in keep] for n, rows in found.items()}
+    # Файлы, изменённые после индексации (текущая работа разработчика — их единицы),
+    # перепроверяем живым парсером: строки индекса по ним заменяем на фактические.
+    stale_paths = {
+        r["_abs"] for rows in found.values() for r in rows if r.get("stale") and r.get("_abs")
+    }
+    wanted = {n.lower(): n for n in names}
+    for name, rows in found.items():
+        found[name] = [r for r in rows if not r.get("stale")]
+    for abs_path in stale_paths:
+        path = Path(abs_path)
+        src_name, rel = ws.source_of_path(path)
+        src = next((s for s in ws.sources if s.name == src_name), None)
+        if src is None:
+            continue
+        descr = describe_bsl_path(src, rel)
+        local_names = {r.name.lower() for r in routines_of(path)}
+        for rt in routines_of(path):
+            for call in rt.calls:
+                target = wanted.get(call.method.lower())
+                if target is None or rt.name.lower() == target.lower():
+                    continue
+                if len(found[target]) >= max_per_name:
+                    continue
+                found[target].append({
+                    "source": src_name, "path": rel,
+                    **{k: v for k, v in descr.items() if k in ("object", "module")},
+                    "routine": rt.name, "routine_lines": [rt.start_line, rt.end_line],
+                    "export": rt.export, "qualifier": call.qualifier,
+                    "call_line": call.line or None,
+                    "local_target": call.qualifier is None and target.lower() in local_names,
+                })
+    return found
+
+
+def _index_call_total(ws: Workspace, name: str) -> int | None:
+    """Полное число мест вызова из индекса (для summary-first: «всего N, показано K»)."""
+    try:
+        from . import fts as _fts
+        return _fts.index_for(ws).call_counts([name]).get(name)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def find_callers_batch(
@@ -471,6 +572,11 @@ def find_callers_batch(
     srcs, err = ws.resolve_sources(source)
     if err:
         return out
+    # Есть индекс символов -> отвечаем SQL-выборкой: без текстового скана и без обрезки по
+    # числу файлов-кандидатов (полный счёт). Индекс наполняется тем же обходом, что и FTS.
+    indexed = _index_callers(ws, names, max_per_name=max_per_name, source=source)
+    if indexed is not None:
+        return indexed
     hints = {k.lower(): (v or "").lower() for k, v in (hints or {}).items()}
     wanted = {n.lower(): n for n in names}
     alternation = "|".join(sorted((re.escape(n) for n in names), key=len, reverse=True))
@@ -506,6 +612,7 @@ def find_callers_batch(
                     "routine": rt.name,
                     "routine_lines": [rt.start_line, rt.end_line],
                     "qualifier": call.qualifier,
+                    "call_line": call.line or None,  # точная строка вызова (не только рутина)
                     "local_target": call.qualifier is None and low in local_names,
                 })
     return out
@@ -583,48 +690,90 @@ def call_graph(
 _OVERRIDE_RX = r"^\s*&(Вместо|Перед|После|ИзменениеИКонтроль|Around|Before|After|ChangeAndValidate)\b"
 
 
+_OVERRIDE_INDEX_TTL = 60.0  # с: полный скан переопределений дорог, а меняется он редко
+_OVERRIDE_INDEX: dict[str, tuple[float, list[dict]]] = {}
+
+
+def override_index(ws: Workspace, source: str = "") -> list[dict]:
+    """ВСЕ переопределения расширений — полный детерминированный список, TTL-кэш.
+
+    Раньше каждый вызов делал скан с обрезкой по 300 файлов в порядке потока rg, из-за чего
+    один и тот же запрос давал разное число строк (663/798/802), а review_set строил из этого
+    `overridden_by` — то есть переопределения изменённых рутин могли молча пропасть. Здесь
+    обход полный и отсортированный, поэтому ответ воспроизводим; TTL прячет его стоимость от
+    подряд идущих вызовов (find_overrides + review_set)."""
+    key = f"{str(ws.root).lower()}|{source.lower()}"
+    now = time.monotonic()
+    hit = _OVERRIDE_INDEX.get(key)
+    if hit and now - hit[0] < _OVERRIDE_INDEX_TTL:
+        return hit[1]
+    if source:
+        srcs, err = ws.resolve_sources(source)
+        if err:
+            return []
+    else:
+        srcs = [s for s in ws.sources if s.is_extension]
+    rows: list[dict] = []
+    if srcs:
+        files, _trunc = _candidate_files(ws, _OVERRIDE_RX, srcs, None, complete=True)
+        for path in files:
+            src_name, rel = ws.source_of_path(path)
+            src = next((s for s in ws.sources if s.name == src_name), None)
+            descr = describe_bsl_path(src, rel) if src else {}
+            for rt in routines_of(path):
+                if not rt.override_mode:
+                    continue
+                rows.append({
+                    "source": src_name,
+                    "object": descr.get("object"),
+                    "module": descr.get("module"),
+                    "path": rel,
+                    "routine": rt.name,
+                    "mode": rt.override_mode,
+                    "target": rt.override_target,
+                    "directive": rt.directive,
+                    "lines": [rt.start_line, rt.end_line],
+                })
+    _OVERRIDE_INDEX[key] = (now, rows)
+    return rows
+
+
 def find_overrides(
     ws: Workspace, *, kind: str = "", name: str = "", method: str = "", source: str = "",
+    max_results: int = 100, offset: int = 0,
 ) -> dict:
     """Extension override hooks (&Вместо/&Перед/&После/&ИзменениеИКонтроль) with targets.
 
     Filters: kind+name (заимствованный объект), method (базовый метод), source (расширение).
+    Ответ детерминирован и полон по счёту: `override_count` — всего найдено, отдаётся окно
+    `offset`..`offset+max_results` (докрутить — увеличить offset), поэтому «обрезано» больше
+    не означает «неизвестно сколько».
     """
     if source:
-        srcs, err = ws.resolve_sources(source)
+        _srcs, err = ws.resolve_sources(source)
         if err:
             return {"error": err}
-    else:
-        srcs = [s for s in ws.sources if s.is_extension]
-        if not srcs:
-            return {"overrides": [], "note": "В рабочей копии нет расширений."}
-    files, truncated = _candidate_files(ws, _OVERRIDE_RX, srcs, {kind} if kind else None)
-    rows: list[dict] = []
+    elif not any(s.is_extension for s in ws.sources):
+        return {"override_count": 0, "overrides": [], "note": "В рабочей копии нет расширений."}
     want_obj = f"{kind}.{name}".lower() if kind and name else ""
-    for path in files:
-        src_name, rel = ws.source_of_path(path)
-        src = next((s for s in ws.sources if s.name == src_name), None)
-        descr = describe_bsl_path(src, rel) if src else {}
-        if want_obj and descr.get("object", "").lower() != want_obj:
-            continue
-        for rt in routines_of(path):
-            if not rt.override_mode:
-                continue
-            target = rt.override_target or rt.name
-            if method and method.lower() not in (target.lower(), rt.name.lower()):
-                continue
-            rows.append({
-                "source": src_name,
-                "object": descr.get("object"),
-                "module": descr.get("module"),
-                "path": rel,
-                "routine": rt.name,
-                "mode": rt.override_mode,
-                "target": rt.override_target,
-                "directive": rt.directive,
-                "lines": [rt.start_line, rt.end_line],
-            })
-    return {"override_count": len(rows), "truncated": truncated, "overrides": rows}
+    want_kind = f"{kind}.".lower() if kind and not name else ""
+    method_low = method.lower()
+    rows = [
+        r for r in override_index(ws, source)
+        if (not want_obj or (r.get("object") or "").lower() == want_obj)
+        and (not want_kind or (r.get("object") or "").lower().startswith(want_kind))
+        and (not method_low or method_low in ((r.get("target") or "").lower(),
+                                             (r.get("routine") or "").lower()))
+    ]
+    offset = max(0, offset)
+    window = rows[offset: offset + max(1, max_results)]
+    return {
+        "override_count": len(rows),
+        "returned": len(window),
+        "offset": offset,
+        "truncated": offset + len(window) < len(rows),
+        "overrides": window,
+    }
 
 
 # --------------------------------------------------------------------------- #

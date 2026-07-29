@@ -49,6 +49,7 @@ _KEYWORDS = {
 class Call:
     qualifier: str | None
     method: str
+    line: int = 0  # строка ПЕРВОГО вхождения вызова в модуле (1-based; 0 = неизвестно)
 
 
 @dataclass
@@ -100,7 +101,10 @@ def strip_comments_strings(text: str) -> str:
     return "".join(out)
 
 
-def _find_calls(body: str) -> list[Call]:
+def _find_calls(body: str, body_start_line: int = 0) -> list[Call]:
+    """Вызовы из тела рутины. body_start_line — номер первой строки тела (1-based), чтобы у
+    вызова была абсолютная координата в файле: без неё потребитель (find_callers) может дать
+    только диапазон охватывающей рутины, и агенту приходится дочитывать её целиком."""
     calls: list[Call] = []
     seen: set[tuple[str | None, str]] = set()
     for m in _CALL_RE.finditer(body):
@@ -113,7 +117,8 @@ def _find_calls(body: str) -> list[Call]:
         if key in seen:
             continue
         seen.add(key)
-        calls.append(Call(qualifier=qualifier, method=method))
+        line = body_start_line + body.count("\n", 0, m.start()) if body_start_line else 0
+        calls.append(Call(qualifier=qualifier, method=method, line=line))
     return calls
 
 
@@ -164,7 +169,7 @@ def parse_module(text: str) -> list[Routine]:
             if _END_RE.match(line):
                 current.end_line = idx + 1
                 body = "\n".join(lines[body_start : idx])
-                current.calls = _find_calls(body)
+                current.calls = _find_calls(body, body_start + 1)  # body_start — 0-based индекс
                 routines.append(current)
                 current = None
     return routines

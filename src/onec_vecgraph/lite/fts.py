@@ -36,18 +36,36 @@ from . import admin as lite_admin
 from . import code_intel
 from .workspace import LiteSource, Workspace, read_text
 
-_SCHEMA_VERSION = 2  # v2: title = токены имени (иначе CamelCase-имя не матчится), +display
+_SCHEMA_VERSION = 3  # v3: +symbols/calls (индекс рутин и рёбер вызовов рядом с FTS)
 _REFRESH_TTL = 30.0  # seconds between implicit mtime rescans on search
 _BODY_CAP = 20_000  # per-unit body cap (защита от патологических рутин)
 _CYR = re.compile(r"[а-яё]", re.IGNORECASE)
-_BUILD_LOCK_STALE = 3600.0  # сек: лок сборки старше — осиротел (процесс умер), забираем
+_BUILD_LOCK_STALE = 120.0  # сек без «касания» лока -> процесс-владелец умер, лок забираем
+_LOCK_HEARTBEAT = 20.0     # сек: как часто живая сборка обновляет mtime своего лока
 _BUILD_WAIT = 900.0  # сек: сколько синхронный build() ждёт уже идущую сборку
+
+
+def _touch_build_lock(handle) -> None:
+    """Heartbeat живой сборки: обновляем mtime лока, чтобы её не приняли за осиротевшую.
+
+    Без heartbeat убитый сервер (или упавший процесс) оставлял лок, который блокировал
+    пересборку до истечения таймаута — на практике это выглядело как «индекс не обновляется»."""
+    if not handle:
+        return
+    _fd, lock = handle
+    try:
+        os.utime(lock, None)
+    except OSError:
+        pass
 
 
 def _acquire_build_lock(db_path: Path):
     """Межпроцессный лок сборки FTS: атомарный файл `<db>.building`. Возвращает handle или
     None, если индекс уже строит ДРУГОЙ процесс. Нужен потому, что каталог ~/.onec-lite/fts
-    общий — два сервера (напр. stdio + http) иначе дерутся за один файл БД (блокировки/зависания)."""
+    общий — два сервера (напр. stdio + http) иначе дерутся за один файл БД (блокировки/зависания).
+
+    «Живость» владельца определяется по свежести mtime лока (его обновляет heartbeat сборки),
+    а не по PID: кросс-платформенная проверка живости PID на Windows небезопасна."""
     lock = Path(str(db_path) + ".building")
     lock.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -126,6 +144,27 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
         CREATE INDEX unit_map_path ON unit_map(path);
         CREATE TABLE files(path TEXT PRIMARY KEY, mtime REAL NOT NULL, kind TEXT NOT NULL);
         CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+        -- Индекс рутин и рёбер вызовов: наполняется тем же обходом, что и FTS (модуль уже
+        -- разобран парсером, рёбра достаются бесплатно). Позволяет отвечать на «кто вызывает X»,
+        -- «что переопределено» и графы вызовов SQL-выборкой — без текстового скана конфигурации
+        -- и без обрезки по числу файлов-кандидатов.
+        CREATE TABLE symbols(
+            id INTEGER PRIMARY KEY,
+            path TEXT NOT NULL, source TEXT NOT NULL, object TEXT NOT NULL, module TEXT NOT NULL,
+            name TEXT NOT NULL, name_low TEXT NOT NULL,
+            start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, export INTEGER NOT NULL,
+            override_mode TEXT, override_target TEXT, override_target_low TEXT
+        );
+        CREATE INDEX symbols_name ON symbols(name_low);
+        CREATE INDEX symbols_path ON symbols(path);
+        CREATE INDEX symbols_override ON symbols(override_target_low);
+        CREATE TABLE calls(
+            caller_id INTEGER NOT NULL, method_low TEXT NOT NULL,
+            qualifier TEXT, line INTEGER NOT NULL
+        );
+        CREATE INDEX calls_method ON calls(method_low);
+        CREATE INDEX calls_caller ON calls(caller_id);
         """
     )
     con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
@@ -150,6 +189,32 @@ def _bsl_units(ws: Workspace, src: LiteSource, path: Path) -> list[tuple]:
             rt.name, "routine", src_name, descr.get("object", ""), rel, rt.start_line,
         ))
     return rows
+
+
+def _write_symbols(con: sqlite3.Connection, ws: Workspace, src: LiteSource, path: Path) -> None:
+    """Рутины файла и их вызовы -> symbols/calls (модуль уже разобран кэшем routines_of)."""
+    key = str(path)
+    con.execute("DELETE FROM calls WHERE caller_id IN (SELECT id FROM symbols WHERE path=?)",
+                (key,))
+    con.execute("DELETE FROM symbols WHERE path=?", (key,))
+    src_name, rel = ws.source_of_path(path)
+    descr = code_intel.describe_bsl_path(src, rel)
+    for rt in code_intel.routines_of(path):
+        cur = con.execute(
+            "INSERT INTO symbols(path, source, object, module, name, name_low, start_line,"
+            " end_line, export, override_mode, override_target, override_target_low)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (key, src_name, descr.get("object", ""), descr.get("module", ""), rt.name,
+             rt.name.lower(), rt.start_line, rt.end_line, int(rt.export),
+             rt.override_mode, rt.override_target,
+             (rt.override_target or "").lower() or None),
+        )
+        rid = cur.lastrowid
+        if rt.calls:
+            con.executemany(
+                "INSERT INTO calls(caller_id, method_low, qualifier, line) VALUES(?,?,?,?)",
+                [(rid, c.method.lower(), c.qualifier, c.line or 0) for c in rt.calls],
+            )
 
 
 def _object_units(ws: Workspace, src: LiteSource, ref) -> list[tuple]:
@@ -191,6 +256,8 @@ class FtsIndex:
         self._last_refresh = 0.0
         self._build_lock = threading.Lock()  # CAS флага _building (держится кратко)
         self._building = False                # идёт ли сборка (fg или bg) — единств. писатель
+        self._lock_handle = None              # handle межпроцессного лока (для heartbeat)
+        self._last_beat = 0.0
 
     # -- status -------------------------------------------------------------
 
@@ -294,9 +361,11 @@ class FtsIndex:
             self._last_refresh = time.monotonic()  # строит другой процесс — отступаем по TTL
             return {"status": "building",
                     "note": "Индекс строит другой процесс — пропускаю (общий каталог fts)."}
+        self._lock_handle = lock
         try:
             return self._run_build()
         finally:
+            self._lock_handle = None
             _release_build_lock(lock)
 
     def _run_build(self) -> dict:
@@ -346,8 +415,13 @@ class FtsIndex:
                     if known.get(key) == mtime:
                         continue
                     reindex(p, "bsl", _bsl_units(self.ws, s, p), mtime)
+                    _write_symbols(con, self.ws, s, p)  # рутины+вызовы того же обхода
                     added += 1 if key not in known else 0
                     updated += 1 if key in known else 0
+                    now = time.monotonic()
+                    if now - self._last_beat > _LOCK_HEARTBEAT:
+                        self._last_beat = now
+                        _touch_build_lock(self._lock_handle)  # «я жив» для чужих процессов
                 for ref in self.ws.listing(s, fresh=True):
                     meta_path = ref[1]
                     key = str(meta_path)
@@ -369,6 +443,10 @@ class FtsIndex:
                     con.execute("DELETE FROM units WHERE rowid=?", (rid,))
                 con.execute("DELETE FROM unit_map WHERE path=?", (gone,))
                 con.execute("DELETE FROM files WHERE path=?", (gone,))
+                con.execute(
+                    "DELETE FROM calls WHERE caller_id IN (SELECT id FROM symbols WHERE path=?)",
+                    (gone,))
+                con.execute("DELETE FROM symbols WHERE path=?", (gone,))
                 removed += 1
 
             con.execute(
@@ -462,6 +540,96 @@ class FtsIndex:
                 for r in rows
             ],
         }
+
+
+    # -- symbols/calls: ответы SQL-выборкой вместо текстового скана -------------
+
+    def has_symbols(self) -> bool:
+        """Готов ли индекс символов (сборка завершена и таблица наполнена)."""
+        if self._built_at() is None:
+            return False
+        try:
+            con = _connect(self.path)
+            try:
+                return bool(con.execute("SELECT 1 FROM symbols LIMIT 1").fetchone())
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return False
+
+    def callers_of(self, names: list[str], *, max_per_name: int = 100) -> dict[str, list[dict]]:
+        """Места вызова для набора имён — одной SQL-выборкой по индексу.
+
+        Возвращает ВСЕ найденные вызовы (без обрезки по числу файлов-кандидатов, как в
+        текстовом скане), поэтому счёт полон и воспроизводим. Каждая строка содержит путь,
+        охватывающую рутину и точную строку вызова. Файлы, изменённые после индексации,
+        помечаются `stale=true` — вызывающий может перепроверить их живым парсером."""
+        out: dict[str, list[dict]] = {n: [] for n in names}
+        if not names:
+            return out
+        try:
+            con = _connect(self.path)
+        except sqlite3.Error:
+            return out
+        try:
+            wanted = {n.lower(): n for n in names}
+            marks = ",".join("?" for _ in wanted)
+            rows = con.execute(
+                "SELECT c.method_low, s.path, s.source, s.object, s.module, s.name,"
+                "       s.start_line, s.end_line, s.export, c.qualifier, c.line,"
+                "       (SELECT mtime FROM files WHERE files.path = s.path) AS idx_mtime"
+                f" FROM calls c JOIN symbols s ON s.id = c.caller_id"
+                f" WHERE c.method_low IN ({marks})"
+                " ORDER BY s.object, s.name, c.line",
+                list(wanted),
+            ).fetchall()
+        except sqlite3.Error:
+            return out
+        finally:
+            con.close()
+        for (method_low, path, source, obj, module, rt_name, start, end, export,
+             qualifier, line, idx_mtime) in rows:
+            target = wanted.get(method_low)
+            if target is None or rt_name.lower() == method_low:
+                continue  # своё же объявление — не место вызова
+            bucket = out[target]
+            if len(bucket) >= max_per_name:
+                continue
+            try:
+                stale = idx_mtime is not None and Path(path).stat().st_mtime != idx_mtime
+            except OSError:
+                stale = True
+            _src_name, rel = self.ws.source_of_path(Path(path))
+            bucket.append({
+                "source": source, "path": rel, "object": obj, "module": module,
+                "routine": rt_name, "routine_lines": [start, end], "export": bool(export),
+                "qualifier": qualifier, "call_line": line or None,
+                **({"stale": True, "_abs": path} if stale else {}),
+            })
+        return out
+
+    def call_counts(self, names: list[str]) -> dict[str, int]:
+        """Сколько всего мест вызова у каждого имени (для summary-first ответа)."""
+        if not names:
+            return {}
+        try:
+            con = _connect(self.path)
+        except sqlite3.Error:
+            return {}
+        try:
+            wanted = {n.lower(): n for n in names}
+            marks = ",".join("?" for _ in wanted)
+            rows = con.execute(
+                "SELECT c.method_low, count(*) FROM calls c JOIN symbols s ON s.id = c.caller_id"
+                f" WHERE c.method_low IN ({marks}) AND s.name_low <> c.method_low"
+                " GROUP BY c.method_low",
+                list(wanted),
+            ).fetchall()
+        except sqlite3.Error:
+            return {}
+        finally:
+            con.close()
+        return {wanted[m]: n for m, n in rows if m in wanted}
 
 
 def _fts_query(query: str) -> str:
