@@ -79,8 +79,6 @@ def test_fts_query_builder() -> None:
 def test_build_search_rank_and_freshness(ws: Workspace) -> None:
     idx = fts.index_for(ws)
     assert idx.status()["built"] is False
-    res_before = idx.search("себестоимость")
-    assert "не построен" in res_before["error"]
 
     stats = idx.build()
     assert stats["units_written"] >= 4  # 2 рутины + 2 карточки объектов (+конфигурация?)
@@ -137,6 +135,35 @@ def test_search_auto_refresh_by_ttl(ws: Workspace, monkeypatch: pytest.MonkeyPat
 
     future = time.time() + 5
     os.utime(module, (future, future))
-    monkeypatch.setattr(fts, "_REFRESH_TTL", 0.0)  # каждый поиск дообновляет
-    res = idx.search("СовсемНовая")
-    assert res["match_count"] == 1
+    monkeypatch.setattr(fts, "_REFRESH_TTL", 0.0)  # каждый поиск запускает фоновый рефреш
+    # рефреш теперь неблокирующий (в фоне) — результат появляется в течение пары циклов
+    deadline = time.time() + 5.0
+    matched = 0
+    while time.time() < deadline:
+        matched = idx.search("СовсемНовая").get("match_count", 0)
+        if matched:
+            break
+        time.sleep(0.05)
+    assert matched == 1
+
+
+def test_search_before_build_is_soft_not_ready(ws: Workspace) -> None:
+    """До построения индекса поиск НЕ отдаёт ошибку/пусто, а сообщает ready=False (чтобы
+    вызывающий деградировал на search_code) и запускает фоновую сборку."""
+    idx = fts.index_for(ws)
+    res = idx.search("себестоимость")
+    assert res.get("ready") is False
+    assert "error" not in res and res.get("note")
+
+
+def test_explicit_build_yields_to_running_background(ws: Workspace) -> None:
+    """Пока идёт сборка (флаг _building), синхронный build() не встаёт вторым писателем,
+    а ensure_background не запускает вторую — единственный писатель гарантирован."""
+    idx = fts.index_for(ws)
+    idx._building = True
+    try:
+        assert idx.build().get("status") == "building"
+        assert idx.ensure_background(force=True) is False
+    finally:
+        idx._building = False
+    assert idx.build().get("units_written", 0) >= 1  # после снятия флага сборка снова идёт

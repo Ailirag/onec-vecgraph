@@ -483,6 +483,14 @@ def test_tool_get_object(served: Workspace) -> None:
     assert [a["name"] for a in res["attributes"]] == ["ИНН"]
     assert res["forms"] == [{"name": "ФормаЭлемента", "has_module": True, "has_layout": True}]
     assert {m["module"] for m in res["modules"]} == {"ObjectModule", "ManagerModule"}
+
+
+def test_fts_search_degrades_to_rg_while_unbuilt(served: Workspace) -> None:
+    """Пока FTS-индекс не построен, fts_search не отдаёт ошибку/пусто, а прозрачно
+    возвращает результат search_code (rg/py-фолбэк) с пометкой degraded='fts_index_building'."""
+    res = lite_server.fts_search("ИНН")
+    assert res.get("degraded") == "fts_index_building"
+    assert "fts_note" in res and "error" not in res
     doc = lite_server.get_object("Document", "ЗаказКлиента")
     assert doc["register_records"] == ["AccumulationRegister.ОстаткиТоваров"]
 

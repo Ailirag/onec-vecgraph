@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
 from urllib.parse import quote
 
@@ -142,6 +143,23 @@ def _maybe_update_on_start(name: str, entry: dict) -> None:
                                      name, mode, res.get("output") or res.get("error"))
 
 
+def _fts_autobuild_enabled() -> bool:
+    return os.environ.get("ONEC_LITE_FTS_AUTOBUILD", "").strip().lower() not in (
+        "off", "0", "false", "no")
+
+
+def _maybe_build_fts(ws: Workspace) -> None:
+    """Фоновый прогрев FTS-индекса при загрузке воркспейса (неблокирующе, идемпотентно) —
+    чтобы к первому fts_search индекс был готов или уже строился. Отключить:
+    ONEC_LITE_FTS_AUTOBUILD=off."""
+    if not _fts_autobuild_enabled():
+        return
+    try:
+        fts.index_for(ws).ensure_background(force=True)
+    except Exception:  # noqa: BLE001 — прогрев не должен ронять загрузку воркспейса
+        logging.getLogger(__name__).exception("fts autobuild kick failed")
+
+
 def _header_workspace_names() -> list[str]:
     """HTTP-заголовки с именем воркспейса, в порядке приоритета (env-настраиваемо).
 
@@ -207,7 +225,9 @@ def _ws(workspace: str = "") -> Workspace:
         root = os.environ.get("ONEC_LITE_ROOT", "").strip()
         if root:
             ext = tuple(lite_admin.parse_ext_roots(os.environ.get("ONEC_LITE_EXT_ROOTS", "")))
-            return configure(root, ext, name=name)
+            ws = configure(root, ext, name=name)
+            _maybe_build_fts(ws)
+            return ws
     if entry is None:
         known = ", ".join(sorted(wss)) or "(нет ни одного)"
         raise RuntimeError(
@@ -222,7 +242,9 @@ def _ws(workspace: str = "") -> Workspace:
             f"--workspace {name}`."
         )
     _maybe_update_on_start(name, entry)
-    return configure(root, tuple(entry["ext_roots"]), name=name)
+    ws = configure(root, tuple(entry["ext_roots"]), name=name)
+    _maybe_build_fts(ws)
+    return ws
 
 
 _HELP = platform_help.HelpCatalog()
@@ -586,11 +608,21 @@ def fts_search(query: str, limit: int = 20, unit: str = "", source: str = "", wo
     """Ранжированный поиск (SQLite FTS5, BM25) по рутинам и карточкам объектов:
     CamelCase-подслова, вес имени выше тела, кириллица матчится с усечением окончаний.
 
-    unit: 'routine' | 'object' | пусто (всё). Требует построенного индекса (кнопка в
-    админке или serve-lite --build-fts); свежесть — авто-дообновление по mtime раз в
-    ~30 с, момент построения — в поле built_at. Это лексический ранжированный поиск,
-    не семантика: синонимию без общих слов ловит только большой сервер (векторы)."""
-    return fts.index_for(_ws(workspace)).search(query, limit=limit, unit=unit, source=source)
+    unit: 'routine' | 'object' | пусто (всё). Индекс строится и дообновляется в фоне
+    (прогрев при загрузке воркспейса; для http — prebuild всех воркспейсов на старте;
+    вручную — кнопка в админке / serve-lite --build-fts). Пока индекс ещё не готов, тул НЕ
+    отдаёт пусто/ошибку, а прозрачно возвращает результат search_code (rg) с пометкой
+    degraded='fts_index_building'; свежесть/момент сборки — в built_at. Это лексический
+    ранжированный поиск, не семантика: синонимию без общих слов ловит только большой сервер."""
+    ws = _ws(workspace)
+    res = fts.index_for(ws).search(query, limit=limit, unit=unit, source=source)
+    if res.get("ready") is False and "error" not in res:
+        # индекс ещё строится — деградируем на подстрочный rg, чтобы агент всегда получил ответ
+        fb = search.search_code(ws, query, regex=False, max_results=limit, source=source)
+        fb["degraded"] = "fts_index_building"
+        fb["fts_note"] = res.get("note")
+        return fb
+    return res
 
 
 @mcp.tool()
@@ -1183,8 +1215,31 @@ async def admin_json(request: Request) -> Response:
     return JSONResponse(_snapshot(request.query_params.get("ws", "")))
 
 
+def _prebuild_all_workspaces() -> None:
+    """HTTP shared-сервис: фоново прогреть FTS-индексы всех сконфигурированных воркспейсов,
+    чтобы первый запрос любого tenant'а не упирался в «индекс ещё строится». Один фоновый
+    поток последовательно грузит воркспейсы; сборка каждого идёт в своём потоке (по одному
+    писателю на воркспейс). Отключить: ONEC_LITE_FTS_AUTOBUILD=off."""
+    if not _fts_autobuild_enabled():
+        return
+
+    def _run() -> None:
+        wss, _active = lite_admin.load_workspaces(lite_admin.state_file())
+        names = list(wss)
+        if not names and (os.environ.get("ONEC_LITE_ROOT") or _WORKSPACES):
+            names = [default_workspace_name()]
+        for name in names:
+            try:
+                _ws(name)  # загрузка + update_on_start + _maybe_build_fts (прогрев индекса)
+            except Exception:  # noqa: BLE001 — один плохой воркспейс не срывает прогрев прочих
+                logging.getLogger(__name__).exception("fts prebuild: воркспейс %s", name)
+
+    threading.Thread(target=_run, name="fts-prebuild", daemon=True).start()
+
+
 def run(transport: str = "stdio") -> None:
     if transport == "stdio":
         mcp.run("stdio")
     else:
+        _prebuild_all_workspaces()
         mcp.run("streamable-http")

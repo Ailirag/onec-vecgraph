@@ -9,9 +9,12 @@ alternative («себестоимости» ↔ «Себестоимость» �
 Consistency by design:
   * the DB lives OUTSIDE the working copy (~/.onec-lite/fts/<digest>.db) — a developer's
     `git status` never sees it;
-  * built explicitly (admin button / CLI --build-fts), refreshed incrementally by file
-    mtime; searches auto-refresh at most every _REFRESH_TTL seconds and always report
-    `built_at`, so staleness is bounded and visible, never silent;
+  * built in the background (kicked on workspace load, HTTP prebuild-all, admin button or
+    CLI --build-fts) and refreshed incrementally by file mtime; a single writer at a time
+    (the `_building` flag) never blocks searches; while the first build is in flight
+    `search()` returns `ready=false` so the caller degrades to rg instead of silent
+    emptiness; refresh is kicked at most every _REFRESH_TTL seconds and `built_at` is
+    reported, so staleness is bounded and visible;
   * FTS5 availability is feature-detected — without it the tool degrades to a clear
     message (rg search keeps working).
 """
@@ -20,8 +23,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -144,11 +149,14 @@ class FtsIndex:
         self.ws = ws
         self.path = db_path_for(ws)
         self._last_refresh = 0.0
+        self._build_lock = threading.Lock()  # CAS флага _building (держится кратко)
+        self._building = False                # идёт ли сборка (fg или bg) — единств. писатель
 
     # -- status -------------------------------------------------------------
 
     def status(self) -> dict:
-        out: dict = {"available": fts_available(), "db": str(self.path), "built": False}
+        out: dict = {"available": fts_available(), "db": str(self.path),
+                     "built": False, "building": self._building}
         if not self.path.is_file():
             return out
         try:
@@ -169,10 +177,53 @@ class FtsIndex:
 
     # -- build / refresh ------------------------------------------------------
 
+    def _try_start_build(self, *, force: bool) -> bool:
+        """CAS: занять флаг «строится», если сборка не идёт и (force | истёк TTL).
+        _build_lock держится лишь на время проверки, не на время самой сборки."""
+        with self._build_lock:
+            if self._building:
+                return False
+            if not force and time.monotonic() - self._last_refresh < _REFRESH_TTL:
+                return False
+            self._building = True
+            return True
+
+    def ensure_background(self, *, force: bool = False) -> bool:
+        """Неблокирующе запустить инкрементальную сборку в daemon-потоке (если она не идёт
+        и force|истёк TTL); поиск при этом работает по текущему индексу. Возвращает True,
+        если сборка запущена этим вызовом."""
+        if not fts_available() or not self._try_start_build(force=force):
+            return False
+
+        def _run() -> None:
+            try:
+                self._build_locked()
+            except Exception:  # noqa: BLE001 — фон не должен ронять сервер
+                logging.getLogger(__name__).exception("fts: фоновая сборка упала (%s)", self.path)
+            finally:
+                with self._build_lock:
+                    self._building = False
+
+        threading.Thread(target=_run, name="fts-build", daemon=True).start()
+        return True
+
     def build(self) -> dict:
-        """Incremental build by mtime (first run indexes everything)."""
+        """Синхронная сборка (кнопка админки / --build-fts). Если фоновая сборка уже идёт —
+        не встаём вторым писателем, а сообщаем об этом (единственный писатель = флаг
+        _building)."""
         if not fts_available():
             return {"error": "FTS5 недоступен в этой сборке Python (sqlite3 без fts5)."}
+        if not self._try_start_build(force=True):
+            return {"status": "building", "note": "Сборка индекса уже идёт в фоне; повторите позже."}
+        try:
+            return self._build_locked()
+        finally:
+            with self._build_lock:
+                self._building = False
+
+    def _build_locked(self) -> dict:
+        """Incremental build by mtime (первый прогон индексирует всё). Вызывается только с
+        уже занятым флагом _building — отдельный SQLite-локинг не нужен."""
         t0 = time.monotonic()
         con = _connect(self.path)
         try:
@@ -260,24 +311,40 @@ class FtsIndex:
             **{k: v for k, v in self.status().items() if k in ("units", "files")},
         }
 
-    def _maybe_refresh(self) -> None:
-        # >=: на Windows time.monotonic() тикает ~раз в 15.6 мс — строгое «>» с TTL=0
-        # пропускало обновление, если поиск случался внутри одного кванта таймера.
-        if time.monotonic() - self._last_refresh >= _REFRESH_TTL:
-            self.build()
+    def _built_at(self) -> str | None:
+        """Время последней ЗАВЕРШЁННОЙ сборки (meta.built_at пишется одним коммитом в конце)
+        или None: файла нет / схема устарела / первая сборка ещё не докоммичена."""
+        if not self.path.is_file():
+            return None
+        try:
+            con = _connect(self.path)
+            try:
+                if con.execute("PRAGMA user_version").fetchone()[0] != _SCHEMA_VERSION:
+                    return None
+                row = con.execute("SELECT value FROM meta WHERE key='built_at'").fetchone()
+                return row[0] if row else None
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return None
 
     # -- search ---------------------------------------------------------------
 
     def search(self, query: str, *, limit: int = 20, unit: str = "", source: str = "") -> dict:
         if not fts_available():
-            return {"error": "FTS5 недоступен в этой сборке Python (sqlite3 без fts5)."}
-        if not self.path.is_file():
-            return {"error": "Индекс поиска не построен: кнопка «Построить индекс поиска» "
-                             "в админке или serve-lite --build-fts."}
+            return {"error": "FTS5 недоступен в этой сборке Python (sqlite3 без fts5).",
+                    "fts_available": False, "ready": False}
         match = _fts_query(query)
         if not match:
             return {"error": "Пустой запрос."}
-        self._maybe_refresh()
+        if self._built_at() is None:
+            # индекс ещё не построен/не докоммичен: запускаем фон и честно сообщаем «не готов»,
+            # чтобы вызывающий (fts_search) прозрачно деградировал на rg, а не отдал пусто.
+            self.ensure_background(force=True)
+            return {"query": query, "ready": False, "building": self._building,
+                    "note": "Индекс поиска строится в фоне — используйте search_code или "
+                            "повторите запрос чуть позже."}
+        self.ensure_background()  # неблокирующий инкрементальный рефреш по TTL (в фоне)
         con = _connect(self.path)
         try:
             _ensure_schema(con)
@@ -305,6 +372,7 @@ class FtsIndex:
         return {
             "query": query,
             "match": match,
+            "ready": True,
             "built_at": built_at,
             "match_count": len(rows),
             "results": [
