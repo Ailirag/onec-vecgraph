@@ -32,9 +32,12 @@ INSTRUCTIONS = """onec-lite: навигация по ЖИВОЙ рабочей �
 Словарь: kind — вид метаданных (Catalog, Document, CommonModule, ...); module — псевдоним
 модуля (Module|Object|Manager|RecordSet|Value|Command|Form:<Имя>|<имя файла .bsl>);
 source — имя источника из overview() (пусто = все, расширения раньше базы);
-workspace — имя рабочей копии из list_workspaces() (сервер может держать несколько
-репозиториев 1С; пусто = заголовок запроса X-Workspace/X-Tenant-Id (по http, для
-пер-проектного деления) → дефолт сессии: env ONEC_LITE_WORKSPACE → активный из админки).
+workspace — рабочая копия из list_workspaces() (сервер держит несколько репозиториев 1С).
+Дефолт задаёт ПОДКЛЮЧЕНИЕ: project-scope .mcp.json проекта шлёт заголовок X-Workspace — на
+эту конфигурацию и работай, НЕ указывая workspace. Аргумент workspace=<имя> в вызове передавай
+ТОЛЬКО когда пользователь ЯВНО просит другую конфигурацию (или сравнить с ней) — иначе опускай.
+Полный приоритет: аргумент workspace → заголовок X-Workspace/X-Tenant-Id → env
+ONEC_LITE_WORKSPACE → активный из админки.
 
 Куда идти: обзор -> overview/metrics; структура -> list_objects/get_object;
 зависимости -> get_dependencies (связи объекта) / find_type_usages (где используется тип);
