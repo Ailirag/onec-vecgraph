@@ -788,3 +788,17 @@ def test_get_form_configurator(cfg_ws: Workspace, monkeypatch: pytest.MonkeyPatc
     assert items["Флаг"]["path"] == "Группа"
     fh = res["form_handlers"][0]
     assert fh["event"] == "OnOpen" and fh["handler"] == "ПриОткрытии" and fh["declared"] is True
+
+
+def test_find_callers_keeps_qualified_same_name_call(edt_ws: Workspace) -> None:
+    """Квалифицированный вызов одноимённого метода — РЕАЛЬНОЕ место вызова.
+
+    Идиома 1С: обработчик объекта делегирует одноимённому методу общего модуля
+    (Процедура ПередЗаписью -> РаботаСИНН.ПередЗаписью(...)). Фильтр «своё же объявление»
+    вырезал такие вызовы — на живой УТ так терялось 27 384 места вызова."""
+    res = code_intel.find_callers(edt_ws, "ПроверитьИНН")
+    assert res["match_count"] >= 1
+    # неквалифицированный самовызов (рекурсия) местом вызова не считается
+    self_calls = [c for c in res["callers"]
+                  if c["routine"].lower() == "проверитьинн" and not c.get("qualifier")]
+    assert self_calls == []

@@ -23,7 +23,9 @@ from . import code_intel
 from .workspace import LiteSource, Workspace
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
-_MAX_ROUTINES = 60  # cap on routines expanded with callers in one review_set
+_MAX_ROUTINES = 2000  # предохранитель от патологического диффа; бюджет ответа — max_routines
+# (раньше здесь было 60, и это значение уезжало в поле routine_count — то есть счёт затронутых
+#  рутин был лимитом, а не счётом, и «ранжирование по риску» ранжировало произвольные первые 60)
 
 
 def _git(args: list[str], cwd: Path) -> tuple[int, str]:
@@ -248,7 +250,8 @@ def _touched_ranges_bulk(repo: Path, ref: str) -> dict[str, list[tuple[int, int]
 
 
 def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str = "",
-               detail: bool = False, max_routines: int = 25) -> dict:
+               detail: bool = False, max_routines: int = 25, offset: int = 0,
+               include_untracked: bool = True) -> dict:
     """Ревью-набор: изменённые строки → затронутые рутины → их вызывающие и override-хуки.
 
     Для каждого изменённого .bsl: ханки `git diff -U0` мапятся на текущие рутины файла;
@@ -260,7 +263,9 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str =
     sources, err = ws.resolve_sources(source)
     if err:
         return {"error": err}
-    rows, repos_info = _map_changes(ws, sources, ref)
+    # untracked включаем так же, как в changed_objects: иначе только что созданные модули
+    # молча не попадают в ревью-набор (докстринг обещает обратное).
+    rows, repos_info = _map_changes(ws, sources, ref, untracked=include_untracked)
     changed_list = _group_objects(rows)  # из своих же rows — без второго git-прохода
 
     # Полный детерминированный индекс переопределений (TTL-кэш): раньше здесь был скан с
@@ -298,7 +303,7 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str =
         descr = code_intel.describe_bsl_path(src, srel)
         for rt in touched:
             if len(routines) >= _MAX_ROUTINES:
-                truncated = True
+                truncated = True  # предохранитель от патологического диффа, не бюджет ответа
                 break
             hint = descr["object"].partition(".")[2] if descr["kind"] == "CommonModule" else ""
             if hint:
@@ -351,7 +356,10 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str =
         def risk(r: dict) -> tuple:
             return (bool(r.get("export")), bool(r.get("entry_point")),
                     len(r.get("overridden_by") or []), r.get("callers_count", 0))
-        routines = sorted(routines, key=risk, reverse=True)[:max_routines]
+        # Ранжируем ВЕСЬ набор (не первые N) и отдаём окно: доборка — увеличить offset.
+        ranked = sorted(routines, key=risk, reverse=True)
+        start = max(0, offset)
+        routines = ranked[start: start + max(1, max_routines)]
     if not detail:
         for r in routines:  # переопределений у популярных хуков бывают десятки
             ov = r.get("overridden_by") or []
@@ -369,9 +377,10 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str =
         "ref": ref or "(незакоммиченные изменения)",
         "repos": repos_info,
         "changed_objects": changed_list,
-        "routine_count": routines_total,
+        "routine_count": routines_total,      # СКОЛЬКО затронуто всего (не лимит)
         "routines_returned": len(routines),
+        "offset": max(0, offset),
         "routines_ranked_by_risk": routines_total > len(routines),
-        "routines_truncated": truncated,
+        "routines_truncated": truncated,      # сработал предохранитель _MAX_ROUTINES
         "routines": routines,
     }

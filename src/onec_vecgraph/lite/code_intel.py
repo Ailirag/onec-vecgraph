@@ -465,10 +465,12 @@ def find_callers(
         descr = describe_bsl_path(src, rel) if src else {"module": "?", "object": "?"}
         in_hint_object = bool(hint) and hint in descr["object"].lower()
         for rt in routines:
-            if rt.name.lower() == routine_name.lower():
-                continue  # its own declaration/body is not a call site
             for call in rt.calls:
                 if call.method.lower() != routine_name.lower():
+                    continue
+                # Пропускаем только НЕквалифицированный самовызов; `Модуль.ОдноимённыйМетод()`
+                # — реальное место вызова (штатная делегация обработчика в общий модуль).
+                if call.qualifier is None and rt.name.lower() == routine_name.lower():
                     continue
                 if hint:
                     q = (call.qualifier or "").lower()
@@ -540,8 +542,10 @@ def _index_callers(
         for rt in routines_of(path):
             for call in rt.calls:
                 target = wanted.get(call.method.lower())
-                if target is None or rt.name.lower() == target.lower():
+                if target is None:
                     continue
+                if call.qualifier is None and rt.name.lower() == target.lower():
+                    continue  # только неквалифицированный самовызов, см. callers_of
                 if len(found[target]) >= max_per_name:
                     continue
                 found[target].append({
@@ -604,8 +608,8 @@ def find_callers_batch(
                 if target is None:
                     continue
                 low = target.lower()
-                if rt_low == low:
-                    continue  # своё же тело/объявление — не место вызова
+                if call.qualifier is None and rt_low == low:
+                    continue  # только неквалифицированный самовызов, см. callers_of
                 rows = out[target]
                 if len(rows) >= max_per_name:
                     continue

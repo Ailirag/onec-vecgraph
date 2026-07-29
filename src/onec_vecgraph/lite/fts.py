@@ -590,8 +590,12 @@ class FtsIndex:
         for (method_low, path, source, obj, module, rt_name, start, end, export,
              qualifier, line, idx_mtime) in rows:
             target = wanted.get(method_low)
-            if target is None or rt_name.lower() == method_low:
-                continue  # своё же объявление — не место вызова
+            # Отбрасываем только НЕквалифицированный самовызов (рекурсия/то же имя в модуле).
+            # Квалифицированный вызов одноимённого метода — настоящее место вызова: в 1С это
+            # штатная идиома «обработчик объекта делегирует одноимённому методу общего модуля»
+            # (Процедура ОбработкаЗаполнения -> ОбщийМодуль.ОбработкаЗаполнения(...)).
+            if target is None or (qualifier is None and rt_name.lower() == method_low):
+                continue
             bucket = out[target]
             if len(bucket) >= max_per_name:
                 continue
@@ -621,7 +625,8 @@ class FtsIndex:
             marks = ",".join("?" for _ in wanted)
             rows = con.execute(
                 "SELECT c.method_low, count(*) FROM calls c JOIN symbols s ON s.id = c.caller_id"
-                f" WHERE c.method_low IN ({marks}) AND s.name_low <> c.method_low"
+                f" WHERE c.method_low IN ({marks})"
+                " AND NOT (c.qualifier IS NULL AND s.name_low = c.method_low)"
                 " GROUP BY c.method_low",
                 list(wanted),
             ).fetchall()

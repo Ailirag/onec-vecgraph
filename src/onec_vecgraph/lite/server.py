@@ -859,15 +859,20 @@ def changed_objects(ref: str = "", source: str = "", include_untracked: bool = T
 
 @mcp.tool()
 def review_set(ref: str = "", max_callers: int = 5, source: str = "", detail: bool = False,
+               max_routines: int = 25, offset: int = 0, include_untracked: bool = True,
                workspace: str = "") -> dict:
     """Ревью-набор изменений: изменённые строки → затронутые рутины → их вызывающие,
     точки входа и override-хуки расширений поверх них.
 
     Отвечает на «что я сломал этой правкой»: каждый вызывающий проверен парсером,
     untracked-модули включаются целиком. ref как в changed_objects. Вызывающие по умолчанию —
-    компактные строки `Объект▸Модуль▸Рутина:строка`; detail=True даёт полные записи."""
+    компактные строки `Объект▸Модуль▸Рутина:строка`; detail=True даёт полные записи.
+
+    routine_count — сколько рутин затронуто ВСЕГО; отдаётся окно max_routines, отранжированное
+    по риску (экспортность, точка входа, переопределения, число вызывающих), доборка — offset."""
     return gitview.review_set(_ws(workspace), ref, max_callers=max_callers, source=source,
-                              detail=detail)
+                              detail=detail, max_routines=max_routines, offset=offset,
+                              include_untracked=include_untracked)
 
 
 # --------------------------------------------------------------------------- #

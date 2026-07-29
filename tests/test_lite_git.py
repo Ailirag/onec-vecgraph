@@ -146,6 +146,19 @@ def test_git_invocation_opts_out_of_dubious_ownership(monkeypatch: pytest.Monkey
     assert "safe.directory=*" in captured["argv"]
 
 
+def test_review_set_includes_untracked_against_ref(git_ws: Workspace) -> None:
+    """При заданном ref новый (untracked) модуль обязан попасть в ревью-набор: иначе только что
+    созданный код молча не проходит ревью. Раньше review_set шёл с untracked=False, хотя
+    changed_objects эту полноту защищал."""
+    res = gitview.review_set(git_ws, ref="HEAD")
+    objects = {r["object"] for r in res["routines"]}
+    assert "Catalog.Товары" in objects  # ManagerModule.bsl создан и не добавлен в git
+    assert any(r["status"] == "??" for r in res["routines"])
+    # счёт затронутых рутин — это счёт, а не лимит выдачи
+    assert res["routine_count"] == len(
+        [r for r in gitview.review_set(git_ws, ref="HEAD", max_routines=999)["routines"]])
+
+
 def test_review_set_maps_hunks_to_routines_and_callers(git_ws: Workspace) -> None:
     res = gitview.review_set(git_ws)
     by_routine = {(r["object"], r["routine"]): r for r in res["routines"]}
