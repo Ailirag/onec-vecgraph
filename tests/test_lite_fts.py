@@ -183,3 +183,39 @@ def test_fts_build_lock_is_cross_process(ws: Workspace) -> None:
     finally:
         fts._release_build_lock(handle)
     assert idx.build().get("units_written", 0) >= 1     # лок отпущен — сборка снова проходит
+
+
+def test_index_sees_fresh_work_without_waiting_for_refresh(ws: Workspace) -> None:
+    """Индекс не должен «уверенно врать» про свежую работу.
+
+    Критика круга 2: после добавления вызова в уже проиндексированный файл (и после создания
+    нового модуля) индексный путь отдавал прежний ответ — свежих вызовов он не видит, а строк
+    по такому файлу в выборке нет, поэтому пометки `stale` не будет. Теперь «грязный» по git
+    набор всегда разбирается живым парсером и подмешивается к индексу."""
+    import subprocess
+
+    from onec_vecgraph.lite import code_intel
+
+    root = ws.root
+    subprocess.run(["git", "init", "-q"], cwd=str(root), check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"],
+                   cwd=str(root), check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                    "-m", "base"], cwd=str(root), check=True, capture_output=True)
+
+    idx = fts.index_for(ws)
+    assert "error" not in idx.build()
+    assert idx.has_symbols()
+    before = code_intel.find_callers(ws, "РассчитатьСебестоимость")["match_count"]
+
+    # новый модуль с вызовом — файла нет ни в индексе, ни в git
+    new_mod = root / "conf" / "src" / "CommonModules" / "РасчетЗатрат" / "ManagerModule.bsl"
+    _w(new_mod, "Процедура СвежийВызов() Экспорт\n"
+                "    РасчетЗатрат.РассчитатьСебестоимость(Неопределено);\n"
+                "КонецПроцедуры\n")
+    code_intel.clear_caches()
+
+    after = code_intel.find_callers(ws, "РассчитатьСебестоимость")
+    callers = {c["routine"] for c in after["callers"]}
+    assert after["match_count"] == before + 1, after
+    assert "СвежийВызов" in callers

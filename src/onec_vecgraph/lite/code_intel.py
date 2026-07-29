@@ -39,6 +39,7 @@ def clear_caches() -> None:
     _MODULES.clear()
     _LINES_CACHE.clear()
     _OVERRIDE_INDEX.clear()
+    _DIRTY_CACHE.clear()
 
 
 def routines_of(path: Path) -> list[Routine]:
@@ -552,15 +553,28 @@ def _index_callers(
     if source:
         keep = {s.name for s in ws.resolve_sources(source)[0]}
         found = {n: [r for r in rows if r.get("source") in keep] for n, rows in found.items()}
-    # Файлы, изменённые после индексации (текущая работа разработчика — их единицы),
-    # перепроверяем живым парсером: строки индекса по ним заменяем на фактические.
+    # Свежую работу разработчика индекс по определению не видит, поэтому «грязный» набор
+    # (изменённые и новые файлы по git) всегда разбирается ЖИВЫМ парсером и подмешивается.
+    # Без этого индекс уверенно отвечал «0 вызывающих» на только что добавленный вызов: строки
+    # по такому файлу в выборку не попадают вовсе, поэтому пометки `stale` для него не будет.
+    dirty_paths = _dirty_bsl_files(ws)
     stale_paths = {
         r["_abs"] for rows in found.values() for r in rows if r.get("stale") and r.get("_abs")
     }
+    live_paths = stale_paths | dirty_paths
     wanted = {n.lower(): n for n in names}
     for name, rows in found.items():
-        found[name] = [r for r in rows if not r.get("stale")]
-    for abs_path in stale_paths:
+        found[name] = [r for r in rows
+                       if not r.get("stale") and r.get("_abs") not in live_paths]
+    # Индекс отстал — просим фоновый догон (неблокирующе), иначе долгоживущий http-сервер
+    # мог работать по индексу произвольной давности: рефреш кикался только из fts.search().
+    if live_paths:
+        try:
+            from . import fts as _fts2
+            _fts2.index_for(ws).ensure_background()
+        except Exception:  # noqa: BLE001
+            pass
+    for abs_path in live_paths:
         path = Path(abs_path)
         src_name, rel = ws.source_of_path(path)
         src = next((s for s in ws.sources if s.name == src_name), None)
@@ -585,7 +599,50 @@ def _index_callers(
                     "call_line": call.line or None,
                     "local_target": call.qualifier is None and target.lower() in local_names,
                 })
+    for rows in found.values():  # служебное поле склейки наружу не отдаём
+        for r in rows:
+            r.pop("_abs", None)
     return found
+
+
+_DIRTY_TTL = 3.0  # с: «грязный» набор — это то, что разработчик правит СЕЙЧАС
+_DIRTY_CACHE: dict[str, tuple[float, set[str]]] = {}
+
+
+def _dirty_bsl_files(ws: Workspace) -> set[str]:
+    """Абсолютные пути .bsl, которые изменены или ещё не в git (незакоммиченная работа).
+
+    Свой короткий TTL, а НЕ общий 60-секундный кэш git-списков: иначе файл, сохранённый после
+    предыдущего вызова инструмента, оставался бы невидимым до минуты — ровно в сценарии
+    «правлю код и спрашиваю агента». 3 с гасят стоимость подряд идущих вызовов и при этом
+    не прячут свежую правку. Импорт gitview внутри функции: gitview импортирует code_intel."""
+    key = str(ws.root).lower()
+    now = time.monotonic()
+    hit = _DIRTY_CACHE.get(key)
+    if hit and now - hit[0] < _DIRTY_TTL:
+        return hit[1]
+    try:
+        from . import gitview as _gv
+        by_root, _missing = _gv._repos(ws.sources)  # noqa: SLF001 — общий внутренний слой
+    except Exception:  # noqa: BLE001 — без git просто нет «грязного» набора
+        return set()
+    out: set[str] = set()
+    for repo in by_root:
+        try:
+            files, err = _gv._status_files(repo)  # noqa: SLF001 — свежий статус, без TTL-кэша
+        except Exception:  # noqa: BLE001
+            continue
+        if err:
+            continue
+        for _status, rel in files:
+            if not rel.endswith(".bsl"):
+                continue
+            abs_path = repo / rel
+            src_name, srel = ws.source_of_path(abs_path)
+            if src_name and srel.split("/", 1)[0] in TYPE_FOLDERS:
+                out.add(str(abs_path))
+    _DIRTY_CACHE[key] = (now, out)
+    return out
 
 
 def _index_call_total(ws: Workspace, name: str) -> int | None:

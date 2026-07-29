@@ -608,7 +608,9 @@ class FtsIndex:
                 "source": source, "path": rel, "object": obj, "module": module,
                 "routine": rt_name, "routine_lines": [start, end], "export": bool(export),
                 "qualifier": qualifier, "call_line": line or None,
-                **({"stale": True, "_abs": path} if stale else {}),
+                # `_abs` — служебное поле для склейки с живым разбором; вызывающий его снимает
+                "_abs": path,
+                **({"stale": True} if stale else {}),
             })
         return out
 
