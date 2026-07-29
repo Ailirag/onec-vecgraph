@@ -41,6 +41,7 @@ _REFRESH_TTL = 30.0  # seconds between implicit mtime rescans on search
 _BODY_CAP = 20_000  # per-unit body cap (защита от патологических рутин)
 _CYR = re.compile(r"[а-яё]", re.IGNORECASE)
 _BUILD_LOCK_STALE = 3600.0  # сек: лок сборки старше — осиротел (процесс умер), забираем
+_BUILD_WAIT = 900.0  # сек: сколько синхронный build() ждёт уже идущую сборку
 
 
 def _acquire_build_lock(db_path: Path):
@@ -246,26 +247,49 @@ class FtsIndex:
         threading.Thread(target=_run, name="fts-build", daemon=True).start()
         return True
 
-    def build(self) -> dict:
-        """Синхронная сборка (кнопка админки / --build-fts). Если фоновая сборка уже идёт —
-        не встаём вторым писателем, а сообщаем об этом (единственный писатель = флаг
-        _building)."""
+    def _wait_not_building(self, timeout: float) -> bool:
+        """Дождаться конца сборки, идущей в ЭТОМ процессе. True — флаг свободен."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._build_lock:
+                if not self._building:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def build(self, *, wait: float = _BUILD_WAIT) -> dict:
+        """Синхронная сборка (кнопка админки / --build-fts): по возвращении индекс СОБРАН.
+
+        Если сборка уже идёт (фоновый прогрев или другой процесс) — не встаём вторым
+        писателем, а ДОЖИДАЕМСЯ её (ограниченно по времени): вызывающий вправе считать, что
+        после build() без ошибки индекс готов. wait=0 — не ждать (для не-блокирующих путей)."""
         if not fts_available():
             return {"error": "FTS5 недоступен в этой сборке Python (sqlite3 без fts5)."}
         if not self._try_start_build(force=True):
-            return {"status": "building", "note": "Сборка индекса уже идёт в фоне; повторите позже."}
+            # строится в этом процессе: ждём готовности вместо второго писателя
+            if self._wait_not_building(wait) and self._built_at():
+                return {"status": "built_by_background",
+                        "note": "Сборку завершил фоновый прогрев.",
+                        **{k: v for k, v in self.status().items() if k in ("units", "files")}}
+            return {"status": "building", "note": "Сборка индекса ещё идёт; повторите позже."}
         try:
-            return self._build_locked()
+            return self._build_locked(wait=wait)
         finally:
             with self._build_lock:
                 self._building = False
 
-    def _build_locked(self) -> dict:
+    def _build_locked(self, *, wait: float = 0.0) -> dict:
         """Единственный писатель В ЭТОМ процессе гарантирован флагом _building; плюс
         МЕЖПРОЦЕССНЫЙ лок (файл `<db>.building`): если индекс строит другой процесс (общий
-        каталог ~/.onec-lite/fts), пропускаем — не деремся за один файл БД (иначе блокировки
-        SQLite / зависания вызовов)."""
+        каталог ~/.onec-lite/fts), не деремся за один файл БД (иначе блокировки SQLite /
+        зависания вызовов) — фоновый путь (wait=0) сразу уступает, синхронный build() ждёт."""
         lock = _acquire_build_lock(self.path)
+        if lock is None and wait > 0:
+            deadline = time.monotonic() + wait
+            while lock is None and time.monotonic() < deadline:
+                time.sleep(0.2)
+                lock = _acquire_build_lock(self.path)
         if lock is None:
             self._last_refresh = time.monotonic()  # строит другой процесс — отступаем по TTL
             return {"status": "building",

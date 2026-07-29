@@ -162,7 +162,8 @@ def test_explicit_build_yields_to_running_background(ws: Workspace) -> None:
     idx = fts.index_for(ws)
     idx._building = True
     try:
-        assert idx.build().get("status") == "building"
+        # wait=0: не ждём чужую сборку — проверяем именно отказ стать вторым писателем
+        assert idx.build(wait=0).get("status") == "building"
         assert idx.ensure_background(force=True) is False
     finally:
         idx._building = False
