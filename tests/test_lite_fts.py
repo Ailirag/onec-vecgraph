@@ -167,3 +167,18 @@ def test_explicit_build_yields_to_running_background(ws: Workspace) -> None:
     finally:
         idx._building = False
     assert idx.build().get("units_written", 0) >= 1  # после снятия флага сборка снова идёт
+
+
+def test_fts_build_lock_is_cross_process(ws: Workspace) -> None:
+    """Межпроцессный лок: пока держится `<db>.building`, _build_locked пропускает сборку
+    (status=building) — защита от гонки двух серверов за общий каталог ~/.onec-lite/fts."""
+    idx = fts.index_for(ws)
+    handle = fts._acquire_build_lock(idx.path)          # эмулируем «строит другой процесс»
+    assert handle is not None
+    assert fts._acquire_build_lock(idx.path) is None    # второй захват — отказ, пока держим
+    try:
+        res = idx._build_locked()
+        assert res.get("status") == "building"          # не строил, уступил
+    finally:
+        fts._release_build_lock(handle)
+    assert idx.build().get("units_written", 0) >= 1     # лок отпущен — сборка снова проходит

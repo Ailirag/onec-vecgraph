@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -39,6 +40,44 @@ _SCHEMA_VERSION = 2  # v2: title = токены имени (иначе CamelCase
 _REFRESH_TTL = 30.0  # seconds between implicit mtime rescans on search
 _BODY_CAP = 20_000  # per-unit body cap (защита от патологических рутин)
 _CYR = re.compile(r"[а-яё]", re.IGNORECASE)
+_BUILD_LOCK_STALE = 3600.0  # сек: лок сборки старше — осиротел (процесс умер), забираем
+
+
+def _acquire_build_lock(db_path: Path):
+    """Межпроцессный лок сборки FTS: атомарный файл `<db>.building`. Возвращает handle или
+    None, если индекс уже строит ДРУГОЙ процесс. Нужен потому, что каталог ~/.onec-lite/fts
+    общий — два сервера (напр. stdio + http) иначе дерутся за один файл БД (блокировки/зависания)."""
+    lock = Path(str(db_path) + ".building")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            if time.time() - lock.stat().st_mtime <= _BUILD_LOCK_STALE:
+                return None  # свежий лок — строит другой процесс
+            lock.unlink()  # осиротевший — забираем
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except (OSError, FileExistsError):
+            return None
+    try:
+        os.write(fd, f"{os.getpid()} {time.strftime('%Y-%m-%d %H:%M:%S')}".encode("utf-8"))
+    except OSError:
+        pass
+    return fd, lock
+
+
+def _release_build_lock(handle) -> None:
+    if not handle:
+        return
+    fd, lock = handle
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        lock.unlink()
+    except OSError:
+        pass
 
 
 def fts_available() -> bool:
@@ -222,8 +261,23 @@ class FtsIndex:
                 self._building = False
 
     def _build_locked(self) -> dict:
-        """Incremental build by mtime (первый прогон индексирует всё). Вызывается только с
-        уже занятым флагом _building — отдельный SQLite-локинг не нужен."""
+        """Единственный писатель В ЭТОМ процессе гарантирован флагом _building; плюс
+        МЕЖПРОЦЕССНЫЙ лок (файл `<db>.building`): если индекс строит другой процесс (общий
+        каталог ~/.onec-lite/fts), пропускаем — не деремся за один файл БД (иначе блокировки
+        SQLite / зависания вызовов)."""
+        lock = _acquire_build_lock(self.path)
+        if lock is None:
+            self._last_refresh = time.monotonic()  # строит другой процесс — отступаем по TTL
+            return {"status": "building",
+                    "note": "Индекс строит другой процесс — пропускаю (общий каталог fts)."}
+        try:
+            return self._run_build()
+        finally:
+            _release_build_lock(lock)
+
+    def _run_build(self) -> dict:
+        """Incremental build by mtime (первый прогон индексирует всё). Единственный писатель
+        гарантирован _building (в процессе) и файловым локом (между процессами)."""
         t0 = time.monotonic()
         con = _connect(self.path)
         try:
