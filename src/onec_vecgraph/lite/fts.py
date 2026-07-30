@@ -557,24 +557,41 @@ class FtsIndex:
                 args,
             ).fetchall()
             built_at = dict(con.execute("SELECT key, value FROM meta")).get("built_at")
+            # Полный счёт совпадений: без него `match_count` читался как «столько и есть», хотя
+            # это лишь размер окна (limit). Тот же MATCH и те же фильтры, без ORDER BY/LIMIT.
+            total = con.execute(f"SELECT count(*) FROM units WHERE {where}",
+                                args[:-1]).fetchone()[0]
+            # Файлы юнитов сверяем с индексом: путь и строка могли уехать после правки, и
+            # выдавать их как факт нельзя — остальные тулы такую сверку уже делают.
+            idx_mtimes = dict(con.execute("SELECT path, mtime FROM files"))
         except sqlite3.OperationalError as exc:
             return {"error": f"Ошибка запроса FTS: {exc}"}
         finally:
             con.close()
+        results = []
+        for r in rows:
+            abs_path = None
+            for s in self.ws.sources:
+                cand = s.files_root / r[4]
+                if str(cand) in idx_mtimes:
+                    abs_path = str(cand)
+                    break
+            stale = _is_stale(abs_path, idx_mtimes.get(abs_path)) if abs_path else False
+            results.append({
+                "title": r[0], "unit": r[1], "source": r[2], "object": r[3],
+                "path": r[4], "line": r[5], "snippet": r[6],
+                "score": round(-r[7], 3),  # bm25: меньше = лучше; наружу — больше = лучше
+                **({"stale": True} if stale else {}),
+            })
         return {
             "query": query,
             "match": match,
             "ready": True,
             "built_at": built_at,
-            "match_count": len(rows),
-            "results": [
-                {
-                    "title": r[0], "unit": r[1], "source": r[2], "object": r[3],
-                    "path": r[4], "line": r[5], "snippet": r[6],
-                    "score": round(-r[7], 3),  # bm25: меньше = лучше; наружу — больше = лучше
-                }
-                for r in rows
-            ],
+            "total_matches": total,          # сколько совпадений ВСЕГО
+            "match_count": len(rows),        # сколько отдано в этом окне
+            "truncated": len(rows) < total,
+            "results": results,
         }
 
 

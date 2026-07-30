@@ -24,6 +24,7 @@ from .workspace import LiteSource, Workspace
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _MAX_ROUTINES = 2000  # предохранитель от патологического диффа; бюджет ответа — max_routines
+_MAX_CHANGED_IN_REVIEW = 40  # окно списка изменённых объектов внутри review_set
 # (раньше здесь было 60, и это значение уезжало в поле routine_count — то есть счёт затронутых
 #  рутин был лимитом, а не счётом, и «ранжирование по риску» ранжировало произвольные первые 60)
 
@@ -267,6 +268,7 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str =
     # молча не попадают в ревью-набор (докстринг обещает обратное).
     rows, repos_info = _map_changes(ws, sources, ref, untracked=include_untracked)
     changed_list = _group_objects(rows)  # из своих же rows — без второго git-прохода
+    changed_total = len(changed_list)
 
     # Полный детерминированный индекс переопределений (TTL-кэш): раньше здесь был скан с
     # обрезкой по 300 файлам в недетерминированном порядке — переопределения изменённых
@@ -373,10 +375,20 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str =
              "changes": [f"{c['path']}({c['status']})" for c in g["changes"]]}
             for g in changed_list
         ]
+        # Бюджет и на этот блок: на больших диапазонах он занимал до 73% ответа, то есть лимит
+        # рутин применялся к четверти payload. Объекты с разобранными рутинами перечислены ниже,
+        # поэтому в окно вперёд идут те, у которых рутин нет (правки метаданных) — иначе они
+        # исчезают из ответа совсем.
+        if len(changed_list) > _MAX_CHANGED_IN_REVIEW:
+            with_routines = {r["object"] for r in routines}
+            changed_list = sorted(changed_list,
+                                  key=lambda g: g["object"] in with_routines
+                                  )[:_MAX_CHANGED_IN_REVIEW]
     return {
         "ref": ref or "(незакоммиченные изменения)",
         "repos": repos_info,
         "changed_objects": changed_list,
+        "changed_object_count": changed_total,   # СКОЛЬКО объектов изменено всего
         "routine_count": routines_total,      # СКОЛЬКО затронуто всего (не лимит)
         "routines_returned": len(routines),
         "offset": max(0, offset),
