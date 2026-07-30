@@ -472,10 +472,13 @@ def list_kinds() -> dict:
 
 
 @_tool
-def list_objects(kind: str, filter: str = "", limit: int = 200, source: str = "", workspace: str = "") -> dict:
+def list_objects(kind: str, filter: str = "", limit: int = 200, source: str = "",
+                 offset: int = 0, workspace: str = "") -> dict:
     """Объекты вида по всем источникам; filter — подстрока имени (без регистра).
 
-    Совпадение имени в нескольких источниках отражается полем in_multiple_sources."""
+    Совпадение имени в нескольких источниках отражается полем in_multiple_sources.
+    count — сколько объектов ВСЕГО подходит под фильтр; отдаётся окно limit от offset
+    (без offset остаток множества был недостижим: например 200 из 645)."""
     ws = _ws(workspace)
     if err := _kind_ok(kind):
         return _err(err)
@@ -493,13 +496,15 @@ def list_objects(kind: str, filter: str = "", limit: int = 200, source: str = ""
             if name not in seen:
                 order.append(name)
             seen.setdefault(name, []).append(s.name)
-    truncated = len(order) > limit
+    start = max(0, offset)
+    window = order[start: start + max(1, limit)]
     rows = [
         {"name": n, "source": seen[n][0],
          **({"in_multiple_sources": seen[n]} if len(seen[n]) > 1 else {})}
-        for n in order[:limit]
+        for n in window
     ]
-    return {"kind": kind, "count": len(order), "truncated": truncated, "objects": rows}
+    return {"kind": kind, "count": len(order), "returned": len(rows), "offset": start,
+            "truncated": start + len(rows) < len(order), "objects": rows}
 
 
 def _object_payload(ws: Workspace, obj: MetaObject, detail: bool) -> dict:
@@ -993,7 +998,10 @@ def find_callers(routine_name: str = "", object_hint: str = "", kinds: list[str]
 @_tool
 def call_graph(routine_name: str, depth: int = 2, max_per_level: int = 40,
                source: str = "", workspace: str = "") -> dict:
-    """Восходящий граф вызовов: кто (рекурсивно) вызывает рутину; уровни с охватывающими рутинами."""
+    """Восходящий граф вызовов: кто (рекурсивно) вызывает рутину; уровни с охватывающими рутинами.
+
+    У каждого уровня есть level_total (сколько вызывающих найдено) и level_truncated: без них
+    обрезка по max_per_level читалась как «дальше никого нет»."""
     return code_intel.call_graph(
         _ws(workspace), routine_name, depth=depth, max_per_level=max_per_level, source=source,
     )

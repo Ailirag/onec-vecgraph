@@ -398,9 +398,13 @@ def test_find_callers_object_hint(edt_ws: Workspace) -> None:
 def test_call_graph_upward(edt_ws: Workspace) -> None:
     res = code_intel.call_graph(edt_ws, "СоздатьПоИНН", depth=2)
     assert res["depth"] >= 1
-    level1 = {r["routine"] for r in res["levels"][0]}
+    lvl = res["levels"][0]
+    # у уровня есть честный счёт: обрезка по max_per_level не должна читаться как «больше нет»
+    assert lvl["level_returned"] == len(lvl["callers"])
+    assert lvl["level_truncated"] is False
+    level1 = {r["routine"] for r in lvl["callers"]}
     assert "ОбработкаПроведения" in level1
-    assert all(r["calls"] == "СоздатьПоИНН" for r in res["levels"][0])
+    assert all(r["calls"] == "СоздатьПоИНН" for r in lvl["callers"])
 
 
 def test_find_overrides(edt_ws: Workspace) -> None:

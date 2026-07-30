@@ -791,6 +791,22 @@ def _merge_live_declarations(ws: Workspace, rows: list[dict], routine_name: str,
     return kept
 
 
+def _index_level_total(ws: Workspace, names: list[str], *, source: str = "") -> int | None:
+    """Сколько мест вызова у набора имён всего (по индексу); None — индекса нет."""
+    if not names:
+        return 0
+    try:
+        from . import fts as _fts
+        idx = _fts.index_for(ws)
+        if not idx.has_symbols():
+            return None
+        src_names = {s.name for s in ws.resolve_sources(source)[0]} if source else None
+        stats = idx.call_totals(names, source_names=src_names)
+        return sum(int(v.get("rows") or 0) for v in stats.values())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _index_knows(ws: Workspace, name: str) -> bool:
     """Знает ли индекс это имя (объявление или вызов) — см. правило про пустые ответы."""
     try:
@@ -978,22 +994,36 @@ def call_graph(
         todo = [display for low, display in sorted(current.items()) if low not in visited]
         visited.update(d.lower() for d in todo)
         batch = find_callers_batch(ws, todo, max_per_name=max_per_level, source=source)
+        # Настоящий счёт мест вызова уровня берём из индекса, а НЕ из выдачи: выдача уже
+        # ограничена max_per_name, поэтому счёт по ней всегда равнялся бы лимиту и «обрезано»
+        # никогда бы не выставилось — то есть флаг врал бы так же, как раньше врал routine_count.
+        level_rows_total = _index_level_total(ws, todo, source=source)
+        level_found = 0  # сколько вызывающих попало в выдачу (после дедупликации по visited)
         for display in todo:
             for row in batch.get(display, []):
                 key = f"{row['path']}::{row['routine']}"
                 if key in visited:
                     continue
                 visited.add(key)
-                row = {"calls": display, **row}
-                level_rows.append(row)
+                level_found += 1
                 next_names.setdefault(row["routine"].lower(), row["routine"])
                 if len(level_rows) >= max_per_level:
-                    break
-            if len(level_rows) >= max_per_level:
-                break
+                    continue  # считаем дальше, но в выдачу не кладём
+                level_rows.append({"calls": display, **row})
         if not level_rows:
             break
-        levels.append(level_rows)
+        # Счёт по уровню обязателен: раньше обрезка по max_per_level читалась как
+        # «вызывающих больше нет», и агент делал вывод о безопасности правки по усечённому графу.
+        levels.append({
+            "level": len(levels) + 1,
+            # из индекса — сколько мест вызова у имён этого уровня всего (None без индекса)
+            "level_call_rows_total": level_rows_total,
+            "level_returned": len(level_rows),
+            "level_truncated": (level_rows_total > len(level_rows)
+                                if level_rows_total is not None
+                                else level_found > len(level_rows)),
+            "callers": level_rows,
+        })
         current = next_names
     return {"routine": routine_name, "depth": len(levels), "levels": levels}
 
