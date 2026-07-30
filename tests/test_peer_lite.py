@@ -253,3 +253,51 @@ def test_tenant_layers_accepts_precomputed_totals() -> None:
     layers = queries.tenant_layers(_ChunksOnly(), "acme", objects_total=3, routines_total=0)
     assert layers["state"] == "structural_only"
     assert layers["graph_objects"] == 3 and layers["callgraph_built"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Профили публикации инструментов (onec-lite)
+# --------------------------------------------------------------------------- #
+
+def _lite_tool_names(monkeypatch, profile: str | None = None,
+                     disabled: str | None = None) -> set[str]:
+    """Имена опубликованных lite-тулов при заданном профиле (перезагружаем модуль сервера)."""
+    import asyncio
+    import importlib
+
+    if profile is None:
+        monkeypatch.delenv("ONEC_LITE_PROFILE", raising=False)
+    else:
+        monkeypatch.setenv("ONEC_LITE_PROFILE", profile)
+    if disabled is None:
+        monkeypatch.delenv("ONEC_LITE_DISABLED_TOOLS", raising=False)
+    else:
+        monkeypatch.setenv("ONEC_LITE_DISABLED_TOOLS", disabled)
+    from onec_vecgraph.lite import server as lite_server
+
+    mod = importlib.reload(lite_server)
+    return {t.name for t in asyncio.run(mod.mcp.list_tools())}
+
+
+def test_lite_tool_profiles(monkeypatch) -> None:
+    """Схемы инструментов уходят клиенту на каждый запрос, поэтому состав — параметр.
+
+    По умолчанию (lean) не публикуются тулы, дублирующие то, что у агента и так есть дешевле
+    (rg / чтение файла / git): замерено, что list_routines против `rg '^(Процедура|Функция)'`
+    стоит x0.28 по токенам, changed_objects против `git diff --name-status` — x0.20."""
+    lean = _lite_tool_names(monkeypatch, None)
+    full = _lite_tool_names(monkeypatch, "full")
+    review = _lite_tool_names(monkeypatch, "review")
+
+    assert len(review) < len(lean) < len(full) == 30
+    # то, что нельзя выразить поиском по тексту, есть во всех профилях
+    for core in ("find_callers", "find_overrides", "get_object", "review_set", "writes_to"):
+        assert core in review and core in lean and core in full
+    # дублирующее шелл — только в full
+    for shellish in ("search_code", "changed_objects", "read_file", "list_routines"):
+        assert shellish not in lean and shellish in full
+    # точечное отключение работает поверх профиля
+    trimmed = _lite_tool_names(monkeypatch, "full", "search_code find_routine")
+    assert "search_code" not in trimmed and "find_routine" not in trimmed
+    assert "find_callers" in trimmed
+    _lite_tool_names(monkeypatch, None)  # вернуть модуль в дефолтное состояние

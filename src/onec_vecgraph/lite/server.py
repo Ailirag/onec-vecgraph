@@ -82,6 +82,62 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, "").strip() or default
 
 
+# --------------------------------------------------------------------------- #
+# Профили публикации инструментов
+# --------------------------------------------------------------------------- #
+# Схемы инструментов уходят клиенту в системном промпте на КАЖДЫЙ запрос: все 30 стоят 7210
+# токенов. Замеры показали, что часть из них дублирует то, что у агента и так есть, причём
+# дешевле: list_routines против `rg '^(Процедура|Функция)' <модуль>` — x0.28 по токенам,
+# changed_objects против `git diff --name-status` — x0.20, find_routine против одной строки rg —
+# x0.40, а search_code/read_file/read_module — тонкие обёртки над поиском и чтением файла.
+# Поэтому по умолчанию публикуется профиль `lean`: инструменты, отвечающие на вопросы, которые
+# поиском по тексту выразить НЕЛЬЗЯ (разбор BSL, слияние базы с расширениями, полные счётчики).
+# Удалять их нельзя: там, где у агента нет шелла и чтения файлов, они единственный путь —
+# поэтому это профиль, а не вырезание. ONEC_LITE_PROFILE=full возвращает все 30.
+
+# Дублируют дешёвые возможности агента (rg / чтение файла / git) — вне профиля `lean`.
+_REDUNDANT_WITH_SHELL = frozenset({
+    "search_code", "search_metadata", "find_routine", "changed_objects",
+    "read_file", "read_module", "list_routines", "list_objects", "list_kinds", "metrics",
+})
+# Минимум под задачу код-ревью: «что я сломал» и проверка объекта.
+_REVIEW_PROFILE = frozenset({
+    "review_set", "find_callers", "find_overrides", "get_object", "read_routine",
+    "writes_to", "find_handlers", "overview", "list_workspaces",
+})
+
+
+def _profile() -> str:
+    return _env("ONEC_LITE_PROFILE", "lean").lower()
+
+
+def _disabled_tools() -> set[str]:
+    raw = os.environ.get("ONEC_LITE_DISABLED_TOOLS", "")
+    return {t.strip() for t in raw.replace(",", " ").split() if t.strip()}
+
+
+def _published(name: str) -> bool:
+    """Публикуется ли инструмент в этой конфигурации (профиль + точечное отключение)."""
+    if name in _disabled_tools():
+        return False
+    profile = _profile()
+    if profile == "full":
+        return True
+    if profile == "review":
+        return name in _REVIEW_PROFILE
+    return name not in _REDUNDANT_WITH_SHELL  # lean (по умолчанию)
+
+
+def _tool(fn):
+    """Зарегистрировать функцию как MCP-инструмент, если она публикуется в этом профиле.
+
+    Функция остаётся импортируемой и вызываемой в любом случае — CLI, админка и тесты зовут её
+    напрямую, а не через протокол."""
+    if not _published(fn.__name__):
+        return fn
+    return mcp.tool(structured_output=False)(fn)
+
+
 # Own host/port envs (not the big server's MCP_PORT): the docker read-MCP holds :8000,
 # lite must not collide with it out of the box when started with --transport http.
 mcp = FastMCP(
@@ -324,7 +380,7 @@ def _kind_ok(kind: str) -> str | None:  # noqa: D401
 # Обзор / структура
 # --------------------------------------------------------------------------- #
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def overview(workspace: str = "") -> dict:
     """Обзор рабочей копии: источники (база + расширения) и число объектов по видам.
 
@@ -386,7 +442,7 @@ def _unattached_projects(ws: Workspace) -> list[dict]:
     return out
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def list_workspaces() -> dict:
     """Рабочие копии, которые знает сервер: имена, корни, активная и дефолт этой сессии.
 
@@ -408,14 +464,14 @@ def list_workspaces() -> dict:
     }
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def list_kinds() -> dict:
     """Все допустимые значения параметра kind (+ русские названия)."""
     kinds = sorted(set(TYPE_FOLDERS.values()))
     return {"kinds": kinds, "ru": {k: KIND_RU[k] for k in kinds if k in KIND_RU}}
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def list_objects(kind: str, filter: str = "", limit: int = 200, source: str = "", workspace: str = "") -> dict:
     """Объекты вида по всем источникам; filter — подстрока имени (без регистра).
 
@@ -522,7 +578,7 @@ def _object_payload(ws: Workspace, obj: MetaObject, detail: bool) -> dict:
     return out
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def get_object(kind: str, name: str, source: str = "", detail: bool = False,
                workspace: str = "") -> dict:
     """Структура объекта: синоним, реквизиты, ТЧ, перечисления, формы, модули, движения.
@@ -639,7 +695,7 @@ def _resolve_module(ws: Workspace, kind: str, name: str, module: str, source: st
     )
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def list_routines(kind: str, name: str, module: str = "Module", source: str = "",
                   max_results: int = 100, offset: int = 0, exported_only: bool = False,
                   name_filter: str = "", workspace: str = "") -> dict:
@@ -666,7 +722,7 @@ def list_routines(kind: str, name: str, module: str = "Module", source: str = ""
             "truncated": start + len(rows) < len(selected), "routines": rows}
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def read_module(kind: str, name: str, module: str = "Module", start_line: int = 1,
                 max_lines: int = 400, source: str = "", workspace: str = "") -> dict:
     """Текст модуля с пагинацией (start_line/max_lines)."""
@@ -686,7 +742,7 @@ def read_module(kind: str, name: str, module: str = "Module", start_line: int = 
     }
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def read_routine(kind: str = "", name: str = "", routine_name: str = "", module: str = "Module",
                  source: str = "", workspace: str = "") -> dict:
     """Тело одной процедуры/функции по имени (для заимствованных объектов рутина ищется по
@@ -720,7 +776,7 @@ def read_routine(kind: str = "", name: str = "", routine_name: str = "", module:
     }
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def read_file(rel_path: str, start_line: int = 1, max_lines: int = 400, source: str = "", workspace: str = "") -> dict:
     """Любой файл источника по пути относительно его корня (.mdo, .form, .xml, .bsl)."""
     ws = _ws(workspace)
@@ -755,7 +811,7 @@ def read_file(rel_path: str, start_line: int = 1, max_lines: int = 400, source: 
 # Поиск
 # --------------------------------------------------------------------------- #
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def search_code(pattern: str = "", kinds: list[str] | None = None, name_filter: str = "",
                 regex: bool = True, case_sensitive: bool = False, max_results: int = 100,
                 source: str = "", query: str = "", workspace: str = "") -> dict:
@@ -779,7 +835,7 @@ def search_code(pattern: str = "", kinds: list[str] | None = None, name_filter: 
     )
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def fts_search(query: str, limit: int = 20, unit: str = "", source: str = "", workspace: str = "") -> dict:
     """Ранжированный поиск (SQLite FTS5, BM25) по рутинам и карточкам объектов:
     CamelCase-подслова, вес имени выше тела, кириллица матчится с усечением окончаний.
@@ -824,7 +880,7 @@ def _locate_routine(ws: Workspace, routine_name: str, source: str = "") -> tuple
     return (kind, name, module or "Module"), None
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def find_routine(routine_name: str, exported_only: bool = False, max_results: int = 50,
                  source: str = "", offset: int = 0, substring: bool = False,
                  workspace: str = "") -> dict:
@@ -840,7 +896,7 @@ def find_routine(routine_name: str, exported_only: bool = False, max_results: in
     )
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def search_metadata(query: str = "", kinds: list[str] | None = None, max_results: int = 100,
                     source: str = "", pattern: str = "", workspace: str = "") -> dict:
     """Поиск объектов по имени и по тексту метаданных (синонимы и пр.).
@@ -906,14 +962,14 @@ def search_metadata(query: str = "", kinds: list[str] | None = None, max_results
 # Анализ кода
 # --------------------------------------------------------------------------- #
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def find_callees(kind: str, name: str, routine_name: str, module: str = "Module",
                  source: str = "", workspace: str = "") -> dict:
     """Кого вызывает рутина: разрешённые вызовы (local/common_module/manager) + неразрешённые."""
     return code_intel.find_callees(_ws(workspace), kind, name, module, routine_name, source)
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def find_callers(routine_name: str = "", object_hint: str = "", kinds: list[str] | None = None,
                  max_results: int = 20, source: str = "", summary_only: bool = False,
                  name: str = "", workspace: str = "") -> dict:
@@ -934,7 +990,7 @@ def find_callers(routine_name: str = "", object_hint: str = "", kinds: list[str]
     )
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def call_graph(routine_name: str, depth: int = 2, max_per_level: int = 40,
                source: str = "", workspace: str = "") -> dict:
     """Восходящий граф вызовов: кто (рекурсивно) вызывает рутину; уровни с охватывающими рутинами."""
@@ -943,7 +999,7 @@ def call_graph(routine_name: str, depth: int = 2, max_per_level: int = 40,
     )
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def find_overrides(kind: str = "", name: str = "", method: str = "", source: str = "",
                    max_results: int = 100, offset: int = 0, workspace: str = "") -> dict:
     """Переопределения расширений (&Вместо/&Перед/&После/&ИзменениеИКонтроль) с целями.
@@ -955,7 +1011,7 @@ def find_overrides(kind: str = "", name: str = "", method: str = "", source: str
                                      source=source, max_results=max_results, offset=offset)
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def find_handlers(kind: str, name: str, source: str = "", workspace: str = "") -> dict:
     """Обработчики объекта: события форм (+объявлен ли обработчик) и точки входа модулей
     (проведение/запись/проверка_заполнения/...)."""
@@ -964,14 +1020,14 @@ def find_handlers(kind: str, name: str, source: str = "", workspace: str = "") -
     return code_intel.find_handlers(_ws(workspace), kind, name, source)
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def writes_to(document: str = "", register: str = "", source: str = "", workspace: str = "") -> dict:
     """Движения: document='Заказ' -> его регистры; register='ОстаткиТоваров' -> кто в него пишет."""
     return code_intel.writes_to(_ws(workspace), document=document, register=register,
                                 source=source)
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def metrics(source: str = "", workspace: str = "") -> dict:
     """Инвентарь рабочей копии: объекты по видам, файлы/байты кода, число рутин, overrides."""
     return code_intel.metrics(_ws(workspace), source=source)
@@ -981,7 +1037,7 @@ def metrics(source: str = "", workspace: str = "") -> dict:
 # Зависимости (метаданные)
 # --------------------------------------------------------------------------- #
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def get_dependencies(kind: str, name: str, source: str = "", workspace: str = "") -> dict:
     """Связи объекта: исходящие (ссылочные реквизиты по всем источникам, владельцы,
     движения) и входящие (кто ссылается на тип, подписки на события; для регистров —
@@ -991,7 +1047,7 @@ def get_dependencies(kind: str, name: str, source: str = "", workspace: str = ""
     return code_intel.get_dependencies(_ws(workspace), kind, name, source)
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def find_type_usages(kind: str, name: str, max_results: int = 100, source: str = "",
                      offset: int = 0, workspace: str = "") -> dict:
     """Где используется ТИП объекта в метаданных: реквизиты объектов и форм, подписки,
@@ -1009,7 +1065,7 @@ def find_type_usages(kind: str, name: str, max_results: int = 100, source: str =
 # Git-осведомлённость: изменения рабочей копии
 # --------------------------------------------------------------------------- #
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def changed_objects(ref: str = "", source: str = "", include_untracked: bool = True,
                     workspace: str = "") -> dict:
     """Что изменено в рабочей копии: git status (ref пуст) или diff против ref
@@ -1022,7 +1078,7 @@ def changed_objects(ref: str = "", source: str = "", include_untracked: bool = T
                                    include_untracked=include_untracked)
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def review_set(ref: str = "", max_callers: int = 5, source: str = "", detail: bool = False,
                max_routines: int = 25, offset: int = 0, include_untracked: bool = True,
                workspace: str = "") -> dict:
@@ -1055,7 +1111,7 @@ def _mark_declared(rows: list[dict], declared: dict, key: str = "handler") -> No
             r["lines"] = [rt.start_line, rt.end_line]
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def get_service(name: str, source: str = "", workspace: str = "") -> dict:
     """Интроспекция сервиса: HTTPService (rootURL, шаблоны URL, методы) или WebService
     (namespace, операции с параметрами). Обработчики сверяются с модулем сервиса
@@ -1100,7 +1156,7 @@ def _form_files(ws: Workspace, src, obj_dir: Path, kind: str, name: str,
     return ws.form_xml_path(src, obj_dir, form), ws.form_module_path(src, obj_dir, form)
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def get_form(kind: str, name: str, form: str = "", source: str = "", items_limit: int = 60,
              summary: bool = False, workspace: str = "") -> dict:
     """Структура формы: реквизиты, команды (+обработчики), элементы (поля с dataPath,
@@ -1207,7 +1263,7 @@ def _forms_hint(ws: Workspace, cands: list) -> str:
 # большого сервера; вместо векторов — индекс имён, текст страницы читается из .hbk.
 # --------------------------------------------------------------------------- #
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def platform_versions() -> dict:
     """Настроенные сборки справки платформы: версии, файлы .hbk, число тем.
 
@@ -1215,7 +1271,7 @@ def platform_versions() -> dict:
     return _help().versions()
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def platform_docinfo(name: str, platform_version: str = "") -> dict:
     """Синтаксис-помощник: точный лукап темы по каноническому имени — русскому
     («Массив.Найти»), английскому («Array.Find») или короткому («Найти», с дизамбигуацией).
@@ -1225,14 +1281,14 @@ def platform_docinfo(name: str, platform_version: str = "") -> dict:
     return _help().docinfo(name, platform_version)
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def platform_get_document(name: str, platform_version: str = "") -> dict:
     """Полный текст темы справки по точному имени («Объект.Метод») или fqn
     `platform_help:<версия>|<Имя>`. Без версии берётся самая свежая сборка."""
     return _help().get_document(name, platform_version)
 
 
-@mcp.tool(structured_output=False)  # без дубля в structuredContent: он удваивал ответ
+@_tool
 def platform_search(query: str, platform_version: str = "", limit: int = 20) -> dict:
     """Поиск по НАЗВАНИЯМ тем справки (подстрока, RU/EN) — навигация по API платформы.
 
