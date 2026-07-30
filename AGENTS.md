@@ -77,6 +77,20 @@ standalone — все инструменты, как раньше.
   и подтверди, прежде чем регистрировать MCP, — не выбирай молча.
 - Рецепты и настройка — [docs/LITE_USAGE.md](docs/LITE_USAGE.md).
 
+## Когда пользоваться onec-lite, а когда ripgrep (для агента-потребителя)
+Правило: нужен **разбор** BSL/метаданных 1С — MCP; нужен **текст** или **счёт вхождений** — rg.
+По токенам компетентный rg дешевле в 2–5 раз (на агрегатах через конвейер — в 10–25); выигрыш
+MCP — в проверенности и полноте. Поэтому профиль по умолчанию (`lean`) НЕ публикует `search_code`,
+`search_metadata`, `list_routines`, `read_file`/`read_module`, `changed_objects` — их заменяют
+`rg` и `git diff --name-status` (профиль `full` возвращает их, если у агента нет шелла).
+Незаменимы: `find_callers`/`call_graph`/`find_callees` (вызов против объявления, полный счёт),
+`get_object`/`writes_to` (слияние базы с расширениями), `find_overrides`, `fts_search`,
+`find_routine`, `review_set`, `read_routine`, `get_form`/`get_service`.
+Корни для rg брать из `overview()` — база и КАЖДОЕ расширение отдельным корнем, иначе теряется
+до 75 % результатов. Полная карта с замерами:
+[docs/LITE_USAGE.md#rg-или-mcp-карта-маршрутизации](docs/LITE_USAGE.md#rg-или-mcp-карта-маршрутизации).
+Эта же карта зашита в `instructions` сервера — агент-потребитель получает её при подключении.
+
 ## Прочее
 - Тесты: `uv run pytest tests/` (bare `pytest` соберёт 0 — нет testpaths).
 - Как роли-потребители читают данные (read-only API из 29 инструментов) — [docs/MCP_USAGE.md](docs/MCP_USAGE.md).

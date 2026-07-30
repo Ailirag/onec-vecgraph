@@ -111,10 +111,54 @@ def index_audit(ws: Workspace) -> list[str]:
     return fails
 
 
+def parser_audit(ws: Workspace) -> list[str]:
+    """НЕЗАВИСИМАЯ проверка полноты парсера: объявления по сырому тексту против parse_module.
+
+    Аудит индекса сверяет индекс с ТЕМ ЖЕ парсером и поэтому не видит потерь самого парсера —
+    именно так остались незамеченными две рутины, которые парсер проглатывал целиком (конец
+    рутины после `;` и многострочный литерал с закомментированным продолжением). Здесь
+    объявления считаются по сырым строкам, не проходя через очистку комментариев: правило
+    грубее (строки-комментарии и продолжения литерала отбрасываем по началу строки), поэтому
+    расхождение — сигнал посмотреть глазами, а не автоматический дефект."""
+    from onec_vecgraph.bsl.parser import parse_module
+
+    fails: list[str] = []
+    worst: list[tuple[int, str, int, int]] = []
+    files = 0
+    for src in ws.sources:
+        for path in ws.bsl_files(src, fresh=True):
+            files += 1
+            try:
+                text = read_text(path)
+            except OSError:
+                continue
+            raw = 0
+            for ln in text.splitlines():
+                s = ln.strip()
+                if not s or s.startswith("//") or s.startswith("|"):
+                    continue
+                if _DECL_RE.match(ln):
+                    raw += 1
+            got = len(parse_module(text))
+            if raw > got:
+                worst.append((raw - got, str(path), raw, got))
+    worst.sort(reverse=True)
+    total_lost = sum(w[0] for w in worst)
+    print(f"    файлов={files} файлов с недобором={len(worst)} суммарный недобор={total_lost}")
+    for delta, path, raw, got in worst[:5]:
+        print(f"      -{delta}: {path} (по тексту {raw}, парсер {got})")
+    if total_lost:
+        fails.append(f"парсер видит меньше объявлений, чем есть в тексте: {total_lost} "
+                     f"в {len(worst)} файлах (первые примеры выше)")
+    return fails
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--commits", default=",".join(DEFAULT_COMMITS))
     ap.add_argument("--per-commit", type=int, default=6, help="рутин на коммит")
+    ap.add_argument("--parser-audit", action="store_true",
+                    help="независимая сверка объявлений по тексту с parse_module")
     ap.add_argument("--index-audit", action="store_true",
                     help="полная сверка symbols с живым разбором (минуты)")
     args = ap.parse_args()
@@ -128,6 +172,9 @@ def main() -> int:
 
     fails: list[str] = []
     checked = 0
+    if args.parser_audit:
+        print("\n=== независимая сверка полноты парсера")
+        fails.extend(parser_audit(ws))
     if args.index_audit:
         print("\n=== полная сверка индекса с живым разбором")
         fails.extend(index_audit(ws))

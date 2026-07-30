@@ -50,6 +50,7 @@ HOT = "ОбработкаЗаполнения"
 NORM = "ДобавлениеРеквизитовФормы"
 DOC = "ДИТ_Претензия"
 CM = "ДИТ_ТранспортныеНазначения"
+OVR = "ПриобретениеТоваровУслуг"  # 62 перехвата в расширениях — у вопроса есть ответ в обеих ветках
 
 _ENC = tiktoken.get_encoding("cl100k_base")
 
@@ -94,6 +95,29 @@ async def call(tool: str, args: dict) -> str:
     return "".join(getattr(c, "text", "") for c in content)
 
 
+def obj_dirs(ws: Workspace, folder: str, name: str) -> str:
+    """Каталоги объекта во ВСЕХ источниках — сужение для grep без масок.
+
+    Маска вида `-g "*/Documents/Имя/*"` на абсолютных Windows-путях не срабатывает: ветка grep
+    молча возвращала пустоту, а пустой ответ в таблице выглядел как «0 токенов» — то есть
+    подтасовка меняла знак, но не исчезала."""
+    return " ".join(f'"{s.files_root / folder / name}"' for s in ws.sources
+                    if (s.files_root / folder / name).is_dir())
+
+
+def _cold() -> None:
+    """Полное охлаждение кэшей MCP перед замером «живого темпа».
+
+    Раньше сбрасывался только `_DIRTY_CACHE`, а разобранные модули, строки, индекс перехватов и
+    git-списки выживали — то есть «живой темп» был ГОРЯЧИМ замером и завышал скорость MCP (на
+    find_overrides это 0.001 с против 0.24-1.05 с на холодном кэше)."""
+    from onec_vecgraph.lite import gitview as _gv
+
+    code_intel.clear_caches()
+    _gv._FILE_LISTS.clear()  # noqa: SLF001
+    _gv._repo_root.cache_clear()  # noqa: SLF001
+
+
 def scenarios(ws: Workspace, rg: str) -> list[tuple]:
     D = dirs(ws)
     return [
@@ -115,9 +139,13 @@ def scenarios(ws: Workspace, rg: str) -> list[tuple]:
         ("read_routine (тело метода)", "текст одной рутины",
          ("read_routine", {"routine_name": NORM}),
          f'"{rg}" -n -e "^\\s*(Процедура|Функция)\\s+{NORM}" {D} | head -3'),
+        # Объект с РЕАЛЬНЫМИ перехватами (62 в расширениях) и grep, суженный на тот же объект.
+        # Раньше здесь стоял объект без перехватов, а команда grep не фильтровала по объекту:
+        # обе ветки не отвечали на вопрос, и строка давала MCP фиктивные x43 по токенам.
         ("find_overrides (перехваты объекта)", "что переопределяют расширения у объекта",
-         ("find_overrides", {"kind": "Document", "name": DOC, "max_results": 20}),
-         f'"{rg}" -n --no-heading -e "^\\s*&(Вместо|Перед|После|ИзменениеИКонтроль)" {D} | head -20'),
+         ("find_overrides", {"kind": "Document", "name": OVR, "max_results": 20}),
+         f'"{rg}" -n --no-heading -e "^\\s*&(Вместо|Перед|После|ИзменениеИКонтроль)" '
+         f'{obj_dirs(ws, "Documents", OVR)} | head -20'),
         ("writes_to (движения документа)", "в какие регистры пишет документ",
          ("writes_to", {"document": DOC}),
          f'"{rg}" -n -g "*.mdo" -e "registerRecords" {D} | grep -i "{DOC}" | head -20'),
@@ -133,7 +161,8 @@ def scenarios(ws: Workspace, rg: str) -> list[tuple]:
          f'"{rg}" -n --no-heading -e "ПроверитьЗаполнение" -e "ТранспортноеНазначение" {D} | head -30'),
         ("list_routines (состав модуля)", "какие методы есть в модуле",
          ("list_routines", {"kind": "CommonModule", "name": CM, "max_results": 40}),
-         f'"{rg}" -n -e "^\\s*(Процедура|Функция)" {D} | grep -i "{CM}" | head -40'),
+         f'"{rg}" -n --no-heading -e "^\\s*(Процедура|Функция)" '
+         f'{obj_dirs(ws, "CommonModules", CM)} | head -40'),
         ("find_type_usages (где тип)", "где используется тип объекта",
          ("find_type_usages", {"kind": "Document", "name": DOC, "max_results": 30}),
          f'"{rg}" -n -g "*.mdo" -g "*.form" -e "Document(Ref|Object)\\.{DOC}\\b" {D} | head -30'),
@@ -148,7 +177,7 @@ async def run(ws: Workspace, runs: int) -> list[dict]:
         lt_b2b: list[float] = []
         text = ""
         for i in range(runs):
-            code_intel._DIRTY_CACHE.clear()  # noqa: SLF001 — режим «живой сессии»
+            _cold()  # режим «живой сессии»: гасим ВСЕ кэши, а не только грязный набор
             t0 = time.perf_counter()
             text = await call(tool, args)
             lt_real.append(time.perf_counter() - t0)
