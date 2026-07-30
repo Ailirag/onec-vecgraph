@@ -234,3 +234,27 @@ def test_review_set_drops_foreign_same_named_callers(git_ws: Workspace) -> None:
     for row in form_rows:
         quals = [(c.get("qualifier") or "").lower() for c in row.get("callers") or []]
         assert "файлы" not in quals
+
+
+def test_review_set_keeps_form_method_called_through_a_form_reference(git_ws: Workspace) -> None:
+    """Экспортный метод модуля формы ШТАТНО вызывается снаружи по ссылке на форму.
+
+    Идиома 1С: `&НаКлиентеНаСервереБезКонтекста Процедура X(Форма)` → `Форма.МетодЭкспорт()`.
+    Правило «у форменной цели любой чужой квалификатор доказывает другую цель» было неверным и
+    молча обнуляло вызывающих (на УТ — 242 реальных места вызова), причём find_callers на тот же
+    вопрос отвечал верно. Отсекаем только доказуемо чужое — квалификатор-имя общего модуля."""
+    src = Path(git_ws.sources[0].files_root)
+    form = src / "Catalogs" / "Товары" / "Forms" / "ФормаЭлемента" / "Module.bsl"
+    _w(form, "Функция ПолучитьПоля() Экспорт\n    Возврат 1;\nКонецФункции\n")
+    _w(src / "CommonModules" / "Помощник" / "Помощник.mdo",
+       _COMMON.replace("Проверки", "Помощник").replace("22222222", "77777777"))
+    _w(src / "CommonModules" / "Помощник" / "Module.bsl",
+       "Процедура Обработать(Форма) Экспорт\n    Поля = Форма.ПолучитьПоля();\nКонецПроцедуры\n")
+    _git(["add", "-A"], Path(git_ws.root))
+    _git(["commit", "-q", "-m", "form+helper"], Path(git_ws.root))
+    _w(form, "Функция ПолучитьПоля() Экспорт\n    Возврат 2;\nКонецФункции\n")
+    res = gitview.review_set(git_ws, detail=True, max_routines=50)
+    rows = [r for r in res["routines"] if r["routine"] == "ПолучитьПоля"]
+    assert rows, "изменённый метод формы должен попасть в набор"
+    assert rows[0]["callers_count"] == 1, rows[0]
+    assert rows[0].get("callers_foreign_dropped", 0) == 0, rows[0]

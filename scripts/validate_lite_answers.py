@@ -26,12 +26,32 @@ from onec_vecgraph.lite import code_intel, fts, search
 from onec_vecgraph.lite.workspace import Workspace, read_text
 
 UT_ROOT = r"H:\1C\xml\GT\prod\ut\conf"
-UT_EXTS = (
+# Список расширений НЕ зашиваем: он уже разошёлся с боевым воркспейсом (подключили пятое,
+# РасширениеКонтурЛогистика на 689 .bsl) и аудит проверял бы урезанный корпус, считая его полным.
+# Берём состав из живого состояния; хардкод — только фолбэк, если состояния нет.
+_FALLBACK_EXTS = (
     r"H:\1C\xml\GT\prod\ut\битЕГАИС_УТ",
     r"H:\1C\xml\GT\prod\ut\дит_КонтурEDI",
     r"H:\1C\xml\GT\prod\ut\ДИТ_ПретензииMMBI",
     r"H:\1C\xml\GT\prod\ut\ДИТ_РасширениеАдаптацияУТ",
 )
+
+
+def _ut_ext_roots() -> tuple[str, ...]:
+    """Расширения воркспейса с корнем UT_ROOT — из ~/.onec-lite/config.json."""
+    import json
+
+    try:
+        cfg = json.loads((Path.home() / ".onec-lite" / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _FALLBACK_EXTS
+    for entry in (cfg.get("workspaces") or {}).values():
+        if str(entry.get("root", "")).rstrip("\\/").lower() == UT_ROOT.lower():
+            return tuple(entry.get("ext_roots") or ())
+    return _FALLBACK_EXTS
+
+
+UT_EXTS = _ut_ext_roots()
 REPO = Path(UT_ROOT).parent
 # Независимый набор: ONE-2623 (41 файл), ONE-4502 (22), ONE-4620 (9) — разработка шла не на них.
 DEFAULT_COMMITS = ["9a39a83e3c", "54f5431ee1", "7b2302c5e7"]
@@ -230,7 +250,10 @@ def main() -> int:
             # 4) перекрёстная проверка по тексту: rg не должен видеть вызовы там, где мы 0.
             # Сверять есть смысл только при ИЗВЕСТНОМ счёте объявлений: при обрезанном скане
             # (decl_total=None) нижняя граница неизвестна и сравнение дало бы ложный FAIL.
-            if (total or 0) == 0 and decl_total is not None:
+            # И только при действительно пустой выдаче: total=None означает «полный счёт
+            # неизвестен» (ответ пришёл сканом), а не «вызовов нет». Пока индекс пересобирался,
+            # прежнее условие давало ложный FAIL на рутинах, где скан честно вернул 4 вызывающих.
+            if (total or 0) == 0 and shown == 0 and decl_total is not None:
                 hits = rg_count(ws, rf"\b{re.escape(rt_name)}\s*\(")
                 if hits > decl_total + 2:  # объявления + запас на комментарии
                     fails.append(f"{commit}/{rt_name}: инструмент 0 вызовов, а rg видит "

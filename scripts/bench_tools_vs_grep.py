@@ -106,16 +106,19 @@ def obj_dirs(ws: Workspace, folder: str, name: str) -> str:
 
 
 def _cold() -> None:
-    """Полное охлаждение кэшей MCP перед замером «живого темпа».
+    """Честно ПЕРВЫЙ вопрос в сессии: свежий Workspace и погашенные кэши разбора.
 
-    Раньше сбрасывался только `_DIRTY_CACHE`, а разобранные модули, строки, индекс перехватов и
-    git-списки выживали — то есть «живой темп» был ГОРЯЧИМ замером и завышал скорость MCP (на
-    find_overrides это 0.001 с против 0.24-1.05 с на холодном кэше)."""
+    Двух ошибок здесь уже было. Сначала сбрасывался только `_DIRTY_CACHE`, и разобранные модули,
+    строки, индекс перехватов и git-списки выживали. Потом выяснилось, что и этого мало: кэш
+    листингов и объектов живёт в самом Workspace, а `main()` прогревал его ДО замера (1.8 с), так
+    что «первый вопрос» на деле мерился вторым — отсюда фиктивные x687 у get_object и x3 у
+    list_routines. Создаём Workspace заново, как это делает свежая сессия."""
     from onec_vecgraph.lite import gitview as _gv
 
     code_intel.clear_caches()
     _gv._FILE_LISTS.clear()  # noqa: SLF001
     _gv._repo_root.cache_clear()  # noqa: SLF001
+    lite_server._WORKSPACES[WS] = Workspace(UT_ROOT, ext_roots=UT_EXTS)  # noqa: SLF001
 
 
 def scenarios(ws: Workspace, rg: str) -> list[tuple]:
@@ -123,22 +126,30 @@ def scenarios(ws: Workspace, rg: str) -> list[tuple]:
     return [
         ("find_callers (горячий метод)", "места вызова с файлом и строкой, без объявлений",
          ("find_callers", {"routine_name": HOT, "max_results": 20}),
-         f'"{rg}" -n --no-heading -e "\\b{HOT}\\s*\\(" {D} | grep -v -E "^[^:]+:[0-9]+:\\s*(Процедура|Функция)" | head -20'),
+         f'"{rg}" -n --no-heading -e "\\b{HOT}\\s*\\(" {D} | grep -v -E ":[0-9]+:[[:space:]]*(Процедура|Функция)" | head -20'),
         ("find_callers (сводка)", "сколько всего и по каким объектам",
          ("find_callers", {"routine_name": HOT, "summary_only": True}),
-         f'"{rg}" -n --no-heading -e "\\b{HOT}\\s*\\(" {D} | grep -v -E "^[^:]+:[0-9]+:\\s*(Процедура|Функция)" | sed -E "s#.*(src[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+).*#\\1#" | sort | uniq -c | sort -rn | head -20'),
+         f'"{rg}" -n --no-heading -e "\\b{HOT}\\s*\\(" {D} | grep -v -E ":[0-9]+:[[:space:]]*(Процедура|Функция)" | sed -E "s#.*(src[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+).*#\\1#" | sort | uniq -c | sort -rn | head -20'),
         ("find_callers (обычный метод)", "места вызова",
          ("find_callers", {"routine_name": NORM, "max_results": 20}),
-         f'"{rg}" -n --no-heading -e "\\b{NORM}\\s*\\(" {D} | grep -v -E "^[^:]+:[0-9]+:\\s*(Процедура|Функция)"'),
+         f'"{rg}" -n --no-heading -e "\\b{NORM}\\s*\\(" {D} | grep -v -E ":[0-9]+:[[:space:]]*(Процедура|Функция)"'),
         ("find_routine (объявления)", "где объявлен метод",
          ("find_routine", {"routine_name": NORM, "max_results": 10}),
          f'"{rg}" -n --no-heading -e "^\\s*(Процедура|Функция)\\s+{NORM}\\s*\\(" {D} | head -10'),
         ("get_object (реквизиты+обязательность)", "состав реквизитов с типами и обязательностью",
          ("get_object", {"kind": "Document", "name": DOC}),
-         f'"{rg}" -n -g "*.mdo" -e "<name>" -e "<types>" -e "fillChecking" {D} | grep -i "{DOC}" | head -120'),
+         # Греп по СОБСТВЕННЫМ .mdo объекта: прежняя команда шла по всей конфигурации и
+         # фильтровала по подстроке имени — в выдачу попадали чужие объекты, а состава
+         # реквизитов запрошенного там не было, то есть ветка grep на вопрос не отвечала.
+         f'"{rg}" -n -g "*.mdo" -e "<name>" -e "<types>" -e "fillChecking" '
+         f'{obj_dirs(ws, "Documents", DOC)} | head -200'),
         ("read_routine (тело метода)", "текст одной рутины",
          ("read_routine", {"routine_name": NORM}),
-         f'"{rg}" -n -e "^\\s*(Процедура|Функция)\\s+{NORM}" {D} | head -3'),
+         # grep обязан ПРОЧИТАТЬ тело: координаты объявления — не ответ на «текст рутины».
+         # Прежние 92 токена против 1850 у MCP сравнивали ссылку с содержимым.
+         f'f=$("{rg}" -l -e "^\\s*(Процедура|Функция)\\s+{NORM}" {D} | head -1); '
+         f'awk \'/^[[:space:]]*(Процедура|Функция)[[:space:]]+{NORM}/,'
+         f'/^[[:space:]]*(КонецПроцедуры|КонецФункции)/\' "$f"'),
         # Объект с РЕАЛЬНЫМИ перехватами (62 в расширениях) и grep, суженный на тот же объект.
         # Раньше здесь стоял объект без перехватов, а команда grep не фильтровала по объекту:
         # обе ветки не отвечали на вопрос, и строка давала MCP фиктивные x43 по токенам.

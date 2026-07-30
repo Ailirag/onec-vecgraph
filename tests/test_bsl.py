@@ -160,3 +160,34 @@ def test_unterminated_string_does_not_eat_rest_of_file() -> None:
     routines = {x.name: x for x in parse_module(src)}
     assert set(routines) == {"Битая", "Целая"}
     assert [c.method for c in routines["Целая"].calls] == ["ВидимыйВызов"]
+
+
+def test_routine_declared_and_closed_on_one_line() -> None:
+    """`Функция Х() Возврат 1; КонецФункции` — проверка конца стояла только в ветке «внутри
+    рутины», поэтому такая рутина оставалась открытой и поглощала следующую целиком."""
+    src = (
+        "Функция Х() Возврат 1; КонецФункции\n"
+        "\n"
+        "Процедура Вторая()\n"
+        "    ВидимыйВызов();\n"
+        "КонецПроцедуры\n"
+    )
+    routines = {x.name: x for x in parse_module(src)}
+    assert set(routines) == {"Х", "Вторая"}
+    assert routines["Х"].end_line == 1
+    assert [c.method for c in routines["Вторая"].calls] == ["ВидимыйВызов"]
+
+
+def test_call_on_the_closing_line_is_not_lost() -> None:
+    """Строка с `КонецПроцедуры` в тело не входила — вызов на ней был невидим для индекса."""
+    src = (
+        "Процедура Первая()\n"
+        "    Если Истина Тогда Б(); КонецЕсли;КонецПроцедуры\n"
+        "\n"
+        "Процедура Вторая()\n"
+        "    Возврат;\n"
+        "КонецПроцедуры\n"
+    )
+    routines = {x.name: x for x in parse_module(src)}
+    assert set(routines) == {"Первая", "Вторая"}
+    assert [c.method for c in routines["Первая"].calls] == ["Б"]

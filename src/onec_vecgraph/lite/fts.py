@@ -157,6 +157,14 @@ def db_path_for(ws: Workspace) -> Path:
     return index_dir() / f"{digest}.db"
 
 
+def _source_fingerprint(ws: Workspace) -> list[str]:
+    """Отпечаток состава источников воркспейса (корни база+расширения, нормализованные).
+
+    Сравнение с записанным при сборке отвечает на вопрос, который пофайловая проверка задать не
+    может: не появился ли / не отключён ли ЦЕЛЫЙ источник."""
+    return sorted(str(s.root).lower() for s in ws.sources)
+
+
 def prune_orphan_indexes(live_roots: list[str], *, dry_run: bool = True) -> dict:
     """Удалить БД индексов, не принадлежащие ни одному текущему воркспейсу.
 
@@ -385,6 +393,7 @@ class FtsIndex:
         self._building = False                # идёт ли сборка (fg или bg) — единств. писатель
         self._lock_handle = None              # handle межпроцессного лока (для heartbeat)
         self._last_beat = 0.0
+        self._sources_verified = False        # сверяли ли состав источников с записанным
 
     # -- status -------------------------------------------------------------
 
@@ -423,6 +432,12 @@ class FtsIndex:
             return out
         out.update(built=bool(units or symbols), built_at=meta.get("built_at"), units=units,
                    files=files, symbols=symbols, size_bytes=self.path.stat().st_size)
+        if out["built"] and (changed := self._sources_changed(meta)) is not None:
+            out["sources_changed"] = changed
+            if changed:
+                out["note"] = ("Состав источников изменился после сборки (подключено или "
+                               "отключено расширение) — индекс неполон, идёт/нужен рефреш. "
+                               "Полные счётчики пока считать нельзя.")
         if not out["built"]:
             # Пустой индекс при существующем файле — это либо идущая сборка, либо сорванная:
             # называем причину, чтобы «нет индекса» не читалось как «нет данных в конфигурации».
@@ -448,7 +463,18 @@ class FtsIndex:
         """Неблокирующе запустить инкрементальную сборку в daemon-потоке (если она не идёт
         и force|истёк TTL); поиск при этом работает по текущему индексу. Возвращает True,
         если сборка запущена этим вызовом."""
-        if not fts_available() or not self._try_start_build(force=force):
+        if not fts_available():
+            return False
+        # Смена состава источников обходит TTL: ждать до 30 с с индексом без целого расширения
+        # нельзя. Проверяем ОДИН раз на процесс (дальше отпечаток уже совпадает).
+        if not force and not self._sources_verified:
+            self._sources_verified = True
+            try:
+                if self.status().get("sources_changed"):
+                    force = True
+            except Exception:  # noqa: BLE001 — статус не должен мешать сборке
+                pass
+        if not self._try_start_build(force=force):
             return False
 
         def _run() -> None:
@@ -606,6 +632,14 @@ class FtsIndex:
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('root', ?)",
                 (json.dumps(str(self.ws.root), ensure_ascii=False),),
             )
+            # Состав ИСТОЧНИКОВ на момент сборки. Имя БД — хэш только корня, а _is_stale
+            # проверяет пофайлово: появление или отключение целого расширения так не заметить.
+            # Подключив расширение на 689 файлов, мы получали built=true при отсутствии в
+            # индексе всего источника — до следующего рефреша по TTL.
+            con.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('sources', ?)",
+                (json.dumps(_source_fingerprint(self.ws), ensure_ascii=False),),
+            )
             # Коммиты репозиториев на момент сборки. Без них ЗАКОММИЧЕННАЯ после сборки правка
             # была невидима: живым разбором подмешивается только незакоммиченное (git status),
             # а строк по такому файлу в выборке нет — значит и пометки stale не будет. Имея
@@ -623,6 +657,18 @@ class FtsIndex:
             "units_written": units_written, "seconds": round(time.monotonic() - t0, 1),
             **{k: v for k, v in self.status().items() if k in ("units", "files")},
         }
+
+    def _sources_changed(self, meta: dict) -> bool | None:
+        """Разошёлся ли состав источников с записанным при сборке. None — сборка старая, без
+        отпечатка (тогда не утверждаем ни «изменился», ни «нет»)."""
+        raw = meta.get("sources")
+        if not raw:
+            return None
+        try:
+            was = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return sorted(was) != _source_fingerprint(self.ws)
 
     def _built_at(self) -> str | None:
         """Время последней ЗАВЕРШЁННОЙ сборки (meta.built_at пишется одним коммитом в конце)

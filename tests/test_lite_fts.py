@@ -398,3 +398,49 @@ def test_type_usages_declares_its_scope(ws: Workspace) -> None:
     res = code_intel.type_usages(ws, "Catalog", "Номенклатура")
     assert res["scope"] == "metadata"
     assert "КОДА" in res["scope_note"] or "код" in res["scope_note"].lower()
+
+
+_EXT_MDO = """<?xml version="1.0" encoding="UTF-8"?>
+<mdclass:Configuration xmlns:mdclass="http://g5.1c.ru/v8/dt/metadata/mdclass"
+  uuid="99999999-0000-0000-0000-0000000000cc">
+  <name>РасширениеТест</name>
+  <configurationExtensionPurpose>AddOn</configurationExtensionPurpose>
+</mdclass:Configuration>
+"""
+
+
+def test_index_notices_a_whole_source_appearing(ws: Workspace, tmp_path: Path) -> None:
+    """Подключение расширения ПОСЛЕ сборки обязано быть заметно в состоянии индекса.
+
+    Имя БД — хэш только корня, а _is_stale проверяет пофайлово: появление целого источника так
+    не поймать. На боевом gt_ut подключение расширения на 689 файлов давало built=true при
+    полном отсутствии источника в индексе — до случайного рефреша по TTL."""
+    idx = fts.index_for(ws)
+    idx.build(wait=60)
+    assert idx.status()["built"] is True
+    assert idx.status().get("sources_changed") is False
+
+    ext = tmp_path / "ext"
+    _w(ext / "src" / "Configuration" / "Configuration.mdo", _EXT_MDO)
+    _w(ext / "src" / "CommonModules" / "ДопРасчет" / "ДопРасчет.mdo",
+       _COMMON.replace("РасчетЗатрат", "ДопРасчет"))
+    _w(ext / "src" / "CommonModules" / "ДопРасчет" / "Module.bsl",
+       "Функция ДопиРассчитать() Экспорт\n    Возврат 1;\nКонецФункции\n")
+
+    wider = Workspace(ws.root, ext_roots=(str(ext),))
+    assert len(wider.sources) == len(ws.sources) + 1
+    widened = fts.FtsIndex(wider)
+    st = widened.status()
+    assert st["built"] is True            # файл тот же
+    assert st["sources_changed"] is True  # но состав разошёлся — и это ВИДНО
+    assert "источник" in (st.get("note") or "").lower()
+
+    # рефреш обязан обойти TTL и добрать новый источник
+    assert widened.ensure_background() is True
+    for _ in range(120):
+        if not widened.status().get("building"):
+            break
+        time.sleep(0.5)
+    after = widened.status()
+    assert after["sources_changed"] is False, after
+    assert widened.has_name("ДопиРассчитать") is True

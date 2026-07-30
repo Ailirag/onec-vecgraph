@@ -206,10 +206,26 @@ def parse_module(text: str) -> list[Routine]:
                 pending_directive = None
                 pending_override = None
                 body_start = scan + 1  # тело начинается после всей (возможно многострочной) сигнатуры
+                # Рутина может быть объявлена И закрыта в одной строке: `Функция Х() Возврат 1;
+                # КонецФункции`. Проверка конца стояла только в ветке `else`, поэтому такая
+                # рутина «оставалась открытой» и поглощала следующую целиком.
+                # group(3) — всё после открывающей скобки до конца строки, поэтому берём
+                # её НАЧАЛО: end(3) это конец строки, и хвост всегда был пустым.
+                tail = lines[scan][decl.start(3) if scan == idx else 0:]
+                em = _END_RE.search(tail)
+                if em:
+                    current.end_line = scan + 1
+                    current.calls = _find_calls(tail[: em.start()], scan + 1)
+                    routines.append(current)
+                    current = None
         else:
-            if _END_RE.search(line):
+            em = _END_RE.search(line)
+            if em:
                 current.end_line = idx + 1
-                body = "\n".join(lines[body_start : idx])
+                # Часть закрывающей строки ДО ключевого слова — тоже тело: в `Если Истина Тогда
+                # Б(); КонецЕсли;КонецПроцедуры` вызов Б() иначе терялся, потому что строку с
+                # концом рутины тело не включало вовсе.
+                body = "\n".join([*lines[body_start:idx], line[: em.start()]])
                 current.calls = _find_calls(body, body_start + 1)  # body_start — 0-based индекс
                 routines.append(current)
                 current = None
