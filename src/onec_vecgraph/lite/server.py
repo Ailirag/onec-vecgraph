@@ -551,6 +551,11 @@ def _merge_object_copies(parsed: list[tuple[str, MetaObject]]) -> tuple[MetaObje
         base.tabular += [t for t in other.tabular if t.name.lower() not in have_tab]
         base.forms += [f for f in other.forms if f.name.lower() not in have_forms]
         base.modules += [m for m in other.modules if m.module_type.lower() not in have_mods]
+        # Движения и владельцев расширение тоже ДОПОЛНЯЕТ: без объединения ответ показывал
+        # 1 регистр из 4 при том, что merged_from перечислял три источника.
+        base.register_records += [r for r in other.register_records
+                                  if r not in base.register_records]
+        base.owners += [o for o in other.owners if o not in base.owners]
     return base, names
 
 

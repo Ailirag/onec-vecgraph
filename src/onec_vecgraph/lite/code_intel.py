@@ -1135,13 +1135,31 @@ def writes_to(ws: Workspace, *, document: str = "", register: str = "", source: 
         kind, _, name = document.partition(".")
         if not name:
             kind, name = "Document", document
-        src, ref, also, err = ws.find_object(kind, name, source)
+        cands, err = ws.find_objects(kind, name, source)
         if err:
             return {"error": err}
-        assert src is not None and ref is not None
-        obj = ws.parse_object(src, ref)
-        return {"source": src.name, "document": obj.fqn, "also_in": also,
-                "registers": obj.register_records}
+        # Движения заимствованного документа расширение ДОПОЛНЯЕТ, а его копия .mdo при этом
+        # часто вообще не содержит RegisterRecords. Брать первый источник (расширения раньше
+        # базы) означало отвечать «регистров нет» при непустом списке — проверено на боевом
+        # документе: 0 вместо 4 (1 в базе + 3 добавлены расширением). Объединяем по всем копиям.
+        registers: list[str] = []
+        per_source: dict[str, list[str]] = {}
+        fqn = f"{kind}.{name}"
+        for cand_src, cand_ref in cands:
+            try:
+                obj = ws.parse_object(cand_src, cand_ref)
+            except ValueError:
+                continue
+            fqn = obj.fqn
+            own = list(obj.register_records)
+            if own:
+                per_source[cand_src.name] = own
+            registers += [r for r in own if r not in registers]
+        return {"source": (next(iter(per_source), cands[0][0].name) if cands else ""),
+                "document": fqn,
+                "sources_checked": [s.name for s, _ in cands],
+                "registers": registers,
+                **({"registers_by_source": per_source} if len(per_source) > 1 else {})}
     if not register:
         return {"error": "Укажите document или register."}
     srcs, err = ws.resolve_sources(source)
