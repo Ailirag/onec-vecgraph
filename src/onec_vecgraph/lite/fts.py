@@ -36,7 +36,10 @@ from . import admin as lite_admin
 from . import code_intel
 from .workspace import LiteSource, Workspace, read_text
 
-_SCHEMA_VERSION = 7  # v7: calls хранит КАЖДОЕ вхождение вызова (парсер больше не схлопывает
+_SCHEMA_VERSION = 8  # v8: исправлен разбор — конец рутины после `;` и многострочный
+# литерал с закомментированным продолжением (парсер терял рутины ЦЕЛИКОМ, а их тело
+# приписывалось предыдущей); инкремент по mtime сам бы это не пересобрал — файлы не менялись
+# v7: calls хранит КАЖДОЕ вхождение вызова (парсер больше не схлопывает
 # повторные вызовы одного метода в рутине — так пропадало 6 мест вызова из 254)
 # v6: +calls.qualifier_low и symbols.object_low — SQLite lower()/LIKE НЕ
 # приводят кириллицу к нижнему регистру, поэтому сравнение квалификатора в SQL молча не
@@ -336,6 +339,43 @@ def _object_units(ws: Workspace, src: LiteSource, ref) -> list[tuple]:
 # Index
 # --------------------------------------------------------------------------- #
 
+def _repo_heads(ws: Workspace) -> dict[str, str]:
+    """{корень репозитория: sha HEAD} для источников воркспейса (пусто, если git недоступен)."""
+    try:
+        from . import gitview as _gv
+        by_root, _missing = _gv._repos(ws.sources)  # noqa: SLF001 — общий внутренний слой
+    except Exception:  # noqa: BLE001
+        return {}
+    out: dict[str, str] = {}
+    for repo in by_root:
+        try:
+            code, sha = _gv._git(["rev-parse", "HEAD"], repo)  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            continue
+        if code == 0 and sha.strip():
+            out[str(repo)] = sha.strip()
+    return out
+
+
+def indexed_heads(ws: Workspace) -> dict[str, str]:
+    """Коммиты, на которых собран индекс (пусто — неизвестно/индекса нет)."""
+    path = db_path_for(ws)
+    if not path.exists():
+        return {}
+    try:
+        con = sqlite3.connect(str(path))
+        try:
+            row = con.execute("SELECT value FROM meta WHERE key='heads'").fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+    try:
+        return json.loads(row[0]) if row and row[0] else {}
+    except (TypeError, ValueError):
+        return {}
+
+
 class FtsIndex:
     def __init__(self, ws: Workspace) -> None:
         self.ws = ws
@@ -565,6 +605,14 @@ class FtsIndex:
             con.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('root', ?)",
                 (json.dumps(str(self.ws.root), ensure_ascii=False),),
+            )
+            # Коммиты репозиториев на момент сборки. Без них ЗАКОММИЧЕННАЯ после сборки правка
+            # была невидима: живым разбором подмешивается только незакоммиченное (git status),
+            # а строк по такому файлу в выборке нет — значит и пометки stale не будет. Имея
+            # базовый коммит, потребитель одним `git diff --name-only` узнаёт, что догонять.
+            con.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('heads', ?)",
+                (json.dumps(_repo_heads(self.ws), ensure_ascii=False),),
             )
             con.commit()
         finally:

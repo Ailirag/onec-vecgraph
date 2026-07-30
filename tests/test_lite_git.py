@@ -182,3 +182,55 @@ def test_review_set_maps_hunks_to_routines_and_callers(git_ws: Workspace) -> Non
     # флаги говорят каждый о своём: окно полно и предохранитель не срабатывал
     assert res["routine_count"] == 2
     assert res["window_incomplete"] is False and res["safety_valve_fired"] is False
+
+
+_NEW_MODULE_MDO = _COMMON.replace("Проверки", "МодульНовый").replace("22222222", "33333333")
+_NEW_MODULE_BSL = """Процедура СовсемНоваяРутина() Экспорт
+    Возврат;
+КонецПроцедуры
+"""
+
+
+def test_review_set_sees_routines_in_a_brand_new_directory(git_ws: Workspace) -> None:
+    """Новый КАТАЛОГ объекта: git status сворачивает его в одну запись без -uall.
+
+    Из-за этого рутины только что созданного модуля не попадали в ревью незакоммиченной
+    работы (ref=""), причём молча: window_incomplete и safety_valve_fired оставались false,
+    и агент считал набор полным."""
+    src = Path(git_ws.sources[0].files_root)
+    _w(src / "CommonModules" / "МодульНовый" / "МодульНовый.mdo", _NEW_MODULE_MDO)
+    _w(src / "CommonModules" / "МодульНовый" / "Module.bsl", _NEW_MODULE_BSL)
+    res = gitview.review_set(git_ws, detail=True, max_routines=50)
+    assert "CommonModule.МодульНовый::СовсемНоваяРутина" in {
+        f"{r['object']}::{r['routine']}" for r in res["routines"]
+    }
+
+
+def test_review_set_drops_foreign_same_named_callers(git_ws: Workspace) -> None:
+    """Одноимённый метод чужого общего модуля — не вызывающий нашей форменной рутины.
+
+    `МодульРаботаСФайламиКлиент.ПриОткрытии()` вызывает метод ТОГО модуля; раньше такие строки
+    попадали в ревью-набор как вызывающие изменённого обработчика формы (на боевом ревью —
+    154 строки) и вдобавок поднимали рутину в ранжировании по риску."""
+    src = Path(git_ws.sources[0].files_root)
+    # общий модуль с методом ПриОткрытии + его вызов из третьего места
+    _w(src / "CommonModules" / "Файлы" / "Файлы.mdo",
+       _COMMON.replace("Проверки", "Файлы").replace("22222222", "44444444"))
+    _w(src / "CommonModules" / "Файлы" / "Module.bsl",
+       "Процедура ПриОткрытии(Отказ) Экспорт\n    Возврат;\nКонецПроцедуры\n")
+    _w(src / "Catalogs" / "Товары" / "Forms" / "ФормаЭлемента" / "Module.bsl",
+       "Процедура ПриОткрытии(Отказ)\n    Возврат;\nКонецПроцедуры\n")
+    _git(["add", "-A"], Path(git_ws.root))
+    _git(["commit", "-q", "-m", "forms"], Path(git_ws.root))
+    _w(src / "Catalogs" / "Товары" / "ObjectModule.bsl",
+       _OBJ_BSL + "\nПроцедура Тест()\n    Файлы.ПриОткрытии(Ложь);\nКонецПроцедуры\n")
+    # правим саму форменную рутину, чтобы она попала в набор
+    _w(src / "Catalogs" / "Товары" / "Forms" / "ФормаЭлемента" / "Module.bsl",
+       "Процедура ПриОткрытии(Отказ)\n    Отказ = Ложь;\nКонецПроцедуры\n")
+    res = gitview.review_set(git_ws, detail=True, max_routines=50)
+    form_rows = [r for r in res["routines"]
+                 if r["routine"] == "ПриОткрытии" and str(r.get("module")).startswith("Form:")]
+    assert form_rows, "изменённый обработчик формы должен попасть в набор"
+    for row in form_rows:
+        quals = [(c.get("qualifier") or "").lower() for c in row.get("callers") or []]
+        assert "файлы" not in quals

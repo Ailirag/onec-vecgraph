@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from copy import deepcopy
 from pathlib import Path
 from urllib.parse import quote
 
@@ -658,6 +659,10 @@ def _merge_object_copies(parsed: list[tuple[str, MetaObject]]) -> tuple[MetaObje
     base_name, base = max(parsed, key=lambda p: (len(p[1].fields), len(p[1].tabular)))
     if len(parsed) == 1:
         return base, names
+    # Копия: `base` лежит в кеше Workspace._objects, и сложение списков ниже мутировало ЕГО.
+    # Из-за этого один вызов get_object портил последующие writes_to/get_dependencies с
+    # source=<база>: они начинали показывать регистры расширения как регистры базы.
+    base = deepcopy(base)
     have_fields = {f.name.lower() for f in base.fields}
     have_tab = {t.name.lower() for t in base.tabular}
     have_forms = {f.name.lower() for f in base.forms}

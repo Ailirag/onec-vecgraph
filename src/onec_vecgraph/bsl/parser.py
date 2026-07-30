@@ -16,7 +16,12 @@ _DECL_RE = re.compile(
     rf"^\s*(Процедура|Функция|Procedure|Function)\s+({_IDENT})\s*\((.*)$",
     re.IGNORECASE,
 )
-_END_RE = re.compile(r"^\s*(КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)\b", re.IGNORECASE)
+# Конец рутины ищем не только с начала строки: в УТ есть `КонецЕсли;КонецПроцедуры` в одной
+# строке — при якоре ^ рутина «не закрывалась» и ПОГЛОЩАЛА следующую целиком (та исчезала из
+# списка, поиска и индекса, а её вызовы приписывались чужой рутине). Допускаем `;` перед ключевым
+# словом, но не произвольный текст, чтобы не поймать упоминание в строке или комментарии.
+_END_RE = re.compile(r"(?:^|;)\s*(КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)\b",
+                     re.IGNORECASE)
 _CALL_RE = re.compile(rf"(?:({_IDENT})\s*\.\s*)?({_IDENT})\s*\(")
 _DECL_MAX_LINES = 30  # сколько строк сигнатуры досматриваем в поисках `)` и `Экспорт`
 # &Directive, optionally with a quoted argument: &Вместо("БазовыйМетод").
@@ -72,13 +77,37 @@ class Routine:
 
 
 def strip_comments_strings(text: str) -> str:
-    """Replace string literals and // comments with spaces (preserving newlines)."""
+    """Replace string literals and // comments with spaces (preserving newlines).
+
+    Многострочный литерал 1С продолжается строкой, начинающейся с `|`, и между его частями
+    ДОПУСКАЕТСЯ комментарий. Раньше состояние «внутри строки» держалось до следующей кавычки где
+    угодно: закомментированное продолжение вида `//|Колонки");` закрывало литерал раньше времени,
+    следующая настоящая часть открывала его заново — и почти тысяча строк превращалась в пробелы.
+    Парсер на таком участке не видел ни `КонецПроцедуры`, ни объявлений: одна рутина УТ исчезала
+    целиком, а её тело приписывалось предыдущей. Поэтому судьбу литерала решаем по началу
+    следующей строки: `//` — комментарий (гасим, состояние храним), `|` — продолжение, иначе
+    литерал считаем незакрытым и обрываем на конце строки, чтобы не съесть остаток файла.
+    """
     out: list[str] = []
     i, n = 0, len(text)
     in_str = False
     while i < n:
         ch = text[i]
         if in_str:
+            if ch == "\n":
+                out.append("\n")
+                i += 1
+                j = i
+                while j < n and text[j] in " \t":
+                    j += 1
+                if text.startswith("//", j):
+                    end = text.find("\n", j)
+                    end = n if end < 0 else end
+                    out.append(" " * (end - i))
+                    i = end
+                elif not text.startswith("|", j):
+                    in_str = False
+                continue
             if ch == '"':
                 if i + 1 < n and text[i + 1] == '"':  # escaped quote inside string
                     out.append("  ")
@@ -178,7 +207,7 @@ def parse_module(text: str) -> list[Routine]:
                 pending_override = None
                 body_start = scan + 1  # тело начинается после всей (возможно многострочной) сигнатуры
         else:
-            if _END_RE.match(line):
+            if _END_RE.search(line):
                 current.end_line = idx + 1
                 body = "\n".join(lines[body_start : idx])
                 current.calls = _find_calls(body, body_start + 1)  # body_start — 0-based индекс

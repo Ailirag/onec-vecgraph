@@ -248,3 +248,85 @@ def test_index_is_not_truth_for_declarations_and_overrides(ws: Workspace) -> Non
     fresh = code_intel.find_declarations(ws, "ПереименованнаяСебестоимость")
     assert fresh["declaration_count"] == 1, fresh    # добавленная рутина видна сразу
     assert fresh["declarations"][0]["lines"] == [1, 3]
+
+
+def _git_init(root: Path) -> None:
+    import subprocess
+
+    def g(*args: str) -> None:
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                       cwd=str(root), check=True, capture_output=True)
+
+    g("init", "-q")
+    g("add", "-A")
+    g("commit", "-q", "-m", "base")
+
+
+def _commit_all(root: Path, msg: str) -> None:
+    import subprocess
+
+    for args in (("add", "-A"), ("commit", "-q", "-m", msg)):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                       cwd=str(root), check=True, capture_output=True)
+
+
+def test_index_sees_change_committed_after_the_build(ws: Workspace) -> None:
+    """ЗАКОММИЧЕННАЯ после сборки правка обязана быть видна.
+
+    Живым разбором подмешивалось только незакоммиченное (git status), а строк по закоммиченному
+    файлу в выборке нет — значит и `stale` для него не будет. Ответ был уверенным и неверным:
+    одно место вызова вместо двух, `truncated: false`, без пометок. Теперь коммит сборки лежит
+    в meta, и файлы, закоммиченные после него, разбираются живым парсером."""
+    from onec_vecgraph.lite import code_intel
+
+    src = Path(ws.sources[0].files_root)
+    _w(src / "CommonModules" / "Потребитель" / "Потребитель.mdo",
+       _COMMON.replace("РасчетЗатрат", "Потребитель").replace("22222222", "55555555"))
+    _w(src / "CommonModules" / "Потребитель" / "Module.bsl",
+       "Процедура Первый()\n    РасчетЗатрат.РассчитатьСебестоимость(1);\nКонецПроцедуры\n")
+    _git_init(Path(ws.root))
+    code_intel.clear_caches()
+    fts.index_for(ws).build(wait=0)
+    base = code_intel.find_callers(ws, "РассчитатьСебестоимость", max_results=50)
+    assert base["engine"] == "index" and base["call_rows_total"] == 1
+
+    # новый вызов в ДРУГОМ модуле, и он ЗАКОММИЧЕН — рабочая копия чистая
+    _w(src / "CommonModules" / "Второй" / "Второй.mdo",
+       _COMMON.replace("РасчетЗатрат", "Второй").replace("22222222", "66666666"))
+    _w(src / "CommonModules" / "Второй" / "Module.bsl",
+       "Процедура Второй()\n    РасчетЗатрат.РассчитатьСебестоимость(2);\nКонецПроцедуры\n")
+    _commit_all(Path(ws.root), "новый вызов")
+    code_intel.clear_caches()
+    res = code_intel.find_callers(ws, "РассчитатьСебестоимость", max_results=50)
+    assert res["match_count"] == 2, res
+    assert res["call_rows_total"] == 2, res
+
+
+def test_counters_agree_with_rows_on_uncommitted_edit(ws: Workspace) -> None:
+    """Счётчики не могут быть МЕНЬШЕ выданных строк.
+
+    Агрегаты брались из SQL, а строки — уже с подмешанной живой работой: на незакоммиченной
+    правке выходило `match_count: 3` при `call_rows_total: 1` и сумме by_object == 1 без флага
+    обрезки. Это ловит собственный инвариант проекта (`shown > total → FAIL`)."""
+    from onec_vecgraph.lite import code_intel
+
+    src = Path(ws.sources[0].files_root)
+    _w(src / "CommonModules" / "Потребитель" / "Потребитель.mdo",
+       _COMMON.replace("РасчетЗатрат", "Потребитель").replace("22222222", "55555555"))
+    _w(src / "CommonModules" / "Потребитель" / "Module.bsl",
+       "Процедура Первый()\n    РасчетЗатрат.РассчитатьСебестоимость(1);\nКонецПроцедуры\n")
+    _git_init(Path(ws.root))
+    code_intel.clear_caches()
+    fts.index_for(ws).build(wait=0)
+
+    _w(src / "CommonModules" / "Потребитель" / "Module.bsl",
+       "Процедура Первый()\n    РасчетЗатрат.РассчитатьСебестоимость(1);\n"
+       "    РасчетЗатрат.РассчитатьСебестоимость(2);\nКонецПроцедуры\n"
+       "Процедура Третий()\n    РасчетЗатрат.РассчитатьСебестоимость(3);\nКонецПроцедуры\n")
+    code_intel.clear_caches()
+    res = code_intel.find_callers(ws, "РассчитатьСебестоимость", max_results=50)
+    assert res["match_count"] == 3, res
+    assert res["call_rows_total"] >= res["match_count"], res
+    assert res["uncommitted_merged"] is True
+    by_sum = sum(x["count"] for x in res["by_object"])
+    assert by_sum == res["call_rows_total"], res

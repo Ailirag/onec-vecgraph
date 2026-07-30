@@ -1,0 +1,105 @@
+[
+  {
+    "scenario": "find_callers[ДобавлениеРеквизитовФормы] callers=4",
+    "lite_s": 0.724,
+    "tok_compact": 442,
+    "tok_wire": 556,
+    "grep_s": 0,
+    "grep_tok": 2281,
+    "note": "rg hits base-only=1 all-sources=6"
+  },
+  {
+    "scenario": "find_callers_HOT[СообщитьПользователю] callers=100 trunc=True",
+    "lite_s": 0.531,
+    "tok_compact": 10353,
+    "tok_wire": 13091,
+    "grep_s": 0,
+    "grep_tok": 641823,
+    "note": "rg hits all=10671; grep_tok_capped250=19260"
+  },
+  {
+    "scenario": "find_overrides[ДИТ_Претензия] n=0",
+    "lite_s": 0.058,
+    "tok_compact": 19,
+    "tok_wire": 22,
+    "grep_s": 0.1,
+    "grep_tok": 80183,
+    "note": "rg override hits in extensions=1406 (bench baseline searched base only -> 0)"
+  },
+  {
+    "scenario": "find_overrides_ALL n=663",
+    "lite_s": 1.66,
+    "tok_compact": 75589,
+    "tok_wire": 95041
+  },
+  {
+    "scenario": "get_dependencies[Document]",
+    "lite_s": 0.987,
+    "tok_compact": 3117,
+    "tok_wire": 4052
+  },
+  {
+    "scenario": "call_graph_d2[ДобавлениеРеквизитовФормы] levels=2",
+    "lite_s": 2.018,
+    "tok_compact": 2964,
+    "tok_wire": 3941
+  },
+  {
+    "scenario": "find_handlers[Document]",
+    "lite_s": 0.105,
+    "tok_compact": 1112,
+    "tok_wire": 1514
+  },
+  {
+    "scenario": "writes_to[register]",
+    "lite_s": 1.021,
+    "tok_compact": 21,
+    "tok_wire": 24
+  },
+  {
+    "scenario": "get_form[ФормаДокумента] items=174",
+    "lite_s": 0.013,
+    "tok_compact": 8978,
+    "tok_wire": 11139,
+    "grep_s": 0,
+    "grep_tok": 93746,
+    "note": "grep-ветка = чтение .form целиком"
+  },
+  {
+    "scenario": "fts[себестоимость расчет]",
+    "lite_s": 0.045,
+    "tok_compact": 1783,
+    "tok_wire": 1983,
+    "note": "top=['СебестоимостьТоваровПоНазначениям', 'ПолучитьДанныеДляРаспределенияОтклоненийВСтоимостиСебестоимостьТоваров', 'ДИТ_РасчетОперативнойСебестоимости_ЗапуститьРегламентноеЗадание', 'ТекстЗапросаДляСторноДвиженийРасчетаПартийСебестоимостьТоваров', 'РассчитатьСебестоимость', 'ДИТ_РасчетОперативнойСебестоимости', 'ВыполняетсяЗаполнениеПартийВРегистреСебестоимостьТоваров', 'Enum.ВариантыРасчетаПартийИСебестоимости', 'ТекстРаспределенияОтклоненийВСтоимостиСебестоимостьТоваров', 'СформироватьДвиженияСебестоимостьТоваров']"
+  },
+  {
+    "scenario": "search_metadata[претензия]",
+    "lite_s": 2.579,
+    "tok_compact": 19,
+    "tok_wire": 21
+  },
+  {
+    "scenario": "list_objects[Document]",
+    "lite_s": 0.001,
+    "tok_compact": 235,
+    "tok_wire": 328
+  },
+  {
+    "scenario": "overview",
+    "lite_s": 0.002,
+    "tok_compact": 307,
+    "tok_wire": 423
+  },
+  {
+    "scenario": "changed_objects",
+    "lite_s": 2.112,
+    "tok_compact": 4083,
+    "tok_wire": 5592
+  },
+  {
+    "scenario": "review_set routines=60",
+    "lite_s": 5.261,
+    "tok_compact": 11944,
+    "tok_wire": 16176
+  }
+]

@@ -90,9 +90,28 @@ def _repos(sources: list[LiteSource]) -> tuple[dict[Path, list[LiteSource]], lis
     return by_root, missing
 
 
+_SELF_QUALIFIERS = ("этаформа", "этотобъект", "thisform", "thisobject")
+
+
+def _common_module_names(ws: Workspace) -> frozenset[str]:
+    """Имена общих модулей воркспейса в нижнем регистре — для отсечения чужих вызовов.
+
+    Нужен именно этот набор: квалификатор, равный имени общего модуля, однозначно указывает на
+    метод ТОГО модуля, а не на одноимённый метод формы или объекта."""
+    names: set[str] = set()
+    for src in ws.sources:
+        for fqn, _meta, _obj_dir in ws.listing(src):
+            kind, _dot, name = fqn.partition(".")
+            if kind == "CommonModule" and name:
+                names.add(name.lower())
+    return frozenset(names)
+
+
 def _status_files(repo: Path) -> tuple[list[tuple[str, str]], str | None]:
     """(status, repo-relative path) for worktree+index changes incl. untracked."""
-    code, out = _git(["status", "--porcelain"], repo)
+    # -uall обязателен: без него git сворачивает НОВЫЙ каталог в одну запись, и новый модуль
+    # целиком выпадал из ревью незакоммиченной работы (ref="") без каких-либо флагов.
+    code, out = _git(["status", "--porcelain", "-uall"], repo)
     if code != 0:
         return [], out.strip()
     rows: list[tuple[str, str]] = []
@@ -335,8 +354,25 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str =
         ws, sorted({r["routine"] for r in routines}), hints=hints,
         max_per_name=max_callers, source=source,
     )
+    common_names = _common_module_names(ws)
     for row in routines:
         found = batch.get(row["routine"], [])
+        # Квалификатор, совпавший с ИМЕНЕМ общего модуля, доказывает другую цель вызова:
+        # `МодульРаботаСФайламиКлиент.ПриОткрытии()` — это метод того модуля, а не наш
+        # одноимённый обработчик формы. Для общих модулей отбор уже сделан хинтом в SQL, а
+        # у объектных и форменных рутин такие строки раньше попадали в набор как «вызывающие»
+        # (на одном боевом ревью — 154 строки), да ещё и поднимали рутину в ранжировании риска.
+        own = row["object"].partition(".")[2].lower()
+        # Метод модуля формы снаружи вообще не вызывается квалифицированно (только без
+        # квалификатора внутри формы либо через ЭтаФорма/ЭтотОбъект) — значит ЛЮБОЙ чужой
+        # квалификатор у такой цели доказывает другой метод с тем же именем.
+        form_target = str(row.get("module") or "").startswith("Form:")
+        kept = [c for c in found
+                if not (c.get("qualifier")
+                        and c["qualifier"].lower() not in (own, *_SELF_QUALIFIERS)
+                        and (form_target or c["qualifier"].lower() in common_names))]
+        row["callers_foreign_dropped"] = len(found) - len(kept)
+        found = kept
         row["callers_count"] = len(found)
         if detail:
             row["callers"] = found

@@ -41,6 +41,7 @@ def clear_caches() -> None:
     _LINES_CACHE.clear()
     _OVERRIDE_INDEX.clear()
     _DIRTY_CACHE.clear()
+    _BEHIND_CACHE.clear()
 
 
 def routines_of(path: Path) -> list[Routine]:
@@ -493,8 +494,9 @@ def find_callers(
     # Индексный путь (если индекс символов готов): полный счёт мест вызова без обрезки по
     # файлам-кандидатам и без текстового скана. kinds сужают выборку прямо в SQL.
     kindset = set(kinds) if kinds else None
+    merge: dict[str, dict[str, int]] = {}
     indexed = _index_callers(ws, [routine_name], max_per_name=max_results, source=source,
-                             kinds=kindset, hint=object_hint)
+                             kinds=kindset, hint=object_hint, merge_out=merge)
     # «Нет вызывающих» — самый дорогой неверный ответ (агент решит, что правка безопасна), но
     # подтверждать сканом КАЖДЫЙ пустой ответ слишком дорого: у 27% имён вызовов правда нет, и
     # они платили полный обход (до 14 с). Скан нужен, только если индекс имени НЕ ЗНАЕТ — то
@@ -513,13 +515,36 @@ def find_callers(
         stats = _index_call_stats(ws, routine_name, source_names=src_names, kinds=kindset,
                                   hint=hint_low)
         rows_total = stats.get("rows")
+        by_object = list(stats.get("by_object") or [])
+        distinct = stats.get("distinct_callers")
+        # Счётчики берутся из SQL, а строки — уже с подмешанной ЖИВОЙ работой. Если подмешивание
+        # что-то изменило, сырые агрегаты противоречат выдаче: на незакоммиченной правке было
+        # `match_count: 3` при `call_rows_total: 1` и сумме by_object == 1 без всяких флагов —
+        # то есть ровно в главном сценарии инструмента счёт был меньше показанных строк.
+        delta = merge.get("added", {}).get(routine_name, 0) - \
+            merge.get("dropped", {}).get(routine_name, 0)
+        if delta or merge.get("dropped", {}).get(routine_name, 0):
+            if len(rows) < max_results:
+                # Набор полный (индекс отдал меньше лимита) — считаем прямо по нему, это точно.
+                rows_total = len(rows)
+                agg: dict[str, int] = {}
+                for r in rows:
+                    agg[r.get("object") or "?"] = agg.get(r.get("object") or "?", 0) + 1
+                by_object = [{"object": k, "count": v}
+                             for k, v in sorted(agg.items(), key=lambda kv: -kv[1])]
+                distinct = len({(r.get("object"), r.get("routine")) for r in rows})
+            elif rows_total is not None:
+                rows_total = max(rows_total + delta, len(rows))
         return {
             "routine": routine_name,
             "match_count": len(rows),
+            # Незакоммиченная работа подмешана живым разбором: агрегаты пересчитаны по выдаче
+            # (полный набор) или скорректированы на разницу (обрезанный).
+            "uncommitted_merged": bool(delta or merge.get("dropped", {}).get(routine_name, 0)),
             # честные имена: в calls хранится по одной записи на (рутина, квалификатор, метод),
             # поэтому это «строк вызова», а не «текстовых вхождений»
             "call_rows_total": rows_total,
-            "distinct_callers": stats.get("distinct_callers"),
+            "distinct_callers": distinct,
             "truncated": bool(rows_total and len(rows) < rows_total),
             "engine": "index",
             # Сводка по объектам — по всему множеству; агенту её обычно достаточно, чтобы
@@ -528,11 +553,11 @@ def find_callers(
             # ~19.7 тыс. токенов на ДЕФОЛТНОМ вызове, ровно там, где обещаны «десятки».
             # Обрезка помечается явно И числами: без этого сумма by_object не сходилась с
             # call_rows_total (887 против 2323), и агент не мог понять, что видит верхушку.
-            "by_object": (stats.get("by_object") or [])[:_BY_OBJECT_TOP],
-            "by_object_total": len(stats.get("by_object") or []),
-            "by_object_truncated": len(stats.get("by_object") or []) > _BY_OBJECT_TOP,
+            "by_object": by_object[:_BY_OBJECT_TOP],
+            "by_object_total": len(by_object),
+            "by_object_truncated": len(by_object) > _BY_OBJECT_TOP,
             "by_object_rows_shown": sum(
-                x["count"] for x in (stats.get("by_object") or [])[:_BY_OBJECT_TOP]),
+                x["count"] for x in by_object[:_BY_OBJECT_TOP]),
             "callers": [] if summary_only else rows,
         }
     pattern = rf"\b{re.escape(routine_name)}\s*\("
@@ -627,6 +652,7 @@ def _index_callers_grouped(
 def _index_callers(
     ws: Workspace, names: list[str], *, max_per_name: int, source: str,
     kinds: set[str] | None = None, hint: str = "",
+    merge_out: dict[str, dict[str, int]] | None = None,
 ) -> dict[str, list[dict]] | None:
     """Вызывающие из индекса символов (None — индекса нет, работаем текстовым сканом).
 
@@ -649,15 +675,19 @@ def _index_callers(
     # (изменённые и новые файлы по git) всегда разбирается ЖИВЫМ парсером и подмешивается.
     # Без этого индекс уверенно отвечал «0 вызывающих» на только что добавленный вызов: строки
     # по такому файлу в выборку не попадают вовсе, поэтому пометки `stale` для него не будет.
-    dirty_paths = _dirty_bsl_files(ws)
+    dirty_paths = _dirty_bsl_files(ws) | _behind_index_files(ws)
     stale_paths = {
         r["_abs"] for rows in found.values() for r in rows if r.get("stale") and r.get("_abs")
     }
     live_paths = stale_paths | dirty_paths
     wanted = {n.lower(): n for n in names}
+    dropped: dict[str, int] = {}
+    added: dict[str, int] = {}
     for name, rows in found.items():
-        found[name] = [r for r in rows
-                       if not r.get("stale") and r.get("_abs") not in live_paths]
+        kept = [r for r in rows if not r.get("stale") and r.get("_abs") not in live_paths]
+        if len(kept) != len(rows):
+            dropped[name] = len(rows) - len(kept)
+        found[name] = kept
     # Индекс отстал — просим фоновый догон (неблокирующе), иначе долгоживущий http-сервер
     # мог работать по индексу произвольной давности: рефреш кикался только из fts.search().
     if live_paths:
@@ -683,6 +713,7 @@ def _index_callers(
                     continue  # только неквалифицированный самовызов, см. callers_of
                 if len(found[target]) >= max_per_name:
                     continue
+                added[target] = added.get(target, 0) + 1
                 found[target].append({
                     "source": src_name, "path": rel,
                     **{k: v for k, v in descr.items() if k in ("object", "module")},
@@ -694,11 +725,57 @@ def _index_callers(
     for rows in found.values():  # служебное поле склейки наружу не отдаём
         for r in rows:
             r.pop("_abs", None)
+    if merge_out is not None:
+        # Учёт подмешивания наружу: без него агрегаты из SQL противоречили выданным строкам.
+        merge_out["dropped"] = dropped
+        merge_out["added"] = added
     return found
 
 
 _DIRTY_TTL = 3.0  # с: «грязный» набор — это то, что разработчик правит СЕЙЧАС
 _DIRTY_CACHE: dict[str, tuple[float, set[str]]] = {}
+
+
+_BEHIND_TTL = 60.0  # с: закоммиченное меняется редко, а range-diff дороже git status
+_BEHIND_CACHE: dict[str, tuple[float, set[str]]] = {}
+
+
+def _behind_index_files(ws: Workspace) -> set[str]:
+    """Абсолютные пути .bsl, ЗАКОММИЧЕННЫЕ после сборки индекса символов.
+
+    Живым разбором раньше подмешивалось только незакоммиченное (git status), а строк по
+    закоммиченному файлу в выборке нет — значит и пометки stale для него не будет. Поэтому
+    добавленный и закоммиченный вызов индекс уверенно показывал как отсутствующий: ответ
+    `call_rows_total: 1` при двух реальных местах вызова, без каких-либо флагов. Сравниваем
+    коммит сборки с текущим HEAD одним `git diff --name-only`."""
+    key = str(ws.root).lower()
+    now = time.monotonic()
+    hit = _BEHIND_CACHE.get(key)
+    if hit and now - hit[0] < _BEHIND_TTL:
+        return hit[1]
+    out: set[str] = set()
+    try:
+        from . import fts as _fts
+        from . import gitview as _gv
+        heads = _fts.indexed_heads(ws)
+        if heads:
+            for repo_str, sha in heads.items():
+                repo = Path(repo_str)
+                code, cur = _gv._git(["rev-parse", "HEAD"], repo)  # noqa: SLF001
+                if code != 0 or not cur.strip() or cur.strip() == sha:
+                    continue
+                code, out_txt = _gv._git(  # noqa: SLF001
+                    ["diff", "--name-only", f"{sha}..HEAD", "--", "*.bsl"], repo)
+                if code != 0:
+                    continue
+                for rel in out_txt.splitlines():
+                    rel = rel.strip().strip('"')
+                    if rel.endswith(".bsl"):
+                        out.add(str(repo / rel))
+    except Exception:  # noqa: BLE001 — без git/индекса догонять нечего
+        out = set()
+    _BEHIND_CACHE[key] = (now, out)
+    return out
 
 
 def _dirty_bsl_files(ws: Workspace) -> set[str]:

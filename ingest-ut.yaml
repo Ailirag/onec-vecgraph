@@ -1,0 +1,8 @@
+# Ingest UT 11.5 ITS docs into grand-dev-ut. Source folder was relocated to D:\Claude\onec-its-parser.
+tenant: grand-dev-ut
+sources:
+  - type: its
+    path: D:/Claude/onec-its-parser/its-out/ut115doc
+    globs: ["**/*.json"]
+    doc_topic: config
+    corpus_version: config:UT_11.5
