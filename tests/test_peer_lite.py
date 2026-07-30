@@ -336,3 +336,70 @@ def test_instructions_do_not_advise_absent_tools(monkeypatch) -> None:
         missing = sorted(a for a in advised if a not in names)
         assert not missing, f"профиль {profile or 'default'}: советуются, но отсутствуют {missing}"
     _lite_tool_names(monkeypatch, None)
+
+
+def test_instructions_reference_existing_docs() -> None:
+    """Файл, на который ссылаются инструкции сервера, обязан существовать в репозитории.
+
+    `docs/bench_tools_vs_grep.md` был написан, но НЕ закоммичен: у меня локально ссылка
+    открывалась, а после клона инструкции указывали в пустоту — агент шёл проверять числа и не
+    находил их. Такая мелочь бьёт по доверию сильнее неточной цифры."""
+    import re
+    from pathlib import Path
+
+    from onec_vecgraph.lite import server as lite_server
+
+    import shutil
+    import subprocess
+
+    repo = Path(__file__).resolve().parent.parent
+    refs = sorted(set(
+        re.findall(r"\b(docs/[\w./-]+\.md|scripts/[\w./-]+\.py)\b", lite_server.INSTRUCTIONS)))
+    assert refs, "инструкции обязаны ссылаться на методику замеров"
+    missing = [r for r in refs if not (repo / r).exists()]
+    assert not missing, f"инструкции ссылаются на отсутствующие файлы: {missing}"
+    if shutil.which("git") is None or not (repo / ".git").exists():
+        pytest.skip("git недоступен — проверка отслеживания невозможна")
+    # Наличия на диске НЕ достаточно: у автора файл есть, а после клона ссылка ведёт в пустоту.
+    untracked = [r for r in refs if subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "--error-unmatch", r],
+        capture_output=True).returncode != 0]
+    assert not untracked, f"инструкции ссылаются на неотслеживаемые git файлы: {untracked}"
+
+
+def test_doc_anchor_links_resolve() -> None:
+    """Ссылки на разделы внутри документации не должны висеть в воздухе.
+
+    Переименование раздела осиротило ссылку `#какой-поиск-выбрать` в том же файле: текст читался
+    как рабочий, а клик никуда не вёл. Проверяем в лоб — генерируем якоря из заголовков по
+    правилу GitHub (lower, без пунктуации, пробелы -> дефисы)."""
+    import re
+    from pathlib import Path
+
+    def anchor(heading: str) -> str:
+        text = re.sub(r"[*`\[\]()]", "", heading.strip().lower())
+        return re.sub(r"\s+", "-", re.sub(r"[^\w\s-]", "", text).strip())
+
+    repo = Path(__file__).resolve().parent.parent
+    docs = ["README.md", "AGENTS.md", "PLAN.md"]
+    docs += [p.relative_to(repo).as_posix() for p in sorted((repo / "docs").glob("*.md"))]
+    texts = {d: (repo / d).read_text(encoding="utf-8") for d in docs if (repo / d).exists()}
+    anchors = {
+        d: {anchor(m.group(1)) for m in re.finditer(r"^#{1,6}\s+(.*)", t, re.M)}
+        for d, t in texts.items()
+    }
+    broken: list[str] = []
+    for doc, text in texts.items():
+        base = (repo / doc).parent
+        for target, frag in re.findall(r"\]\(([^)#\s]*)#([^)\s]+)\)", text):
+            if target.startswith(("http://", "https://")):
+                continue
+            rel = (base / target).resolve() if target else (repo / doc)
+            if not rel.is_relative_to(repo):
+                continue
+            key = rel.relative_to(repo).as_posix()
+            if key not in anchors:  # цель вне набора проверяемых файлов
+                continue
+            if frag not in anchors[key]:
+                broken.append(f"{doc} -> {key}#{frag}")
+    assert not broken, "битые ссылки на разделы: " + "; ".join(broken)
