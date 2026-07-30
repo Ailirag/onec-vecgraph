@@ -381,6 +381,10 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str =
         "routines_returned": len(routines),
         "offset": max(0, offset),
         "routines_ranked_by_risk": routines_total > len(routines),
-        "routines_truncated": truncated,      # сработал предохранитель _MAX_ROUTINES
+        # Раньше здесь стоял `routines_truncated`, и он означал ТОЛЬКО «сработал предохранитель
+        # на 2000 рутин». Агент читал его как «выдача полна» и делал вывод, что видит все 285
+        # затронутых рутин, получив 25. Теперь два разных флага с говорящими именами.
+        "window_incomplete": routines_total > len(routines) + max(0, offset),
+        "safety_valve_fired": truncated,
         "routines": routines,
     }

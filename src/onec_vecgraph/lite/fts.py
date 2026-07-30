@@ -799,6 +799,28 @@ class FtsIndex:
             acc["by_object"].append({"object": obj, "count": rows_n})
         return out
 
+    def has_name(self, name: str) -> bool:
+        """Знает ли индекс это имя вообще (как объявление или как вызываемый метод).
+
+        Отличает «в индексе нет такого имени — возможно, добавили после сборки» от «имя есть,
+        вызовов действительно ноль». Без этого различия правило «пустое подтверждаем сканом»
+        заставляло 27% имён платить полный обход конфигурации (до 14 с) ради корректного нуля."""
+        if not self.has_symbols():
+            return False
+        try:
+            con = _connect(self.path)
+            try:
+                low = name.lower()
+                if con.execute("SELECT 1 FROM symbols WHERE name_low=? LIMIT 1",
+                               (low,)).fetchone():
+                    return True
+                return bool(con.execute("SELECT 1 FROM calls WHERE method_low=? LIMIT 1",
+                                        (low,)).fetchone())
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return False
+
     def call_counts(self, names: list[str]) -> dict[str, int]:
         """Сколько всего мест вызова у каждого имени (для summary-first ответа)."""
         if not names:

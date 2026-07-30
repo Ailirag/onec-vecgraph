@@ -485,9 +485,11 @@ def find_callers(
     kindset = set(kinds) if kinds else None
     indexed = _index_callers(ws, [routine_name], max_per_name=max_results, source=source,
                              kinds=kindset, hint=object_hint)
-    # «Нет вызывающих» — самый дорогой неверный ответ (агент решит, что правка безопасна), а из
-    # индекса он мог означать «имя добавили после сборки». Пустой результат подтверждаем сканом.
-    if indexed is not None and not indexed.get(routine_name):
+    # «Нет вызывающих» — самый дорогой неверный ответ (агент решит, что правка безопасна), но
+    # подтверждать сканом КАЖДЫЙ пустой ответ слишком дорого: у 27% имён вызовов правда нет, и
+    # они платили полный обход (до 14 с). Скан нужен, только если индекс имени НЕ ЗНАЕТ — то
+    # есть его могли добавить после сборки; известное имя с нулём вызовов — корректный ноль.
+    if indexed is not None and not indexed.get(routine_name) and not _index_knows(ws, routine_name):
         indexed = None
     if indexed is not None:
         rows = indexed.get(routine_name, [])  # хинт уже применён в SQL, а не к окну выдачи
@@ -583,6 +585,28 @@ def find_callers(
                       for o, n in sorted(by_object_scan.items(), key=lambda kv: -kv[1])],
         "callers": rows,
     }
+
+
+def _index_callers_grouped(
+    ws: Workspace, names: list[str], *, max_per_name: int, source: str,
+    hints: dict[str, str],
+) -> dict[str, list[dict]] | None:
+    """Вызывающие для набора имён, у каждого СВОЙ хинт (нужно review_set / call_graph).
+
+    Хинт выражается в SQL, а он один на запрос — поэтому имена группируются по значению хинта
+    (в ревью-наборе это имя общего модуля, и на десятки рутин приходятся единицы модулей).
+    Без этого индексный путь игнорировал хинты вовсе и приписывал изменённой рутине чужих
+    одноимённых вызывающих из других модулей."""
+    groups: dict[str, list[str]] = {}
+    for n in names:
+        groups.setdefault((hints.get(n) or hints.get(n.lower()) or ""), []).append(n)
+    out: dict[str, list[dict]] = {}
+    for hint, group in groups.items():
+        part = _index_callers(ws, group, max_per_name=max_per_name, source=source, hint=hint)
+        if part is None:
+            return None  # индекса нет — весь набор считаем сканом, иначе смешаем движки
+        out.update(part)
+    return out
 
 
 def _index_callers(
@@ -760,6 +784,15 @@ def _merge_live_declarations(ws: Workspace, rows: list[dict], routine_name: str,
     return kept
 
 
+def _index_knows(ws: Workspace, name: str) -> bool:
+    """Знает ли индекс это имя (объявление или вызов) — см. правило про пустые ответы."""
+    try:
+        from . import fts as _fts
+        return _fts.index_for(ws).has_name(name)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _index_call_stats(ws: Workspace, name: str, *, source_names: set[str] | None = None,
                       kinds: set[str] | None = None, hint: str = "") -> dict:
     """Полная статистика вызовов из индекса: строки, различные вызывающие, разбивка по объектам.
@@ -791,12 +824,16 @@ def find_callers_batch(
     srcs, err = ws.resolve_sources(source)
     if err:
         return out
+    hints = {k.lower(): (v or "").lower() for k, v in (hints or {}).items()}
     # Есть индекс символов -> отвечаем SQL-выборкой: без текстового скана и без обрезки по
-    # числу файлов-кандидатов (полный счёт). Индекс наполняется тем же обходом, что и FTS.
-    indexed = _index_callers(ws, names, max_per_name=max_per_name, source=source)
+    # числу файлов-кандидатов. Хинты применяются В SQL (сгруппированно по значению), а не
+    # игнорируются: иначе review_set приписывал рутине чужих одноимённых вызывающих.
+    indexed = _index_callers_grouped(
+        ws, names, max_per_name=max_per_name, source=source,
+        hints={n: hints.get(n.lower(), "") for n in names},  # ключи — как переданные имена
+    )
     if indexed is not None:
         return indexed
-    hints = {k.lower(): (v or "").lower() for k, v in (hints or {}).items()}
     wanted = {n.lower(): n for n in names}
     alternation = "|".join(sorted((re.escape(n) for n in names), key=len, reverse=True))
     files, _trunc = _candidate_files(ws, rf"\b(?:{alternation})\s*\(", srcs, None)
@@ -862,10 +899,10 @@ def find_declarations(
         # доразбираем эти файлы живьём (иначе агент получает координаты чужого кода, а
         # только что добавленная рутина «не существует»).
         indexed = _merge_live_declarations(ws, indexed, routine_name, exported_only, srcs)
-        # ПУСТОЙ ответ индекса не авторитетен: имени может не быть в индексе просто потому, что
-        # рутину добавили после сборки (перепроверять по строкам индекса тогда нечего). «Не
-        # найдено» — самый дорогой неверный ответ, поэтому подтверждаем его живым сканом.
-        if not indexed:
+        # ПУСТОЙ ответ не авторитетен, только если индекс имени не знает (могли добавить после
+        # сборки). Если знает, а объявлений нет после фильтров — это корректный ноль, и полный
+        # скан ради него не нужен.
+        if not indexed and not _index_knows(ws, routine_name):
             indexed = None
     if indexed is not None:
         offset = max(0, decl_offset)

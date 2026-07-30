@@ -179,4 +179,6 @@ def test_review_set_maps_hunks_to_routines_and_callers(git_ws: Workspace) -> Non
     # untracked-модуль включается целиком
     new = by_routine[("Catalog.Товары", "НоваяФункция")]
     assert new["status"] == "??" and new["callers"] == []
-    assert res["routine_count"] == 2 and res["routines_truncated"] is False
+    # флаги говорят каждый о своём: окно полно и предохранитель не срабатывал
+    assert res["routine_count"] == 2
+    assert res["window_incomplete"] is False and res["safety_valve_fired"] is False
