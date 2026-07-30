@@ -349,24 +349,46 @@ class FtsIndex:
     # -- status -------------------------------------------------------------
 
     def status(self) -> dict:
+        """Состояние индекса, включая идущую сборку в ДРУГОМ процессе.
+
+        Флаг `building` показывал только сборку этого процесса, а схема пересоздаётся отдельным
+        коммитом — поэтому всё окно пересборки (на большой конфигурации это минуты) читатели
+        видели `symbols=0` и молча уезжали в полный скан, не понимая, что индекс строится, а не
+        отсутствует. Теперь это видно в ответе и в metrics."""
         out: dict = {"available": fts_available(), "db": str(self.path),
                      "built": False, "building": self._building}
+        lock = Path(str(self.path) + ".building")
+        try:
+            if lock.is_file() and time.time() - lock.stat().st_mtime <= _BUILD_LOCK_STALE:
+                out["building"] = True
+                if not self._building:
+                    out["building_elsewhere"] = True  # строит другой процесс, не мы
+        except OSError:
+            pass
         if not self.path.is_file():
             return out
         try:
             con = _connect(self.path)
             try:
                 if con.execute("PRAGMA user_version").fetchone()[0] != _SCHEMA_VERSION:
+                    out["schema_outdated"] = True  # нужна полная пересборка, инкремент не спасёт
                     return out
                 meta = dict(con.execute("SELECT key, value FROM meta"))
                 units = con.execute("SELECT count(*) FROM unit_map").fetchone()[0]
                 files = con.execute("SELECT count(*) FROM files").fetchone()[0]
+                symbols = con.execute("SELECT count(*) FROM symbols").fetchone()[0]
             finally:
                 con.close()
         except sqlite3.Error:
             return out
-        out.update(built=True, built_at=meta.get("built_at"), units=units, files=files,
-                   size_bytes=self.path.stat().st_size)
+        out.update(built=bool(units or symbols), built_at=meta.get("built_at"), units=units,
+                   files=files, symbols=symbols, size_bytes=self.path.stat().st_size)
+        if not out["built"]:
+            # Пустой индекс при существующем файле — это либо идущая сборка, либо сорванная:
+            # называем причину, чтобы «нет индекса» не читалось как «нет данных в конфигурации».
+            out["note"] = ("Индекс пуст: сборка идёт" if out["building"]
+                           else "Индекс пуст: сборка не завершена — запустите её заново "
+                                "(кнопка в админке или serve-lite --build-fts).")
         return out
 
     # -- build / refresh ------------------------------------------------------
