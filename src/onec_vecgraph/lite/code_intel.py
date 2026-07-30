@@ -231,7 +231,14 @@ def type_usages(
     window = all_rows[start: start + max(1, max_results)]
     return {
         "type": f"{kind}.{name}",
-        "usage_count": len(all_rows),          # ВСЕГО использований
+        # Область действия обязана быть в ОТВЕТЕ, а не только в описании тула: имя
+        # find_type_usages шире того, что тул делает, и агент, прочитавший лишь ответ, принимал
+        # `usage_count` за все использования типа, включая обращения из кода.
+        "scope": "metadata",
+        "scope_note": ("Только метаданные (.mdo/.xml/.form): реквизиты, подписки, определяемые "
+                       "типы. Обращения из КОДА (`Справочники.<Имя>`, менеджеры, запросы) здесь "
+                       "НЕ считаются — для них find_callers по методу или rg по тексту."),
+        "usage_count": len(all_rows),          # ВСЕГО использований в метаданных
         "match_count": len(window),
         "offset": start,
         "truncated": start + len(window) < len(all_rows),
@@ -1050,10 +1057,17 @@ def _decl_answer(routine_name: str, rows: list[dict], *, truncated: bool) -> dic
     """Ответ скан-пути в ТОЙ ЖЕ форме, что и индексного (declaration_count/returned/engine).
 
     Раньше формы расходились, и вызывающий, получив фолбэк, не находил ожидаемых полей —
-    а по `engine` нельзя было понять, полон ли ответ."""
+    а по `engine` нельзя было понять, полон ли ответ.
+
+    ПОЛНЫЙ счёт скан-путь знает только когда обхода хватило: кандидаты обрезаются по
+    `max_results * 4` файлам, а строки — по `max_results`. Пока здесь стояло `len(rows)`,
+    обрезанное окно выдавалось за полный счёт: на УТ с пустым индексом `ПередЗаписью` давал
+    `declaration_count: 2` против 1401 на индексном пути, и агент делал вывод, что обработчик в
+    этой конфигурации почти не используется. Честный ответ при обрезке — `null` (как
+    `call_rows_total` у find_callers), а не правдоподобное число."""
     return {
         "routine": routine_name,
-        "declaration_count": len(rows),
+        "declaration_count": None if truncated else len(rows),
         "returned": len(rows),
         "offset": 0,
         "truncated": truncated,
@@ -1376,5 +1390,14 @@ def metrics(ws: Workspace, source: str = "") -> dict:
                 _OVERRIDE_RX, [str(s.files_root / f) for f in sorted(CODE_FOLDERS)
                                if (s.files_root / f).is_dir()])
         per_source.append(row)
+    # Состояние индекса — часть инвентаря, а не деталь реализации: без него оператор не видит,
+    # что воркспейс сидит на пустом индексе и все ответы идут медленным сканом с урезанными
+    # счётчиками. Именно так два воркспейса молча простояли с БД на гигабайты и нулём рутин.
+    try:
+        from . import fts as _fts
+        index = _fts.index_for(ws).status()
+    except Exception as exc:  # noqa: BLE001
+        index = {"error": f"состояние индекса недоступно: {exc}"}
     return {"sources": per_source,
+            "index": index,
             "note": None if search.rg_path() else "ripgrep не найден: routines не посчитаны"}

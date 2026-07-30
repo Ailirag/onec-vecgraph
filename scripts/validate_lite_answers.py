@@ -186,7 +186,10 @@ def main() -> int:
             checked += 1
             # 1) объявление должно находиться
             decl = code_intel.find_declarations(ws, rt_name, max_results=5)
-            if decl.get("declaration_count", 0) < 1:
+            # declaration_count=None означает «скан обрезан, полный счёт неизвестен» — тогда о
+            # существовании рутины говорит returned, а не счёт.
+            decl_total = decl.get("declaration_count")
+            if (decl.get("returned", 0) if decl_total is None else decl_total) < 1:
                 fails.append(f"{commit}: рутина {rt_name} из коммита НЕ найдена "
                              f"(engine={decl.get('engine')})")
                 continue
@@ -224,14 +227,16 @@ def main() -> int:
                 a, b = scan.get("match_count", 0), idx_all.get("match_count", 0)
                 if a != b:
                     fails.append(f"{commit}/{rt_name}: скан {a} != индекс {b}")
-            # 4) перекрёстная проверка по тексту: rg не должен видеть вызовы там, где мы 0
-            if (total or 0) == 0:
+            # 4) перекрёстная проверка по тексту: rg не должен видеть вызовы там, где мы 0.
+            # Сверять есть смысл только при ИЗВЕСТНОМ счёте объявлений: при обрезанном скане
+            # (decl_total=None) нижняя граница неизвестна и сравнение дало бы ложный FAIL.
+            if (total or 0) == 0 and decl_total is not None:
                 hits = rg_count(ws, rf"\b{re.escape(rt_name)}\s*\(")
-                decls = decl.get("declaration_count", 0)
-                if hits > decls + 2:  # объявления + запас на комментарии
+                if hits > decl_total + 2:  # объявления + запас на комментарии
                     fails.append(f"{commit}/{rt_name}: инструмент 0 вызовов, а rg видит "
-                                 f"{hits} вхождений при {decls} объявлениях")
-            print(f"    {rt_name:<44} объявлений={decl['declaration_count']:<5} "
+                                 f"{hits} вхождений при {decl_total} объявлениях")
+            shown_decl = decl_total if decl_total is not None else f"~{decl.get('returned', 0)}"
+            print(f"    {rt_name:<44} объявлений={shown_decl!s:<5} "
                   f"вызовов={total if total is not None else '—'} показано={shown}")
 
     print(f"\nпроверено рутин: {checked}; нарушений: {len(fails)}")

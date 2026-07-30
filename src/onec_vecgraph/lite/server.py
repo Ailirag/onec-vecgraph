@@ -937,7 +937,8 @@ def find_routine(routine_name: str, exported_only: bool = False, max_results: in
     declaration_count — сколько объявлений ВСЕГО (у типовых обработчиков вроде
     ПриСозданииНаСервере их тысячи), отдаётся окно max_results от offset; окно упорядочено по
     значимости (экспортные и общие модули выше), а не по алфавиту. engine показывает, отвечал
-    индекс или живой скан."""
+    индекс или живой скан. При `engine: "scan"` с `truncated: true` полный счёт НЕИЗВЕСТЕН и
+    declaration_count равен null — не считай размер окна (`returned`) числом объявлений."""
     return code_intel.find_declarations(
         _ws(workspace), routine_name, exported_only=exported_only, max_results=max_results,
         source=source, decl_offset=offset, substring=substring,
@@ -1087,7 +1088,11 @@ def writes_to(document: str = "", register: str = "", source: str = "", workspac
 
 @_tool
 def metrics(source: str = "", workspace: str = "") -> dict:
-    """Инвентарь рабочей копии: объекты по видам, файлы/байты кода, число рутин, overrides."""
+    """Инвентарь рабочей копии: объекты по видам, файлы/байты кода, число рутин, overrides.
+
+    Блок `index` — состояние индекса символов: `built`/`building`/`schema_outdated` и счётчики.
+    Если `built: false`, ответы идут живым сканом: они верны, но медленнее, а полные счётчики
+    (declaration_count, call_rows_total) недоступны — вернётся null."""
     return code_intel.metrics(_ws(workspace), source=source)
 
 

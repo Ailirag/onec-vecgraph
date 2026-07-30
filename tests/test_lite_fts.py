@@ -330,3 +330,71 @@ def test_counters_agree_with_rows_on_uncommitted_edit(ws: Workspace) -> None:
     assert res["uncommitted_merged"] is True
     by_sum = sum(x["count"] for x in res["by_object"])
     assert by_sum == res["call_rows_total"], res
+
+
+def _many_declarations(ws: Workspace, count: int) -> None:
+    """Разложить одноимённую рутину по многим объектам — чтобы скан гарантированно обрезался."""
+    src = Path(ws.sources[0].files_root)
+    for i in range(count):
+        name = f"Объект{i:03d}"
+        _w(src / "Catalogs" / name / f"{name}.mdo",
+           _CATALOG.replace("Номенклатура", name).replace("11111111", f"{i:08d}"))
+        _w(src / "Catalogs" / name / "ObjectModule.bsl",
+           "Процедура ПередЗаписью(Отказ)\n    Возврат;\nКонецПроцедуры\n")
+
+
+def test_scan_path_reports_unknown_declaration_count_instead_of_window(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Обрезанный скан обязан отдать declaration_count=null, а не размер окна.
+
+    Пока стоял len(rows), окно выдавалось за полный счёт: на УТ с пустым индексом `ПередЗаписью`
+    давал declaration_count=2 против 1401 на индексном пути, и агент делал вывод, что обработчик
+    в этой конфигурации почти не используется. Полный счёт — это счёт; неизвестный — null."""
+    from onec_vecgraph.lite import code_intel
+
+    _many_declarations(ws, 12)
+    monkeypatch.setattr(fts.FtsIndex, "has_symbols", lambda self: False)
+    code_intel.clear_caches()
+
+    cut = code_intel.find_declarations(ws, "ПередЗаписью", max_results=3)
+    assert cut["engine"] == "scan"
+    assert cut["truncated"] is True
+    assert cut["declaration_count"] is None, cut
+    assert cut["returned"] == 3
+
+    # необрезанный скан ВИДЕЛ всё — там счёт обязан быть настоящим числом
+    full = code_intel.find_declarations(ws, "ПередЗаписью", max_results=500)
+    assert full["engine"] == "scan" and full["truncated"] is False
+    assert full["declaration_count"] == 12, full
+
+
+def test_metrics_exposes_index_state(ws: Workspace) -> None:
+    """metrics обязан показывать состояние индекса.
+
+    Без этого оператор не видит, что воркспейс сидит на пустом индексе: ответы верны, но идут
+    медленным сканом с урезанными счётчиками. Именно так два боевых воркспейса простояли с БД на
+    гигабайты и нулём рутин — снаружи всё выглядело работающим."""
+    from onec_vecgraph.lite import code_intel
+
+    before = code_intel.metrics(ws)
+    assert "index" in before, before
+    assert before["index"]["built"] is False
+
+    fts.index_for(ws).build(wait=60)
+    code_intel.clear_caches()
+    after = code_intel.metrics(ws)
+    assert after["index"]["built"] is True
+    assert after["index"]["symbols"] > 0 and after["index"]["units"] > 0
+
+
+def test_type_usages_declares_its_scope(ws: Workspace) -> None:
+    """Ответ обязан сам сообщать, что осмотрены только метаданные.
+
+    Имя find_type_usages шире того, что тул делает: обращения из кода (`Справочники.<Имя>`) он не
+    считает. Пока это было лишь в описании, агент принимал usage_count за все использования."""
+    from onec_vecgraph.lite import code_intel
+
+    res = code_intel.type_usages(ws, "Catalog", "Номенклатура")
+    assert res["scope"] == "metadata"
+    assert "КОДА" in res["scope_note"] or "код" in res["scope_note"].lower()
