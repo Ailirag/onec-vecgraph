@@ -444,3 +444,56 @@ def test_index_notices_a_whole_source_appearing(ws: Workspace, tmp_path: Path) -
     after = widened.status()
     assert after["sources_changed"] is False, after
     assert widened.has_name("ДопиРассчитать") is True
+
+
+def test_unreadable_index_is_not_reported_as_empty(ws: Workspace,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ошибка чтения БД обязана отличаться от «индекс пуст».
+
+    Пока sqlite3.Error глушился, занятая чужой записью БД отдавала built=false — и это читалось
+    как «индекса нет». Я сам на этом ошибся: решил, что пять воркспейсов потеряли индексы, хотя в
+    файлах лежало 1.2 млн рутин, просто их держал живой сервер."""
+    import sqlite3
+
+    idx = fts.index_for(ws)
+    idx.build(wait=60)
+    assert idx.status()["built"] is True
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(fts, "_connect", boom)
+    st = idx.status()
+    assert st["built"] is None, st            # неизвестно, а не «пусто»
+    assert "database is locked" in st["unreadable"]
+    assert "НЕ признак отсутствия" in st["note"]
+
+    from onec_vecgraph.lite import server as lite_server
+
+    brief = lite_server._index_brief(ws)
+    assert brief["built"] is None, brief      # overview не превращает «неизвестно» в «нет»
+    assert brief.get("unreadable")
+
+
+def test_index_without_source_fingerprint_is_not_trusted(ws: Workspace) -> None:
+    """Индекс без отпечатка состава (собран старой версией) обязан считаться разошедшимся.
+
+    Раньше `_sources_changed` возвращал None, и status/ensure_background молча считали состав
+    совпадающим. На боевом УТ такой индекс, собранный по пяти источникам, обслуживал воркспейс из
+    ШЕСТИ: 689 файлов расширения были невидимы для индексного пути без единого признака
+    неполноты. «Подтвердить нечем» — это не «всё в порядке»."""
+    import sqlite3
+
+    idx = fts.index_for(ws)
+    idx.build(wait=60)
+    assert idx.status()["sources_changed"] is False
+    con = sqlite3.connect(str(fts.db_path_for(ws)))
+    try:
+        con.execute("DELETE FROM meta WHERE key='sources'")  # как у сборки старой версии
+        con.commit()
+    finally:
+        con.close()
+    st = fts.FtsIndex(ws).status()
+    assert st["built"] is True
+    assert st["sources_changed"] is True, st
+    assert "не подтверждён" in (st.get("note") or "").lower(), st

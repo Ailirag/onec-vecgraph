@@ -428,13 +428,24 @@ class FtsIndex:
                 symbols = con.execute("SELECT count(*) FROM symbols").fetchone()[0]
             finally:
                 con.close()
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            # «Не смог прочитать» — НЕ то же, что «индекс пуст». Пока ошибка глушилась, занятая
+            # чужой записью БД отдавала built=false, и это читалось как «индекса нет»: я сам так
+            # решил, что пять воркспейсов потеряли индекс, хотя в файлах лежало 1.2 млн рутин.
+            out["built"] = None
+            out["unreadable"] = str(exc)[:200]
+            out["note"] = ("Состояние индекса прочитать не удалось (обычно БД занята идущей "
+                           "сборкой). Это НЕ признак отсутствия индекса — повторите позже.")
             return out
         out.update(built=bool(units or symbols), built_at=meta.get("built_at"), units=units,
                    files=files, symbols=symbols, size_bytes=self.path.stat().st_size)
-        if out["built"] and (changed := self._sources_changed(meta)) is not None:
-            out["sources_changed"] = changed
-            if changed:
+        if out["built"]:
+            out["sources_changed"] = changed = self._sources_changed(meta)
+            if changed and not meta.get("sources"):
+                out["note"] = ("Состав источников НЕ ПОДТВЕРЖДЁН: индекс собран версией без "
+                               "отпечатка состава. Назначен рефреш, он запишет отпечаток. "
+                               "Полные счётчики пока считать нельзя.")
+            elif changed:
                 out["note"] = ("Состав источников изменился после сборки (подключено или "
                                "отключено расширение) — индекс неполон, идёт/нужен рефреш. "
                                "Полные счётчики пока считать нельзя.")
@@ -658,16 +669,22 @@ class FtsIndex:
             **{k: v for k, v in self.status().items() if k in ("units", "files")},
         }
 
-    def _sources_changed(self, meta: dict) -> bool | None:
-        """Разошёлся ли состав источников с записанным при сборке. None — сборка старая, без
-        отпечатка (тогда не утверждаем ни «изменился», ни «нет»)."""
+    def _sources_changed(self, meta: dict) -> bool:
+        """Разошёлся ли состав источников с записанным при сборке.
+
+        Отсутствующий или битый отпечаток — тоже «разошёлся», а не «не знаю». Возврат None
+        означал, что вызывающие (status и ensure_background) молча считали состав совпадающим:
+        на боевом УТ индекс, собранный старой версией по пяти источникам, обслуживал воркспейс
+        из ШЕСТИ — 689 файлов расширения были невидимы для индексного пути, и ни одного признака
+        неполноты в ответе не было. Один принудительный рефреш записывает отпечаток, после чего
+        ответ становится точным — это дешевле, чем неверный ответ без флага."""
         raw = meta.get("sources")
         if not raw:
-            return None
+            return True
         try:
             was = json.loads(raw)
         except (TypeError, ValueError):
-            return None
+            return True
         return sorted(was) != _source_fingerprint(self.ws)
 
     def _built_at(self) -> str | None:

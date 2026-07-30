@@ -89,7 +89,13 @@ def load_workspaces(path: Path) -> tuple[dict[str, dict], str]:
 def save_state(path: Path, workspaces: dict[str, dict], active: str,
                platform_help: list[dict] | None = None,
                rg_path: str | None = None) -> None:
-    """Persist v2 state; None for platform_help/rg_path keeps whatever the file already has."""
+    """Persist v2 state; None for platform_help/rg_path keeps whatever the file already has.
+
+    ПРОЧИЕ ключи файла сохраняются как есть. Раньше писался фиксированный набор, и любая правка
+    воркспейса (добавить, удалить, «активировать») молча выбрасывала `fts_dir` — путь каталога
+    индексов. Индексы «переезжали» на системный диск: ~10 ГБ пересобирались заново там, где места
+    почти нет, а прежние 9.6 ГБ оставались мусором. Ни одно из этих действий о переносе не
+    сообщало."""
     saved = load_state(path)
     if platform_help is None:
         platform_help = saved.get("platform_help") or []
@@ -97,9 +103,11 @@ def save_state(path: Path, workspaces: dict[str, dict], active: str,
         rg_path = str(saved.get("rg_path") or "")
     if active not in workspaces:
         active = next(iter(workspaces), "")
+    known = {"version", "workspaces", "active", "platform_help", "rg_path"}
+    extras = {k: v for k, v in saved.items() if k not in known}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"version": 2, "workspaces": workspaces, "active": active,
+        json.dumps({**extras, "version": 2, "workspaces": workspaces, "active": active,
                     "platform_help": platform_help, "rg_path": rg_path},
                    ensure_ascii=False, indent=1),
         encoding="utf-8",

@@ -460,8 +460,11 @@ def _index_brief(ws: Workspace) -> dict:
         st = _fts.index_for(ws).status()
     except Exception as exc:  # noqa: BLE001
         return {"built": None, "note": f"состояние индекса недоступно: {exc}"}
-    brief: dict = {"built": bool(st.get("built")), "routines": st.get("symbols")}
-    for key in ("building", "building_elsewhere", "schema_outdated", "note"):
+    # built=None означает «прочитать не удалось» — bool() превратил бы это в «не собран», то есть
+    # ровно в ту ложь, от которой status() и уходит.
+    brief: dict = {"built": st.get("built"), "routines": st.get("symbols")}
+    for key in ("building", "building_elsewhere", "schema_outdated", "sources_changed",
+                "unreadable", "note"):
         if st.get(key):
             brief[key] = st[key]
     return brief

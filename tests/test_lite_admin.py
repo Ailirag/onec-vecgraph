@@ -160,3 +160,36 @@ def test_render_page_shows_state_and_escapes(tmp_path: Path) -> None:
         lite_admin.workspace_snapshot(None), rg="C:\\rg.exe", state_path="s.json"
     )
     assert "не настроен" in empty and "Источники не загружены" in empty
+
+
+def test_workspace_edits_preserve_other_state_keys(tmp_path: Path) -> None:
+    """Правка воркспейса не имеет права терять посторонние ключи состояния.
+
+    save_state писал фиксированный набор, поэтому любая операция с воркспейсами выбрасывала
+    `fts_dir` — путь каталога индексов. На живой машине это молча увело ~10 ГБ индексов с D: на
+    системный диск: они пересобрались там, где почти нет места, а прежние остались мусором.
+    Об этом переносе не сообщалось ни в одном ответе."""
+    import json
+
+    state = tmp_path / "config.json"
+    state.write_text(json.dumps({
+        "version": 2,
+        "workspaces": {"a": {"root": str(tmp_path / "a"), "ext_roots": []}},
+        "active": "a",
+        "platform_help": [],
+        "rg_path": "",
+        "fts_dir": r"D:\tools\onec-lite-fts",
+        "какой_то_будущий_ключ": {"важно": True},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    lite_admin.upsert_workspace(state, "b", str(tmp_path / "b"), [])
+    after = json.loads(state.read_text(encoding="utf-8"))
+    assert after["fts_dir"] == r"D:\tools\onec-lite-fts"
+    assert after["какой_то_будущий_ключ"] == {"важно": True}
+    assert set(after["workspaces"]) == {"a", "b"}
+
+    lite_admin.set_active(state, "b")
+    lite_admin.delete_workspace(state, "a")
+    final = json.loads(state.read_text(encoding="utf-8"))
+    assert final["fts_dir"] == r"D:\tools\onec-lite-fts", "потерян при set_active/delete"
+    assert final["active"] == "b"
