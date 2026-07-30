@@ -53,11 +53,12 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 # For local embeddings, install torch from the selected index FIRST so the package's torch>=2.7
 # dep is already satisfied (pip won't pull the default PyPI build over it). Cloud builds skip torch.
-# `ingest` extra (pyyaml) is always included so manifests work in any image variant.
+# `ingest` (pyyaml) и `wiki` (httpx) включаются всегда: манифесты и корпус Вики должны работать
+# в любом варианте образа, а тянуть httpx транзитивно с mcp для собственного сетевого кода нельзя.
 RUN if echo "${EXTRAS}" | grep -q local-embeddings; then \
         pip install "torch>=2.7" --index-url "${TORCH_INDEX_URL}"; \
     fi && \
-    pip install ".[${EXTRAS},ingest]"
+    pip install ".[${EXTRAS},ingest,wiki]"
 
 # HF model cache lives on a mounted volume (first query downloads ~1.2 GB for Qwen3-Embedding-0.6B).
 RUN mkdir -p /models && useradd -m -u 10001 app && chown -R app:app /app /models

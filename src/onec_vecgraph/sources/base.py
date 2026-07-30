@@ -34,6 +34,12 @@ class DocUnit:
     links: list[str] = field(default_factory=list)  # explicit config fqns mentioned → MENTIONS
     source_url: str | None = None
     extra: dict = field(default_factory=dict)  # e.g. related_kinds, lang, product
+    # Готовое разбиение по СМЫСЛОВЫМ границам: [{"path": [заголовки], "body": текст}].
+    # Пусто — движок режет `text` по бюджету, ничего не зная о структуре документа. Заполнено —
+    # режет каждый раздел отдельно, и хлебные крошки чанка включают путь заголовка внутри
+    # страницы, а не только положение самой страницы. Нужно источникам, у которых единица
+    # версионирования — целый документ (иначе инкремент не построить), но внутри он структурен.
+    sections: list[dict] = field(default_factory=list)
 
 
 class Source(ABC):
@@ -47,3 +53,19 @@ class Source(ABC):
     def units(self) -> Iterator[DocUnit]:
         """Yield normalized document units for this corpus."""
         raise NotImplementedError
+
+    def versions(self) -> dict[str, str] | None:
+        """``{external_id: version_hash}`` БЕЗ загрузки содержимого. ``None`` — не поддерживается.
+
+        Существует ради источников, у которых загрузка единицы ДОРОГА (сетевой обход чужого
+        API), а версию можно узнать дёшево. Движок тогда грузит содержимое только для
+        изменившихся единиц — см. :func:`ingest.ingest_source`. Файловым источникам это не
+        нужно: у них чтение с диска и так дешевле отдельного обхода за версиями.
+
+        Кто переопределяет — обязан вернуть версии ВСЕХ единиц корпуса, а не только новых:
+        отсутствующая в словаре единица считается удалённой.
+        """
+        return None
+
+    def restrict_to(self, external_ids: set[str]) -> None:
+        """Ограничить следующий :meth:`units` этими единицами (движок зовёт после versions)."""

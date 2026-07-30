@@ -35,11 +35,20 @@ from .storage import Neo4jStore
 
 settings = get_settings()
 
-SUPPORTED_CORPORA = ("platform_help", "bsp_help", "its", "dev_standards", "artifact")
+SUPPORTED_CORPORA = ("platform_help", "bsp_help", "its", "dev_standards", "artifact",
+                     "wiki", "wiki_private")
 CORPUS_DOC_TYPES = {
     "its": "its",
     "dev_standards": "its",
     "artifact": "git_artifacts",
+    # Раздел Яндекс Вики: манифест указывает корневой slug, обход рекурсивный, инкремент — по
+    # дате правки страницы (см. sources/wiki.py). Корпуса ДВА, и это не дублирование:
+    #   wiki         — общедоступные страницы, живёт в ОБЩЕМ тенанте (виден всем проектам);
+    #   wiki_private — закрытые, живёт в тенанте КОНКРЕТНОГО проекта.
+    # Разделение обязательно: в Вики доступ раздаётся поимённо, и общий семантический поиск
+    # по смешанному корпусу обходил бы эти списки.
+    "wiki": "wiki",
+    "wiki_private": "wiki",
 }
 
 

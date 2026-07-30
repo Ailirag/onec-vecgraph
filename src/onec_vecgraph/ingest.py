@@ -9,7 +9,7 @@ from typing import Any
 from . import chunking
 from .config import Settings
 from .embeddings.runtime import provider as get_provider
-from .sources.base import Source, owner_fqn
+from .sources.base import DocUnit, Source, owner_fqn
 from .sources.linking import link_mentions
 from .sources.manifest import load_manifest
 from .sources.registry import DOC_SOURCE_TYPES, build_source
@@ -35,9 +35,26 @@ def _link_semantic(store, tenant_id, embedder, changed, top_k=3, min_score=0.45)
 def ingest_source(store: Neo4jStore, tenant_id: str, settings: Settings, src: Source, embedder,
                   reset: bool = False, link_semantic: bool = False) -> dict[str, Any]:
     """Ingest one doc corpus. Incremental by version_hash unless reset=True."""
-    units = list(src.units())
-    current = {owner_fqn(src.source, u.external_id): u for u in units}
     existing = store.doc_versions(tenant_id, src.source)
+    # Источник может уметь отдавать версии дёшево (Source.versions). Тогда содержимое
+    # загружается ТОЛЬКО для изменившихся единиц — для сетевых источников это разница между
+    # «скачать весь раздел» и «сходить за датами правки». При reset грузим всё: сравнивать не с чем.
+    declared = None if reset else src.versions()
+    if declared is None:
+        units = list(src.units())
+        current = {owner_fqn(src.source, u.external_id): u for u in units}
+    else:
+        stale = {ext for ext, version in declared.items()
+                 if existing.get(owner_fqn(src.source, ext)) != version}
+        src.restrict_to(stale)
+        fetched = {u.external_id: u for u in src.units()}
+        current = {}
+        for ext, version in declared.items():
+            # Неизменившимся кладём заглушку с ТОЙ ЖЕ версией: в changed она не попадёт (хеш
+            # совпал), но и не даст счесть единицу удалённой. Её text никогда не читается.
+            current[owner_fqn(src.source, ext)] = fetched.get(ext) or DocUnit(
+                external_id=ext, title="", text="", version_hash=version)
+        units = list(current.values())
 
     if reset:
         store.delete_source(tenant_id, src.source)
@@ -59,8 +76,20 @@ def ingest_source(store: Neo4jStore, tenant_id: str, settings: Settings, src: So
         # owner-node properties — drives version filtering and platform_docinfo exact lookup.
         props.update({k: v for k, v in (u.extra or {}).items() if v is not None})
         owner_rows.append({"fqn": f, "props": props})
-        chunks += chunking.doc_chunks(u.title, u.text, source=src.source, owner_fqn=f,
-                                      section_path=u.section_path)
+        if u.sections:
+            # Режем по разделам документа: у чанка в крошках оказывается ещё и путь заголовка
+            # внутри страницы, поэтому кусок из середины длинного текста остаётся понятным сам
+            # по себе. Разделы длиннее бюджета doc_chunks добьёт по размеру, как и раньше.
+            for index, section in enumerate(u.sections):
+                body = str(section.get("body") or "").strip()
+                if not body:
+                    continue
+                chunks += chunking.doc_chunks(
+                    u.title, body, source=src.source, owner_fqn=f, part=index,
+                    section_path=[*u.section_path, *(section.get("path") or [])])
+        else:
+            chunks += chunking.doc_chunks(u.title, u.text, source=src.source, owner_fqn=f,
+                                          section_path=u.section_path)
 
     if owner_rows:
         store.write_documents(tenant_id, src.owner_label, owner_rows)

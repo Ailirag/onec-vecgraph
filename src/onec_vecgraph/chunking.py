@@ -421,18 +421,24 @@ def role_chunk(row: dict[str, Any]) -> Chunk:
 
 
 def doc_chunks(title: str, text: str, *, source: str, owner_fqn: str, config_id: str = "",
-               section_path: list[str] | None = None) -> list["Chunk"]:
+               section_path: list[str] | None = None, part: int | None = None) -> list["Chunk"]:
     """Chunk an external document section (ITS / artifact) into one or more :Chunk under a doc owner.
     Breadcrumb prefix = title ▸ section_path; large sections split by the same budget as code.
-    chunk_kind == source (its | artifact)."""
+    chunk_kind == source (its | artifact).
+
+    ``part`` разводит пространство имён fqn, когда один владелец режется НЕСКОЛЬКИМИ вызовами
+    (документ, разбитый по заголовкам). Без него каждый вызов начинал бы нумерацию с нуля и
+    чанки разных разделов затирали бы друг друга.
+    """
     section_path = section_path or []
     head = " ▸ ".join([title, *section_path]) if section_path else title
     segments = _split_code(text, _CODE_BUDGET_NONWS)
     multi = len(segments) > 1
     ident = f"{title} {' '.join(section_path)}".strip()
+    base = "#chunk" if part is None else f"#s{int(part)}"
     out: list[Chunk] = []
     for i, seg in enumerate(segments):
-        suffix = f"#chunk/{i}" if multi else "#chunk"
+        suffix = f"{base}/{i}" if multi else base
         part = f" (часть {i + 1}/{len(segments)})" if multi else ""
         out.append(
             Chunk(
