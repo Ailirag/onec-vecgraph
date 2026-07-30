@@ -819,7 +819,8 @@ def read_file(rel_path: str, start_line: int = 1, max_lines: int = 400, source: 
 @_tool
 def search_code(pattern: str = "", kinds: list[str] | None = None, name_filter: str = "",
                 regex: bool = True, case_sensitive: bool = False, max_results: int = 100,
-                source: str = "", query: str = "", workspace: str = "") -> dict:
+                source: str = "", query: str = "", offset: int = 0,
+                workspace: str = "") -> dict:
     """Полнотекстовый поиск по BSL-модулям (ripgrep; без rg — Python-фолбэк).
 
     kinds — ограничить видами (['CommonModule','Document']); name_filter — подстрока
@@ -836,12 +837,13 @@ def search_code(pattern: str = "", kinds: list[str] | None = None, name_filter: 
         return _err(f"Неизвестные виды: {', '.join(sorted(bad))}")
     return search.search_code(
         ws, pattern, kinds=kindset, name_filter=name_filter, regex=regex,
-        case_sensitive=case_sensitive, max_results=max_results, source=source,
+        case_sensitive=case_sensitive, max_results=max_results, source=source, offset=offset,
     )
 
 
 @_tool
-def fts_search(query: str, limit: int = 20, unit: str = "", source: str = "", workspace: str = "") -> dict:
+def fts_search(query: str, limit: int = 20, unit: str = "", source: str = "", offset: int = 0,
+               workspace: str = "") -> dict:
     """Ранжированный поиск (SQLite FTS5, BM25) по рутинам и карточкам объектов:
     CamelCase-подслова, вес имени выше тела, кириллица матчится с усечением окончаний.
 
@@ -852,7 +854,7 @@ def fts_search(query: str, limit: int = 20, unit: str = "", source: str = "", wo
     degraded='fts_index_building'; свежесть/момент сборки — в built_at. Это лексический
     ранжированный поиск, не семантика: синонимию без общих слов ловит только большой сервер."""
     ws = _ws(workspace)
-    res = fts.index_for(ws).search(query, limit=limit, unit=unit, source=source)
+    res = fts.index_for(ws).search(query, limit=limit, unit=unit, source=source, offset=offset)
     if res.get("ready") is False and "error" not in res:
         # индекс ещё строится — деградируем на подстрочный rg, чтобы агент всегда получил ответ
         fb = search.search_code(ws, query, regex=False, max_results=limit, source=source)
@@ -901,6 +903,13 @@ def find_routine(routine_name: str, exported_only: bool = False, max_results: in
     )
 
 
+def _meta_answer(query: str, rows: list[dict], *, truncated: bool) -> dict:
+    """Ответ search_metadata со счётом: раньше отдавался truncated БЕЗ счёта совпадений,
+    то есть агент не знал ни сколько всего, ни как добрать остаток."""
+    return {"query": query, "match_count": len(rows), "truncated": truncated,
+            "matches": rows}
+
+
 @_tool
 def search_metadata(query: str = "", kinds: list[str] | None = None, max_results: int = 100,
                     source: str = "", pattern: str = "", workspace: str = "") -> dict:
@@ -932,7 +941,7 @@ def search_metadata(query: str = "", kinds: list[str] | None = None, max_results
                     seen.add(key)
                     rows.append({"source": s.name, "object": fqn, "matched": "name"})
                     if len(rows) >= max_results:
-                        return {"query": query, "matches": rows, "truncated": True}
+                        return _meta_answer(query, rows, truncated=True)
     # Text pass over metadata files (synonyms, comments). Meta files sit at fixed depths:
     # configurator <Kind>/<Name>.xml, EDT <Kind>/<Name>/<Name>.mdo (subsystems nest deeper).
     for s in srcs:
@@ -959,8 +968,8 @@ def search_metadata(query: str = "", kinds: list[str] | None = None, max_results
             rows.append({"source": src_name, "object": f"{kind}.{name}", "matched": "text",
                          "text": text.strip()[:200]})
             if len(rows) >= max_results:
-                return {"query": query, "matches": rows, "truncated": True}
-    return {"query": query, "matches": rows, "truncated": False}
+                return _meta_answer(query, rows, truncated=True)
+    return _meta_answer(query, rows, truncated=False)
 
 
 # --------------------------------------------------------------------------- #

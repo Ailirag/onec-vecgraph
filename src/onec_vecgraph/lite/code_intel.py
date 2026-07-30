@@ -294,7 +294,10 @@ def get_dependencies(ws: Workspace, kind: str, name: str, source: str = "") -> d
         owners.extend(o for o in obj.owners if o not in owners)
         register_records.extend(r for r in obj.register_records if r not in register_records)
 
-    usages = type_usages(ws, kind, name, max_results=500, source=source)
+    # max_results=0 -> обходим ВСЕ использования: раньше срез в 500 строк давал `matches` по
+    # объекту, посчитанный на неполной выборке, и подавался как факт. Само окно выдачи здесь
+    # не нужно — из usages строится только агрегат по объектам.
+    usages = type_usages(ws, kind, name, max_results=10**9, source=source)
     self_fqn = f"{kind}.{name}"
     by_obj: dict[tuple[str, str], int] = {}
     for u in usages.get("usages", []):

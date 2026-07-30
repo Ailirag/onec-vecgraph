@@ -595,7 +595,8 @@ class FtsIndex:
 
     # -- search ---------------------------------------------------------------
 
-    def search(self, query: str, *, limit: int = 20, unit: str = "", source: str = "") -> dict:
+    def search(self, query: str, *, limit: int = 20, unit: str = "", source: str = "",
+                offset: int = 0) -> dict:
         if not fts_available():
             return {"error": "FTS5 недоступен в этой сборке Python (sqlite3 без fts5).",
                     "fts_available": False, "ready": False}
@@ -622,18 +623,19 @@ class FtsIndex:
                 where += " AND source = ?"
                 args.append(source)
             args.append(max(1, limit))
+            args.append(max(0, offset))
             rows = con.execute(
                 "SELECT display, unit, source, object, path, line,"
                 "       snippet(units, 2, '[', ']', '…', 12) AS snip,"
                 "       bm25(units, 10.0, 5.0, 1.0) AS rank"
-                f" FROM units WHERE {where} ORDER BY rank LIMIT ?",
+                f" FROM units WHERE {where} ORDER BY rank LIMIT ? OFFSET ?",
                 args,
             ).fetchall()
             built_at = dict(con.execute("SELECT key, value FROM meta")).get("built_at")
             # Полный счёт совпадений: без него `match_count` читался как «столько и есть», хотя
             # это лишь размер окна (limit). Тот же MATCH и те же фильтры, без ORDER BY/LIMIT.
             total = con.execute(f"SELECT count(*) FROM units WHERE {where}",
-                                args[:-1]).fetchone()[0]
+                                args[:-2]).fetchone()[0]
             # Файлы юнитов сверяем с индексом: путь и строка могли уехать после правки, и
             # выдавать их как факт нельзя — остальные тулы такую сверку уже делают.
             idx_mtimes = dict(con.execute("SELECT path, mtime FROM files"))
@@ -663,7 +665,8 @@ class FtsIndex:
             "built_at": built_at,
             "total_matches": total,          # сколько совпадений ВСЕГО
             "match_count": len(rows),        # сколько отдано в этом окне
-            "truncated": len(rows) < total,
+            "offset": max(0, offset),
+            "truncated": max(0, offset) + len(rows) < total,
             "results": results,
         }
 

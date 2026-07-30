@@ -256,6 +256,7 @@ def search_code(
     case_sensitive: bool = False,
     max_results: int = 100,
     source: str = "",
+    offset: int = 0,
 ) -> dict:
     """Full-text search over .bsl modules; rows carry source + source-relative path."""
     srcs, err = ws.resolve_sources(source)
@@ -263,7 +264,8 @@ def search_code(
         return {"error": err}
     nf = name_filter.lower()
     # With a post-filter we must overfetch: matches outside the wanted object are dropped.
-    cap = max_results if not nf else max(max_results * 100, 5000)
+    want = max(1, max_results) + max(0, offset)  # окно от offset нужно чем наполнить
+    cap = want if not nf else max(want * 100, 5000)
     engine, it = stream(
         ws, pattern, sources=srcs, kinds=kinds, regex=regex,
         case_sensitive=case_sensitive, max_hits=cap,
@@ -279,15 +281,21 @@ def search_code(
             if len(parts) < 2 or nf not in parts[1].lower():
                 continue
         rows.append({"source": src_name, "path": rel, "line": line_no, "text": text.strip()[:300]})
-        if len(rows) >= max_results:
+        if len(rows) >= want:
             truncated = True
             break
     if not truncated and nf and seen_stream >= cap:
         truncated = True
+    start = max(0, offset)
+    window = rows[start: start + max(1, max_results)]
     return {
         "pattern": pattern,
         "engine": engine,
+        # match_count — сколько попаданий собрано (до окна); окно берётся от offset, чтобы
+        # остаток множества был достижим, а не терялся молча.
         "match_count": len(rows),
-        "truncated": truncated,
-        "matches": rows,
+        "returned": len(window),
+        "offset": start,
+        "truncated": truncated or start + len(window) < len(rows),
+        "matches": window,
     }
