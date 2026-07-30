@@ -109,8 +109,39 @@ def _parse_at_times(vals: list[str]) -> list[tuple[int, int]] | None:
     return out
 
 
-def _sync_pass(pull: bool, only: set[str] | None, logger) -> tuple[int, int]:
-    """Один проход по ВСЕМ воркспейсам: зеркало → clone/pull, путь → fetch (или ff-pull при --pull).
+def _refresh_index_after_pull(name: str, entry: dict, logger) -> None:
+    """Догнать индекс после обновления рабочей копии.
+
+    Сам git-проход только приносит файлы. Индекс инкрементальный, но кикается ЛЕНИВО — из
+    поиска (не чаще раза в 30 с) и при обнаружении отставания в запросе вызывающих. Значит
+    после ночного sync первые запросы платили живым разбором всего подтянутого, а до первого
+    поиска индекс мог оставаться на коммите прошлой недели. Здесь догон делается сразу: это
+    обслуживающий проход, ждать его уместно. Кросс-процессный лок не даёт встать вторым
+    писателем рядом с работающим сервером."""
+    from . import fts as lite_fts
+    from .workspace import Workspace
+
+    root = str(entry.get("root") or "").strip()
+    if not root:
+        return
+    try:
+        ws = Workspace(root, ext_roots=tuple(entry.get("ext_roots") or ()))
+        res = lite_fts.index_for(ws).build()
+    except Exception as exc:  # noqa: BLE001 — догон не должен ронять проход синка
+        logger.warning("%s: догон индекса не удался: %s: %s", name, type(exc).__name__, exc)
+        return
+    if err := res.get("error"):
+        logger.warning("%s: догон индекса: %s", name, err)
+        return
+    changed = sum(int(res.get(k) or 0) for k in ("files_added", "files_updated", "files_removed"))
+    logger.info("%s: индекс догнан — файлов затронуто %d, за %s с", name, changed,
+                res.get("seconds", "?"))
+
+
+def _sync_pass(pull: bool, only: set[str] | None, logger, *, refresh_index: bool = True,
+               ) -> tuple[int, int]:
+    """Один проход по ВСЕМ воркспейсам: зеркало → clone/pull, путь → fetch (или ff-pull при --pull),
+    затем догон индекса по подтянутым файлам.
     Возвращает (обновлено, ошибок). Ошибка отдельного репозитория не прерывает проход:
     gitops.update_workspace сама не бросает исключений (см. её докстринг)."""
     from . import admin as lite_admin
@@ -133,6 +164,8 @@ def _sync_pass(pull: bool, only: set[str] | None, logger) -> tuple[int, int]:
             ok += 1
             out = (res.get("output") or "").strip().splitlines()
             logger.info("%s: %s — ok%s", name, op, (" · " + out[0]) if out else "")
+            if refresh_index:
+                _refresh_index_after_pull(name, entry, logger)
         else:
             fail += 1
             logger.warning("%s: %s — ОШИБКА: %s", name, op, res.get("error"))
@@ -140,10 +173,12 @@ def _sync_pass(pull: bool, only: set[str] | None, logger) -> tuple[int, int]:
 
 
 def _sync(interval: int | None, at_raw: list[str], once: bool, pull: bool,
-          only: set[str] | None) -> int:
+          only: set[str] | None, refresh_index: bool = True) -> int:
     """Демон обновления воркспейсов. stdlib-планировщик: --interval N (сек, дрейфонезависимо
     через monotonic) или --at HH:MM (фиксированное время суток; приоритетнее interval).
-    --once — один проход и выход. Логи — в stderr (переживают nohup/systemd)."""
+    --once — один проход и выход. Логи — в stderr (переживают nohup/systemd).
+    После каждого успешного обновления индекс догоняется по подтянутым файлам
+    (--no-index-refresh отключает: тогда догон останется ленивым, из запросов)."""
     import logging
     import time
     from datetime import datetime, timedelta
@@ -163,7 +198,7 @@ def _sync(interval: int | None, at_raw: list[str], once: bool, pull: bool,
         logger.warning("--interval игнорируется: заданы фиксированные времена --at")
 
     def one_pass() -> None:
-        ok, fail = _sync_pass(pull, only, logger)
+        ok, fail = _sync_pass(pull, only, logger, refresh_index=refresh_index)
         logger.info("проход завершён: обновлено %d, ошибок %d", ok, fail)
 
     if once:
@@ -215,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
                              "Заданные --at имеют приоритет над --interval")
     parser.add_argument("--once", action="store_true",
                         help="sync: один проход и выход (для внешнего планировщика cron/systemd)")
+    parser.add_argument("--no-index-refresh", action="store_true",
+                        help="sync: НЕ догонять индекс после обновления (по умолчанию догоняем: иначе подтянутые файлы разбираются живьём на каждом запросе, пока кто-нибудь не выполнит поиск)")
     parser.add_argument("--root", help="корень рабочей копии (Конфигуратор XML или EDT)")
     parser.add_argument("--workspace",
                         help="имя воркспейса: дефолт этой сессии (с --root — имя, под которым "
@@ -238,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "sync":
         only = {args.workspace} if args.workspace else None
-        return _sync(interval=args.interval, at_raw=args.at, once=args.once,
+        return _sync(refresh_index=not args.no_index_refresh,
+                     interval=args.interval, at_raw=args.at, once=args.once,
                      pull=args.pull, only=only)
 
     from . import server as lite_server

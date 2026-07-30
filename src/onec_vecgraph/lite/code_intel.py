@@ -825,8 +825,11 @@ def _merge_live_overrides(ws: Workspace, rows: list[dict]) -> list[dict]:
     """Заменить строки индекса по «грязным»/расходящимся файлам на живой разбор аннотаций.
 
     Иначе только что добавленный в расширении хук `&Вместо(...)` невидим для find_overrides и
-    для `review_set.overridden_by` — то есть ревью не покажет перехват собственной правки."""
-    dirty = _dirty_bsl_files(ws)
+    для `review_set.overridden_by` — то есть ревью не покажет перехват собственной правки.
+
+    Закоммиченное после сборки (`_behind_index_files`, т.е. подтянутое `git pull`/`sync`) тоже
+    входит в набор: перехват, пришедший из ветки коллеги, иначе не виден до догона индекса."""
+    dirty = _dirty_bsl_files(ws) | _behind_index_files(ws)
     suspect = {r["_abs"] for r in rows if r.get("_stale") and r.get("_abs")} | dirty
     kept = [r for r in rows if r.get("_abs") not in suspect]
     ext_names = {s.name for s in ws.sources if s.is_extension}
@@ -855,8 +858,14 @@ def _merge_live_overrides(ws: Workspace, rows: list[dict]) -> list[dict]:
 
 def _merge_live_declarations(ws: Workspace, rows: list[dict], routine_name: str,
                              exported_only: bool, srcs: list[LiteSource]) -> list[dict]:
-    """Заменить строки индекса по «грязным»/расходящимся файлам на живой разбор."""
-    dirty = _dirty_bsl_files(ws)
+    """Заменить строки индекса по «грязным»/расходящимся файлам на живой разбор.
+
+    В набор входит и то, что ЗАКОММИЧЕНО после сборки индекса (`_behind_index_files`) — ровно
+    результат `git pull`/`onec-lite sync`. Без него подтянутое объявление было видно только
+    если такого ИМЕНИ индекс не знал вовсе (тогда срабатывал фолбэк на скан); при одноимённых
+    объявлениях в других объектах ответ оставался непустым, новое в него не попадало, и никакого
+    флага неполноты не выставлялось."""
+    dirty = _dirty_bsl_files(ws) | _behind_index_files(ws)
     suspect = {r["_abs"] for r in rows if r.get("_stale") and r.get("_abs")} | dirty
     kept = [r for r in rows if r.get("_abs") not in suspect]
     low = routine_name.lower()

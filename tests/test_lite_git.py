@@ -258,3 +258,67 @@ def test_review_set_keeps_form_method_called_through_a_form_reference(git_ws: Wo
     assert rows, "изменённый метод формы должен попасть в набор"
     assert rows[0]["callers_count"] == 1, rows[0]
     assert rows[0].get("callers_foreign_dropped", 0) == 0, rows[0]
+
+
+_PULLED_OVERRIDE = """&Вместо("ПроверитьКод")
+Функция Расш_ПроверитьКод(Знач Код) Экспорт
+    Возврат Истина;
+КонецФункции
+"""
+
+
+def _build_index(ws: Workspace) -> None:
+    from onec_vecgraph.lite import code_intel, fts
+
+    fts.index_for(ws).build(wait=60)
+    code_intel.clear_caches()
+
+
+def test_committed_pull_is_visible_in_declarations_and_overrides(git_ws: Workspace) -> None:
+    """Файлы, пришедшие КОММИТОМ после сборки индекса (git pull / onec-lite sync), обязаны
+    попадать в find_routine и find_overrides.
+
+    Живой подмес брал только «грязный» набор (git status), а подтянутое уже закоммичено —
+    значит в него не входило. При одноимённых объявлениях в других объектах ответ оставался
+    непустым, фолбэк на скан не срабатывал, и новое объявление просто отсутствовало без
+    единого флага неполноты."""
+    from onec_vecgraph.lite import code_intel, fts
+
+    pytest.importorskip("sqlite3")
+    if not fts.fts_available():
+        pytest.skip("sqlite3 without FTS5")
+
+    root = Path(git_ws.root)
+    src = Path(git_ws.sources[0].files_root)
+    # приводим копию к чистому состоянию и строим индекс на ней
+    _git(["add", "-A"], root)
+    _git(["commit", "-q", "-m", "base2"], root)
+    _build_index(git_ws)
+    before = code_intel.find_declarations(git_ws, "ПроверитьКод", max_results=50)
+    assert before["engine"] == "index" and before["declaration_count"] == 1
+
+    # «pull»: новый объект с одноимённой рутиной + расширение с перехватом — и всё ЗАКОММИЧЕНО
+    _w(src / "CommonModules" / "Ещё" / "Ещё.mdo",
+       _COMMON.replace("Проверки", "Ещё").replace("22222222", "55555555"))
+    _w(src / "CommonModules" / "Ещё" / "Module.bsl",
+       "Функция ПроверитьКод(Знач Код) Экспорт\n    Возврат Ложь;\nКонецФункции\n")
+    ext = src.parent.parent / "расш" / "src"
+    _w(ext / "Configuration" / "Configuration.mdo",
+       _CONFIG.replace("ГитБаза", "РасшГит").replace("00000000", "66666666").replace(
+           "</mdclass:Configuration>",
+           "  <configurationExtensionPurpose>AddOn</configurationExtensionPurpose>\n"
+           "</mdclass:Configuration>"))
+    _w(ext / "CommonModules" / "Проверки" / "Module.bsl", _PULLED_OVERRIDE)
+    _git(["add", "-A"], root)
+    _git(["commit", "-q", "-m", "pulled"], root)
+
+    wider = Workspace(root, ext_roots=(str(ext.parent),))
+    code_intel.clear_caches()
+    after = code_intel.find_declarations(wider, "ПроверитьКод", max_results=50)
+    objects = {r.get("object") for r in after["declarations"]}
+    assert "CommonModule.Ещё" in objects, after     # подтянутое объявление видно
+    assert "CommonModule.Проверки" in objects       # прежнее не потеряно
+
+    overrides = code_intel.find_overrides(wider, max_results=50)
+    rows = overrides.get("overrides") or overrides.get("rows") or []
+    assert any(r.get("routine") == "Расш_ПроверитьКод" for r in rows), overrides
