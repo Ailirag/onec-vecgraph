@@ -36,7 +36,10 @@ from . import admin as lite_admin
 from . import code_intel
 from .workspace import LiteSource, Workspace, read_text
 
-_SCHEMA_VERSION = 5  # v5: в юнит входит «шапка» комментариев над рутиной + region в токенах
+_SCHEMA_VERSION = 6  # v6: +calls.qualifier_low и symbols.object_low — SQLite lower()/LIKE НЕ
+# приводят кириллицу к нижнему регистру, поэтому сравнение квалификатора в SQL молча не
+# совпадало (object_hint отдавал 3 строки там, где их тысячи). Нормализуем в Python.
+# v5: в юнит входит «шапка» комментариев над рутиной + region в токенах
 # (версия поднята сознательно: состав текста юнита изменился, а инкремент по mtime сам его не
 #  пересоберёт — файлы-то не менялись, поэтому нужна полная переиндексация)
 _REFRESH_TTL = 30.0  # seconds between implicit mtime rescans on search
@@ -171,7 +174,7 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
         CREATE TABLE symbols(
             id INTEGER PRIMARY KEY,
             path TEXT NOT NULL, source TEXT NOT NULL, object TEXT NOT NULL, module TEXT NOT NULL,
-            name TEXT NOT NULL, name_low TEXT NOT NULL,
+            name TEXT NOT NULL, name_low TEXT NOT NULL, object_low TEXT NOT NULL,
             start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, export INTEGER NOT NULL,
             directive TEXT,
             override_mode TEXT, override_target TEXT, override_target_low TEXT
@@ -181,8 +184,9 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
         CREATE INDEX symbols_override ON symbols(override_target_low);
         CREATE TABLE calls(
             caller_id INTEGER NOT NULL, method_low TEXT NOT NULL,
-            qualifier TEXT, line INTEGER NOT NULL
+            qualifier TEXT, qualifier_low TEXT, line INTEGER NOT NULL
         );
+        CREATE INDEX calls_qualifier ON calls(qualifier_low);
         CREATE INDEX calls_method ON calls(method_low);
         CREATE INDEX calls_caller ON calls(caller_id);
         """
@@ -230,19 +234,22 @@ def _write_symbols(con: sqlite3.Connection, ws: Workspace, src: LiteSource, path
     descr = code_intel.describe_bsl_path(src, rel)
     for rt in code_intel.routines_of(path):
         cur = con.execute(
-            "INSERT INTO symbols(path, source, object, module, name, name_low, start_line,"
-            " end_line, export, directive, override_mode, override_target,"
-            " override_target_low) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO symbols(path, source, object, module, name, name_low, object_low,"
+            " start_line, end_line, export, directive, override_mode, override_target,"
+            " override_target_low) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (key, src_name, descr.get("object", ""), descr.get("module", ""), rt.name,
-             rt.name.lower(), rt.start_line, rt.end_line, int(rt.export), rt.directive,
+             rt.name.lower(), (descr.get("object") or "").lower(),
+             rt.start_line, rt.end_line, int(rt.export), rt.directive,
              rt.override_mode, rt.override_target,
              (rt.override_target or "").lower() or None),
         )
         rid = cur.lastrowid
         if rt.calls:
             con.executemany(
-                "INSERT INTO calls(caller_id, method_low, qualifier, line) VALUES(?,?,?,?)",
-                [(rid, c.method.lower(), c.qualifier, c.line or 0) for c in rt.calls],
+                "INSERT INTO calls(caller_id, method_low, qualifier, qualifier_low, line)"
+                " VALUES(?,?,?,?,?)",
+                [(rid, c.method.lower(), c.qualifier,
+                  (c.qualifier or "").lower() or None, c.line or 0) for c in rt.calls],
             )
 
 
@@ -588,7 +595,8 @@ class FtsIndex:
 
     def callers_of(self, names: list[str], *, max_per_name: int = 100,
                    kinds: set[str] | None = None,
-                   source_names: set[str] | None = None) -> dict[str, list[dict]]:
+                   source_names: set[str] | None = None,
+                   hint: str = "") -> dict[str, list[dict]]:
         """Места вызова для набора имён — одной SQL-выборкой по индексу.
 
         Возвращает ВСЕ найденные вызовы (без обрезки по числу файлов-кандидатов, как в
@@ -617,6 +625,12 @@ class FtsIndex:
                 # запрос по одному расширению возвращал ноль строк при непустом счёте.
                 kind_sql += " AND s.source IN (" + ",".join("?" for _ in source_names) + ")"
                 args += sorted(source_names)
+            if hint:
+                # object_hint — то же самое: применённый ПОСЛЕ окна он давал 0 строк там, где
+                # реальных тысячи (первое совпадение лежало за пределами первых 20).
+                kind_sql += (" AND (c.qualifier_low = ?"
+                             " OR (c.qualifier IS NULL AND s.object_low LIKE ?))")
+                args += [hint.lower(), f"%{hint.lower()}%"]
             rows = con.execute(
                 "SELECT c.method_low, s.path, s.source, s.object, s.module, s.name,"
                 "       s.start_line, s.end_line, s.export, c.qualifier, c.line,"
@@ -733,7 +747,7 @@ class FtsIndex:
         return out
 
     def call_totals(self, names: list[str], *, source_names: set[str] | None = None,
-                    kinds: set[str] | None = None) -> dict[str, dict]:
+                    kinds: set[str] | None = None, hint: str = "") -> dict[str, dict]:
         """Полная статистика мест вызова: {имя: {rows, distinct_callers, by_object[...]}}.
 
         Считается по ВСЕМУ множеству одним запросом, а не по окну выдачи: сводка `by_object`,
@@ -758,6 +772,10 @@ class FtsIndex:
             if kinds:
                 extra += " AND (" + " OR ".join("s.object LIKE ?" for _ in kinds) + ")"
                 args += [f"{k}.%" for k in sorted(kinds)]
+            if hint:
+                extra += (" AND (c.qualifier_low = ?"
+                          " OR (c.qualifier IS NULL AND s.object_low LIKE ?))")
+                args += [hint.lower(), f"%{hint.lower()}%"]
             rows = con.execute(
                 "SELECT c.method_low, s.object, count(*) AS rows_n,"
                 "       count(DISTINCT s.id) AS callers_n"

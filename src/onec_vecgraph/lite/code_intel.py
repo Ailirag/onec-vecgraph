@@ -484,28 +484,22 @@ def find_callers(
     # файлам-кандидатам и без текстового скана. kinds сужают выборку прямо в SQL.
     kindset = set(kinds) if kinds else None
     indexed = _index_callers(ws, [routine_name], max_per_name=max_results, source=source,
-                             kinds=kindset)
+                             kinds=kindset, hint=object_hint)
     # «Нет вызывающих» — самый дорогой неверный ответ (агент решит, что правка безопасна), а из
     # индекса он мог означать «имя добавили после сборки». Пустой результат подтверждаем сканом.
     if indexed is not None and not indexed.get(routine_name):
         indexed = None
     if indexed is not None:
-        rows = indexed.get(routine_name, [])
+        rows = indexed.get(routine_name, [])  # хинт уже применён в SQL, а не к окну выдачи
         hint_low = object_hint.lower()
-        if hint_low:
-            rows = [r for r in rows
-                    if (r.get("qualifier") or "").lower() == hint_low
-                    or (r.get("qualifier") is None
-                        and hint_low in (r.get("object") or "").lower())]
         # Сводка и счёт берутся по ВСЕМУ множеству (одним GROUP BY), а не по окну выдачи:
         # иначе by_object показывал распределение по первым по алфавиту объектам, и агент
         # планировал по 2% данных. Фильтры source/kinds входят в сам запрос, поэтому счёт
         # всегда соответствует отданным строкам. object_hint — фильтр по квалификатору
         # вызова, в SQL его нет, поэтому при нём счётчики не заявляем.
-        stats: dict = {}
-        if not hint_low:
-            src_names = {s.name for s in srcs} if source else None
-            stats = _index_call_stats(ws, routine_name, source_names=src_names, kinds=kindset)
+        src_names = {s.name for s in srcs} if source else None
+        stats = _index_call_stats(ws, routine_name, source_names=src_names, kinds=kindset,
+                                  hint=hint_low)
         rows_total = stats.get("rows")
         return {
             "routine": routine_name,
@@ -593,7 +587,7 @@ def find_callers(
 
 def _index_callers(
     ws: Workspace, names: list[str], *, max_per_name: int, source: str,
-    kinds: set[str] | None = None,
+    kinds: set[str] | None = None, hint: str = "",
 ) -> dict[str, list[dict]] | None:
     """Вызывающие из индекса символов (None — индекса нет, работаем текстовым сканом).
 
@@ -606,7 +600,7 @@ def _index_callers(
             return None
         src_names = {s.name for s in ws.resolve_sources(source)[0]} if source else None
         found = idx.callers_of(names, max_per_name=max_per_name, kinds=kinds,
-                               source_names=src_names)
+                               source_names=src_names, hint=hint)
     except Exception:  # noqa: BLE001 — индекс не должен ломать ответ, есть скан-фолбэк
         return None
     if source:
@@ -767,7 +761,7 @@ def _merge_live_declarations(ws: Workspace, rows: list[dict], routine_name: str,
 
 
 def _index_call_stats(ws: Workspace, name: str, *, source_names: set[str] | None = None,
-                      kinds: set[str] | None = None) -> dict:
+                      kinds: set[str] | None = None, hint: str = "") -> dict:
     """Полная статистика вызовов из индекса: строки, различные вызывающие, разбивка по объектам.
 
     Считается по всему множеству с теми же фильтрами, что и выдача, — чтобы счётчики в ответе
@@ -775,7 +769,7 @@ def _index_call_stats(ws: Workspace, name: str, *, source_names: set[str] | None
     try:
         from . import fts as _fts
         return _fts.index_for(ws).call_totals(
-            [name], source_names=source_names, kinds=kinds).get(name, {})
+            [name], source_names=source_names, kinds=kinds, hint=hint).get(name, {})
     except Exception:  # noqa: BLE001
         return {}
 
