@@ -526,8 +526,13 @@ def find_callers(
             # решить, куда смотреть, без вычитывания строк вызовов.
             # Сводку тоже надо ограничивать: у платформенного хука это 810 объектов и
             # ~19.7 тыс. токенов на ДЕФОЛТНОМ вызове, ровно там, где обещаны «десятки».
+            # Обрезка помечается явно И числами: без этого сумма by_object не сходилась с
+            # call_rows_total (887 против 2323), и агент не мог понять, что видит верхушку.
             "by_object": (stats.get("by_object") or [])[:_BY_OBJECT_TOP],
             "by_object_total": len(stats.get("by_object") or []),
+            "by_object_truncated": len(stats.get("by_object") or []) > _BY_OBJECT_TOP,
+            "by_object_rows_shown": sum(
+                x["count"] for x in (stats.get("by_object") or [])[:_BY_OBJECT_TOP]),
             "callers": [] if summary_only else rows,
         }
     pattern = rf"\b{re.escape(routine_name)}\s*\("

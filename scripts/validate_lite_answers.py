@@ -151,7 +151,15 @@ def main() -> int:
             if total is not None:
                 if shown > total:
                     fails.append(f"{commit}/{rt_name}: показано {shown} > всего {total}")
-                if by_sum != total:
+                # Сводка может быть обрезана до топ-N — тогда сумма ДОЛЖНА быть меньше полного
+                # счёта, но обрезка обязана быть заявлена, а показанная часть — сходиться с
+                # by_object_rows_shown. Иначе агент примет верхушку за всё распределение.
+                if callers.get("by_object_truncated"):
+                    if by_sum > total or by_sum != callers.get("by_object_rows_shown"):
+                        fails.append(f"{commit}/{rt_name}: обрезанная сводка не сходится "
+                                     f"({by_sum} против {callers.get('by_object_rows_shown')}, "
+                                     f"всего {total})")
+                elif by_sum != total:
                     fails.append(f"{commit}/{rt_name}: сумма by_object {by_sum} != всего {total}")
                 if callers.get("truncated") and total <= shown:
                     fails.append(f"{commit}/{rt_name}: truncated при total<=shown")
