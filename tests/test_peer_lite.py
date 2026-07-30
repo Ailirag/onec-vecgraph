@@ -301,3 +301,38 @@ def test_lite_tool_profiles(monkeypatch) -> None:
     assert "search_code" not in trimmed and "find_routine" not in trimmed
     assert "find_callers" in trimmed
     _lite_tool_names(monkeypatch, None)  # вернуть модуль в дефолтное состояние
+
+
+def test_instructions_do_not_advise_absent_tools(monkeypatch) -> None:
+    """Инструкции сервера называют инструменты по имени — значит они обязаны быть в профиле.
+
+    Расхождение «текст советует find_routine, а его в наборе нет» — это ровно тот сорт
+    несогласованности, из-за которого ответам инструмента перестают верить: агент зовёт то, чего
+    нет, получает ошибку и уходит в обход."""
+    import importlib
+    import re
+
+    from onec_vecgraph.lite import server as lite_server
+
+    # `review` — намеренно узкий набор, который оператор выбирает сам; инструкции для него
+    # опираются на оговорку «список опубликованных инструментов авторитетен». Проверяем профили,
+    # которые запускаются по умолчанию: именно там расхождение вводило бы агента в заблуждение.
+    for profile in (None, "lean", "full"):
+        names = _lite_tool_names(monkeypatch, profile)
+        mod = importlib.reload(lite_server)
+        text = mod.INSTRUCTIONS
+        # Блок «ВМЕСТО КАКИХ ИНСТРУМЕНТОВ» упоминает тулы затем, чтобы их НЕ звать (там указана
+        # замена через rg), поэтому их отсутствие в профиле — намеренное. Из проверки исключаем.
+        for a, b in (("ВМЕСТО КАКИХ ИНСТРУМЕНТОВ", "Бери инструменты отсюда"),
+                     ("Список опубликованных инструментов авторитетен", None)):
+            start = text.find(a)
+            end = text.find(b) if b else len(text)
+            if 0 <= start < end:
+                text = text[:start] + text[end:]
+        advised = {
+            m for m in re.findall(r"\b([a-z_]{4,})\b", text)
+            if callable(getattr(mod, m, None)) and m not in {"main", "run", "configure"}
+        }
+        missing = sorted(a for a in advised if a not in names)
+        assert not missing, f"профиль {profile or 'default'}: советуются, но отсутствуют {missing}"
+    _lite_tool_names(monkeypatch, None)

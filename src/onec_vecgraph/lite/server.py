@@ -46,8 +46,25 @@ grep дешевле в 2-5 раз (а на агрегатах через кон�
 
 Бери Grep/ripgrep, когда вопрос — «где встречается такой текст»: подстрока, regex, литерал,
 имя в комментарии; когда нужен дешёвый счёт/агрегат (`rg -c ... | sort | uniq -c`); когда надо
-прочитать известный файл или окно строк; для git — `git diff/status/log` (они дешевле и быстрее
-здешних changed_objects/review_set); и вообще на первом, разведочном вопросе.
+прочитать известный файл или окно строк; для git — `git diff/status/log`; и вообще на первом,
+разведочном вопросе.
+
+ВМЕСТО КАКИХ ИНСТРУМЕНТОВ (замерено; в профиле по умолчанию их и нет — это не потеря, а замена).
+Корни источников для rg возьми из overview(): база и КАЖДОЕ расширение — отдельный корень, иначе
+пропустишь до 75% результатов.
+* search_code -> `rg -n "<regex>" <корни>` (тул был тонкой обёрткой над этим);
+* search_metadata -> `rg -n -g "*.mdo" -e "<Имя>" <корни>`;
+* объявление метода, когда хватит первой находки -> `rg -n "^\\s*(Процедура|Функция)\\s+<Имя>"
+  <корни>` (дешевле ~2.5x). find_routine ОСТАВЛЕН в наборе: он даёт полный счёт объявлений (у
+  типовых обработчиков их тысячи) и порядок по значимости — так находится настоящий обработчик,
+  а не первый одноимённый;
+* list_routines -> `rg -n "^\\s*(Процедура|Функция)" <файл модуля>` (дешевле ~3.5x, если путь
+  модуля уже известен);
+* read_file / read_module -> обычное чтение файла с offset/limit;
+* changed_objects -> `git diff --name-status <ref>` (дешевле ~5x). Здешний тул нужен, когда
+  требуется группировка путей по объектам метаданных;
+* «сколько всего и по каким объектам» -> `rg -c ... | sed ... | sort | uniq -c | sort -rn`
+  (агрегат считается в шелле, дешевле в 10-25 раз) — если не нужен парсер-верифицированный счёт.
 
 Бери инструменты отсюда, когда ответ требует РАЗБОРА кода или метаданных 1С:
 * вызов это или объявление — find_callers/find_callees/call_graph (у наивного grep на популярном
@@ -63,20 +80,27 @@ grep дешевле в 2-5 раз (а на агрегатах через кон�
 * сколько ВСЕГО вызовов/использований/объявлений — здесь есть полные счётчики
   (call_rows_total/usage_count/declaration_count), grep обязан либо усечь, либо доплатить
   полным проходом;
-* модули приложения и сеанса (папка Configuration), точки входа, обработчики — find_routine/
-  find_handlers/list_routines(kind="Configuration").
+* модули приложения и сеанса — find_routine покажет НАСТОЯЩИЙ обработчик (`Configuration ▸
+  SessionModule`) среди десятков одноимённых методов объектов; сам текст модуля дешевле
+  прочитать как файл `Configuration/SessionModule.bsl` (или read_routine с kind="Configuration");
+* точки входа и привязка обработчиков форм — find_handlers.
 
-Куда идти: обзор -> overview/metrics; структура -> list_objects/get_object;
-зависимости -> get_dependencies (связи объекта) / find_type_usages (где используется тип);
-код -> list_routines/read_module/read_routine; поиск -> fts_search (ранжированный BM25,
-лучший старт для «где считается X») / search_code (точная подстрока/regex — здесь Grep обычно
-дешевле) / search_metadata / find_routine;
+Куда идти: обзор -> overview; структура -> get_object; зависимости -> get_dependencies (связи
+объекта) / find_type_usages (где используется тип); код -> read_routine (тело рутины);
+поиск -> fts_search (ранжированный BM25, лучший старт для «где считается X») / find_routine
+(где объявлено, с полным счётом);
 анализ -> find_callers/find_callees/call_graph/find_handlers/find_overrides/writes_to;
-изменения ветки (git) -> changed_objects (что поменялось) / review_set (затронутые
-рутины + их вызывающие — ревью-набор незакоммиченной работы; сам дифф дешевле смотреть git'ом);
+изменения ветки (git) -> review_set (затронутые рутины + их вызывающие; сам дифф дешевле
+смотреть git'ом);
 UI и интеграции -> get_form (структура формы) / get_service (HTTP- и Web-сервисы);
 справка платформы (синтаксис-помощник) -> platform_docinfo/platform_search/
-platform_get_document/platform_versions (пути к .hbk задаются в админке /admin)."""
+platform_get_document/platform_versions (пути к .hbk задаются в админке /admin).
+
+Список опубликованных инструментов авторитетен: часть (search_code, search_metadata,
+list_routines, list_objects, read_file, read_module, changed_objects, metrics, list_kinds) в
+профиле по умолчанию НЕ публикуется — замены через rg и git перечислены выше. Если такой
+инструмент нужен как единственный путь (нет шелла и чтения файлов), запусти сервер с
+ONEC_LITE_PROFILE=full."""
 
 def _env(name: str, default: str) -> str:
     return os.environ.get(name, "").strip() or default
@@ -97,13 +121,19 @@ def _env(name: str, default: str) -> str:
 
 # Дублируют дешёвые возможности агента (rg / чтение файла / git) — вне профиля `lean`.
 _REDUNDANT_WITH_SHELL = frozenset({
-    "search_code", "search_metadata", "find_routine", "changed_objects",
+    "search_code", "search_metadata", "changed_objects",
     "read_file", "read_module", "list_routines", "list_objects", "list_kinds", "metrics",
 })
+# find_routine НЕ здесь, хотя по токенам rg дешевле: только он отвечает «где НАСТОЯЩЕЕ
+# объявление» — у типового обработчика их тысячи, и нужен полный счёт с порядком по
+# значимости (в т.ч. чтобы найти обработчик сеанса среди десятков одноимённых методов).
 # Минимум под задачу код-ревью: «что я сломал» и проверка объекта.
 _REVIEW_PROFILE = frozenset({
     "review_set", "find_callers", "find_overrides", "get_object", "read_routine",
     "writes_to", "find_handlers", "overview", "list_workspaces",
+    # Инструкции сервера советуют эти два по имени, значит они обязаны быть в любом профиле:
+    # расхождение «текст советует — тула нет» само по себе повод не доверять ответу.
+    "find_routine", "fts_search",
 })
 
 
