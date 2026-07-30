@@ -131,9 +131,58 @@ def fts_available() -> bool:
         return False
 
 
+def index_dir() -> Path:
+    """Каталог индексов. По умолчанию рядом с состоянием, но переопределяется env.
+
+    Индексы — самая тяжёлая часть инструмента: на восьми конфигурациях 1С это ~9.5 ГБ, и
+    держать их на системном диске часто нельзя (у нас он заполнился до отказа прямо во время
+    пересборки, и она упала с «database or disk is full»). ONEC_LITE_FTS_DIR уводит их на
+    любой том, не перемещая config.json."""
+    override = os.environ.get("ONEC_LITE_FTS_DIR", "").strip()
+    if not override:
+        # Сохранённое значение: env живёт только в текущем процессе, а сервер и следующие
+        # сессии должны находить индексы там же, иначе они молча пересоберутся с нуля.
+        try:
+            override = str(lite_admin.load_state(lite_admin.state_file()).get("fts_dir") or "")
+        except Exception:  # noqa: BLE001 — состояние не должно ломать доступ к индексу
+            override = ""
+    return Path(override.strip()) if override.strip() else lite_admin.state_file().parent / "fts"
+
+
 def db_path_for(ws: Workspace) -> Path:
     digest = hashlib.sha1(str(ws.root).lower().encode("utf-8")).hexdigest()[:16]
-    return lite_admin.state_file().parent / "fts" / f"{digest}.db"
+    return index_dir() / f"{digest}.db"
+
+
+def prune_orphan_indexes(live_roots: list[str], *, dry_run: bool = True) -> dict:
+    """Удалить БД индексов, не принадлежащие ни одному текущему воркспейсу.
+
+    Имя файла — хэш от пути корня, поэтому смена/удаление воркспейса оставляет его индекс
+    навсегда: у нас так накопилось 57 осиротевших БД (1 ГБ) при восьми живых. Ничто их не
+    подметало, и обнаружилось это только когда кончилось место."""
+    live = {hashlib.sha1(str(r).lower().encode("utf-8")).hexdigest()[:16] for r in live_roots}
+    d = index_dir()
+    removed: list[str] = []
+    freed = 0
+    kept = 0
+    for f in sorted(d.glob("*.db")) if d.is_dir() else []:
+        if f.stem in live:
+            kept += 1
+            continue
+        size = f.stat().st_size
+        for suf in ("", "-wal", "-shm"):
+            side = Path(str(f) + suf)
+            if side.is_file():
+                size += side.stat().st_size if suf else 0
+                if not dry_run:
+                    try:
+                        side.unlink()
+                    except OSError:
+                        continue
+        removed.append(f.name)
+        freed += size
+    return {"dir": str(d), "kept": kept, "orphans": len(removed),
+            "freed_bytes": freed, "dry_run": dry_run, "removed": removed[:20]}
 
 
 def _connect(path: Path) -> sqlite3.Connection:
