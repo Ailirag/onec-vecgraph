@@ -109,18 +109,18 @@ def _find_calls(body: str, body_start_line: int = 0) -> list[Call]:
     вызова была абсолютная координата в файле: без неё потребитель (find_callers) может дать
     только диапазон охватывающей рутины, и агенту приходится дочитывать её целиком."""
     calls: list[Call] = []
-    seen: set[tuple[str | None, str]] = set()
     for m in _CALL_RE.finditer(body):
         qualifier, method = m.group(1), m.group(2)
         if method.lower() in _KEYWORDS:
             continue
         if qualifier is not None and qualifier.lower() in _KEYWORDS:
             qualifier = None
-        key = (qualifier, method)
-        if key in seen:
-            continue
-        seen.add(key)
         line = body_start_line + body.count("\n", 0, m.start()) if body_start_line else 0
+        # Возвращаем КАЖДОЕ вхождение, а не по одному на пару (квалификатор, метод). Прежняя
+        # дедупликация делала невидимыми повторные вызовы того же метода внутри одной рутины —
+        # например второй `Модуль.Метод()` в ветке `Иначе`: на боевом методе так пропадало
+        # 6 мест вызова из 254, а ответ при этом не был помечен неполным. Для вопроса «что
+        # вызывает эта рутина» дедупликация делается на выдаче (find_callees), а не в данных.
         calls.append(Call(qualifier=qualifier, method=method, line=line))
     return calls
 

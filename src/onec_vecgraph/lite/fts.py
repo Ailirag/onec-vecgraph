@@ -36,7 +36,9 @@ from . import admin as lite_admin
 from . import code_intel
 from .workspace import LiteSource, Workspace, read_text
 
-_SCHEMA_VERSION = 6  # v6: +calls.qualifier_low и symbols.object_low — SQLite lower()/LIKE НЕ
+_SCHEMA_VERSION = 7  # v7: calls хранит КАЖДОЕ вхождение вызова (парсер больше не схлопывает
+# повторные вызовы одного метода в рутине — так пропадало 6 мест вызова из 254)
+# v6: +calls.qualifier_low и symbols.object_low — SQLite lower()/LIKE НЕ
 # приводят кириллицу к нижнему регистру, поэтому сравнение квалификатора в SQL молча не
 # совпадало (object_hint отдавал 3 строки там, где их тысячи). Нормализуем в Python.
 # v5: в юнит входит «шапка» комментариев над рутиной + region в токенах

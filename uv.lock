@@ -1068,7 +1068,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "lxml", specifier = ">=5.2" },
-    { name = "mcp", specifier = ">=1.9.0" },
+    { name = "mcp", specifier = ">=1.9.0,<2" },
     { name = "neo4j", specifier = ">=5.26" },
     { name = "openai", marker = "extra == 'cloud-embeddings'", specifier = ">=1.40" },
     { name = "pydantic", specifier = ">=2.7" },

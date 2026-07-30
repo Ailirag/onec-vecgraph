@@ -397,7 +397,14 @@ def find_callees(
         if rt is None:
             continue
         local = {r.name.lower(): r for r in routines_of(mpath)}
-        calls = [_resolve_call(ws, c.qualifier, c.method, local, (src, mpath)) for c in rt.calls]
+        # «Что вызывает эта рутина» — это МНОЖЕСТВО адресатов, поэтому повторные вхождения
+        # одного и того же вызова схлопываем здесь, на выдаче. В самих данных (calls) хранится
+        # каждое вхождение: иначе теряются места вызова, см. bsl.parser._find_calls.
+        uniq: dict[tuple[str | None, str], object] = {}
+        for c in rt.calls:
+            uniq.setdefault(((c.qualifier or "").lower() or None, c.method.lower()), c)
+        calls = [_resolve_call(ws, c.qualifier, c.method, local, (src, mpath))
+                 for c in uniq.values()]
         resolved = [c for c in calls if c["kind"] != "unresolved"]
         return {
             "source": src.name,

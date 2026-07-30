@@ -68,10 +68,55 @@ def rg_count(ws: Workspace, pattern: str) -> int:
     return sum(int(ln.rsplit(":", 1)[1]) for ln in proc.stdout.splitlines() if ":" in ln)
 
 
+def index_audit(ws: Workspace) -> list[str]:
+    """Полная сверка индекса символов с живым разбором: числа И координаты.
+
+    Самая сильная проверка полноты: один проход по всем .bsl против содержимого таблицы
+    symbols. Ловит и пропущенные файлы (папка вне обхода), и потерянные рутины (парсер), и
+    расхождение координат (индекс отстал), не полагаясь на выборочные запросы."""
+    from onec_vecgraph.bsl.parser import parse_module
+
+    fails: list[str] = []
+    idx = fts.index_for(ws)
+    if not idx.has_symbols():
+        return ["индекс символов не построен — сверять нечего"]
+    import sqlite3
+    con = sqlite3.connect(str(fts.db_path_for(ws)))
+    try:
+        indexed = {(p, n, s) for p, n, s in
+                   con.execute("SELECT path, name, start_line FROM symbols")}
+    finally:
+        con.close()
+
+    live: set[tuple] = set()
+    files = 0
+    for src in ws.sources:
+        for path in ws.bsl_files(src, fresh=True):
+            files += 1
+            try:
+                for rt in parse_module(read_text(path)):
+                    live.add((str(path), rt.name, rt.start_line))
+            except OSError:
+                continue
+    only_live = live - indexed
+    only_index = indexed - live
+    print(f"    файлов разобрано={files} живых рутин={len(live)} в индексе={len(indexed)}")
+    if only_live:
+        sample = list(only_live)[:3]
+        fails.append(f"индекс НЕ содержит {len(only_live)} живых рутин, напр.: {sample}")
+    if only_index:
+        sample = list(only_index)[:3]
+        fails.append(f"в индексе {len(only_index)} рутин, которых нет в живом разборе, "
+                     f"напр.: {sample}")
+    return fails
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--commits", default=",".join(DEFAULT_COMMITS))
     ap.add_argument("--per-commit", type=int, default=6, help="рутин на коммит")
+    ap.add_argument("--index-audit", action="store_true",
+                    help="полная сверка symbols с живым разбором (минуты)")
     args = ap.parse_args()
 
     ws = Workspace(UT_ROOT, ext_roots=UT_EXTS)
@@ -83,6 +128,9 @@ def main() -> int:
 
     fails: list[str] = []
     checked = 0
+    if args.index_audit:
+        print("\n=== полная сверка индекса с живым разбором")
+        fails.extend(index_audit(ws))
     for commit in [c.strip() for c in args.commits.split(",") if c.strip()]:
         subject = _git(["log", "-1", "--format=%s", commit]).strip()[:60]
         files, routines = touched(commit)
