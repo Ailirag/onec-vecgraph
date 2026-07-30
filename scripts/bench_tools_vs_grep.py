@@ -20,12 +20,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import statistics
 import subprocess
 import time
 from pathlib import Path
 
 import tiktoken
+
+# Замер должен видеть ВСЕ инструменты, а не только профиль по умолчанию: в `lean` часть
+# тулов не публикуется (они дублируют rg/чтение файла), и вызов падал бы «Unknown tool».
+os.environ.setdefault("ONEC_LITE_PROFILE", "full")
 
 from onec_vecgraph.lite import code_intel, search
 from onec_vecgraph.lite import server as lite_server
