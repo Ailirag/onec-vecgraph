@@ -421,11 +421,15 @@ def _kind_ok(kind: str) -> str | None:  # noqa: D401
 def overview(workspace: str = "") -> dict:
     """Обзор рабочей копии: источники (база + расширения) и число объектов по видам.
 
+    Блок `index` — состояние индекса символов. При `built: false` ответы идут живым сканом: они
+    верны, но медленнее, и полные счётчики (declaration_count, call_rows_total) вернутся null.
+
     workspace — имя из list_workspaces(); пусто = дефолт сессии."""
     ws = _ws(workspace)
     return {
         "workspace": _resolve_ws_name(workspace),
         "root": str(ws.root),
+        "index": _index_brief(ws),
         "sources": [
             {
                 "source": s.name,
@@ -444,6 +448,24 @@ def overview(workspace: str = "") -> dict:
                        "Добавьте пути в «Корни расширений» в админке (/admin)."}
            if (unattached := _unattached_projects(ws)) else {}),
     }
+
+
+def _index_brief(ws: Workspace) -> dict:
+    """Краткое состояние индекса для overview: собран / строится / пуст, плюс счёт рутин.
+
+    Полное состояние есть в metrics, но metrics НЕ публикуется в профиле по умолчанию — значит
+    агент о деградации оттуда не узнает. overview публикуется всегда и вызывается первым, поэтому
+    признак живёт здесь: без него «медленный ответ с null-счётчиками» выглядит как норма."""
+    try:
+        from . import fts as _fts
+        st = _fts.index_for(ws).status()
+    except Exception as exc:  # noqa: BLE001
+        return {"built": None, "note": f"состояние индекса недоступно: {exc}"}
+    brief: dict = {"built": bool(st.get("built")), "routines": st.get("symbols")}
+    for key in ("building", "building_elsewhere", "schema_outdated", "note"):
+        if st.get(key):
+            brief[key] = st[key]
+    return brief
 
 
 def _unattached_projects(ws: Workspace) -> list[dict]:

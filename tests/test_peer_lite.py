@@ -403,3 +403,25 @@ def test_doc_anchor_links_resolve() -> None:
             if frag not in anchors[key]:
                 broken.append(f"{doc} -> {key}#{frag}")
     assert not broken, "битые ссылки на разделы: " + "; ".join(broken)
+
+
+def test_index_state_is_reachable_from_published_tool(monkeypatch) -> None:
+    """Признак деградации индекса обязан быть в инструменте, который ПУБЛИКУЕТСЯ по умолчанию.
+
+    Состояние индекса я сначала добавил только в metrics — а его в профиле `lean` нет, так что
+    агент о медленном скане с null-счётчиками не узнал бы ничего. Наблюдаемость, доступная лишь
+    оператору через админку, не считается: решение о доверии к ответу принимает агент."""
+    names = _lite_tool_names(monkeypatch, None)
+    carriers = {"overview", "metrics"}
+    published = carriers & names
+    assert published, f"ни один носитель состояния индекса не опубликован: {sorted(carriers)}"
+    assert "overview" in published, "overview обязан оставаться в профиле по умолчанию"
+
+    import inspect
+
+    from onec_vecgraph.lite import server as lite_server
+
+    doc = inspect.getdoc(lite_server.overview) or ""
+    assert "index" in doc, "overview обязан описывать блок index в своём описании"
+    src = inspect.getsource(lite_server.overview)
+    assert "_index_brief" in src, "overview обязан отдавать состояние индекса"
