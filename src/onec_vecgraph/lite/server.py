@@ -34,11 +34,16 @@ INSTRUCTIONS = """onec-lite: навигация по ЖИВОЙ рабочей �
 модуля (Module|Object|Manager|RecordSet|Value|Command|Form:<Имя>|<имя файла .bsl>);
 source — имя источника из overview() (пусто = все, расширения раньше базы);
 workspace — рабочая копия из list_workspaces() (сервер держит несколько репозиториев 1С).
-Дефолт задаёт ПОДКЛЮЧЕНИЕ: project-scope .mcp.json проекта шлёт заголовок X-Workspace — на
-эту конфигурацию и работай, НЕ указывая workspace. Аргумент workspace=<имя> в вызове передавай
-ТОЛЬКО когда пользователь ЯВНО просит другую конфигурацию (или сравнить с ней) — иначе опускай.
+Выбор конфигурации ОБЯЗАТЕЛЕН, когда сервер держит несколько: молчаливого дефолта НЕТ, и
+инструменты откажут с перечнем вариантов вместо ответа по чужой конфигурации. Штатный способ —
+project-scope .mcp.json проекта шлёт заголовок X-Workspace: тогда работай, НЕ указывая workspace.
+Если отказ получен (заголовка нет), вызови list_workspaces() — он работает без выбора — и передай
+workspace="<имя>" явно; при неочевидном выборе спроси пользователя, а не угадывай.
+Аргумент workspace=<имя> при настроенном заголовке передавай ТОЛЬКО когда пользователь ЯВНО
+просит другую конфигурацию (или сравнить с ней).
 Полный приоритет: аргумент workspace → заголовок X-Workspace/X-Tenant-Id → env
-ONEC_LITE_WORKSPACE → активный из админки.
+ONEC_LITE_WORKSPACE → единственная сконфигурированная. Отметка «активный» в админке — для
+человека, на запросы она НЕ подставляется.
 
 ЧЕМ ПОЛЬЗОВАТЬСЯ. Эти инструменты НЕ заменяют Grep/ripgrep — они отвечают на вопросы, которые
 поиском по тексту выразить нельзя. Замеры на конфигурации в 15 тыс. модулей: по токенам обычный
@@ -204,22 +209,39 @@ def _init_rg_from_state() -> None:
 
 
 def default_workspace_name() -> str:
-    """Process default: env ONEC_LITE_WORKSPACE → saved active → единственный → 'default'.
+    """Дефолт процесса для ЗАПРОСОВ: env ONEC_LITE_WORKSPACE → единственный → '' (нет дефолта).
 
-    The env step is what makes different Claude Code sessions independent: each stdio
-    process pins its own default, the shared `active` in the state file is only a
-    fallback for single-workspace setups."""
+    Общий `active` из состояния здесь СОЗНАТЕЛЬНО не участвует. Пока он был фолбэком, сервер с
+    восемью конфигурациями на запрос без заголовка уверенно отвечал про ту, что оператор когда-то
+    отметил активной в админке: агент спрашивал про УТ, получал МДМ и не имел ни одного признака
+    подмены. Уверенный ответ про чужую конфигурацию хуже отказа — поэтому при неоднозначности
+    возвращаем пустое имя, а _ws() объясняет, как выбрать.
+
+    env — то, что делает stdio-процессы независимыми: каждый пиньтся своим `--workspace`.
+    Для админки и CLI, где выбирает человек, есть отдельный admin_default_workspace()."""
     env = os.environ.get("ONEC_LITE_WORKSPACE", "").strip()
     if env:
         return env
-    wss, active = lite_admin.load_workspaces(lite_admin.state_file())
-    if active:
-        return active
+    wss, _active = lite_admin.load_workspaces(lite_admin.state_file())
     if len(wss) == 1:
         return next(iter(wss))
-    if len(_WORKSPACES) == 1:
-        return next(iter(_WORKSPACES))
-    return "default"
+    if not wss:
+        # Ни одного сохранённого: свежая установка или --root/env. Имя 'default' нужно, чтобы
+        # админка могла СОЗДАТЬ первый воркспейс, а legacy-путь через ONEC_LITE_ROOT работал.
+        # Неоднозначности здесь нет по определению — выбирать не из чего.
+        return next(iter(_WORKSPACES)) if len(_WORKSPACES) == 1 else "default"
+    return ""  # два и более, выбор не сделан — угадывать нельзя
+
+
+def admin_default_workspace() -> str:
+    """Предвыбор для АДМИНКИ и CLI: env → active → единственный → ''.
+
+    Здесь `active` уместен: страницу открыл человек, и «показать последнюю выбранную» — удобство,
+    а не молчаливая подмена ответа на вопрос о коде."""
+    if name := default_workspace_name():
+        return name
+    _wss, active = lite_admin.load_workspaces(lite_admin.state_file())
+    return active or ""
 
 
 def configure(root: str | Path, ext_roots: tuple[str | Path, ...] = (),
@@ -330,6 +352,21 @@ def _resolve_ws_name(workspace: str = "") -> str:
     return (workspace or "").strip() or _workspace_from_headers() or default_workspace_name()
 
 
+def _no_default_error() -> RuntimeError:
+    """Отказ вместо угадывания: сервер держит несколько конфигураций, выбор не сделан."""
+    wss, active = lite_admin.load_workspaces(lite_admin.state_file())
+    known = ", ".join(sorted(wss)) or "(нет ни одного)"
+    hint = f" В админке активной отмечена '{active}', но на запросы она НЕ подставляется." \
+        if active else ""
+    return RuntimeError(
+        f"Конфигурация не выбрана, а сервер держит несколько: {known}.{hint} "
+        "Ответ по чужой конфигурации хуже отказа, поэтому дефолта нет. Выберите одним из "
+        "способов: заголовок X-Workspace в project-scope .mcp.json (рекомендуется для HTTP); "
+        "аргумент workspace=\"<имя>\" в вызове; ONEC_LITE_WORKSPACE или --workspace для stdio. "
+        "Состав и корни покажет list_workspaces() — он работает без выбора."
+    )
+
+
 def _ws(workspace: str = "") -> Workspace:
     """Workspace by name; пусто = заголовок запроса (http) → дефолт процесса. Lazy-builds.
 
@@ -337,6 +374,8 @@ def _ws(workspace: str = "") -> Workspace:
     (только streamable-http, см. _workspace_from_headers) > дефолт процесса
     (default_workspace_name). В stdio заголовков нет → поведение прежнее."""
     name = _resolve_ws_name(workspace)
+    if not name:
+        raise _no_default_error()
     ws = _WORKSPACES.get(name)
     if ws is not None:
         return ws
@@ -507,7 +546,9 @@ def _unattached_projects(ws: Workspace) -> list[dict]:
 def list_workspaces() -> dict:
     """Рабочие копии, которые знает сервер: имена, корни, активная и дефолт этой сессии.
 
-    Любой инструмент принимает workspace=<имя>; пусто = default_workspace."""
+    Любой инструмент принимает workspace=<имя>. `default_workspace` пуст, когда конфигураций
+    несколько и выбор не сделан: тогда остальные инструменты откажут, а не ответят по случайной.
+    `active` — отметка ОПЕРАТОРА в админке, она на запросы НЕ подставляется."""
     wss, active = lite_admin.load_workspaces(lite_admin.state_file())
     for name, ws in _WORKSPACES.items():  # сконфигурированные в процессе (env/--root)
         wss.setdefault(name, {"root": str(ws.root),
@@ -521,7 +562,12 @@ def list_workspaces() -> dict:
         ],
         "active": active,
         "default_workspace": default,
-        "note": "workspace=<имя> в любом инструменте; пусто = default_workspace.",
+        "note": ("workspace=<имя> в любом инструменте; пусто = default_workspace."
+                 if default else
+                 "Дефолта НЕТ: конфигураций несколько. Передай workspace=\"<имя>\" в вызове, "
+                 "либо пропиши заголовок X-Workspace в project-scope .mcp.json (для HTTP), "
+                 "либо ONEC_LITE_WORKSPACE/--workspace (для stdio). Поле active — отметка "
+                 "оператора в админке, на запросы она не подставляется."),
     }
 
 
@@ -1394,7 +1440,7 @@ def _admin_enabled() -> bool:
 def _snapshot(workspace: str = "") -> dict:
     """Admin view: selected workspace details + каталог всех воркспейсов + help/rg/fts."""
     _init_rg_from_state()
-    name = (workspace or "").strip() or default_workspace_name()
+    name = (workspace or "").strip() or admin_default_workspace()
     ws: Workspace | None = None
     try:
         ws = _ws(name)
@@ -1421,7 +1467,8 @@ def _snapshot(workspace: str = "") -> dict:
         })
     snap["workspaces"] = rows
     snap["active"] = active
-    snap["default_workspace"] = default_workspace_name()
+    snap["default_workspace"] = default_workspace_name()  # "" = дефолта для запросов нет
+    snap["admin_selected"] = admin_default_workspace()
     snap["rg"] = search.rg_path()
     snap["rg_override"] = search.rg_override()
     snap["state_file"] = str(lite_admin.state_file())
@@ -1458,7 +1505,7 @@ def apply_admin_paths(
     ext = lite_admin.parse_ext_roots(ext_text)
     help_entries = platform_help.parse_help_lines(help_text)
     errors: list[str] = []
-    ws_name = (name or "").strip() or default_workspace_name()
+    ws_name = (name or "").strip() or admin_default_workspace()
     if lite_admin.normalize_ws_name(ws_name) is None:
         return None, f"Недопустимое имя воркспейса: '{ws_name}' (буквы/цифры/_/-/., до 64)."
     if rg_text is not None:

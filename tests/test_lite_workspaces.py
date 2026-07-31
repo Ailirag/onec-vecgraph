@@ -126,18 +126,43 @@ def test_ws_name_validation() -> None:
 # Резолв воркспейса
 # --------------------------------------------------------------------------- #
 
-def test_resolve_order_arg_env_active(two_repos: tuple[Path, Path],
-                                      monkeypatch: pytest.MonkeyPatch) -> None:
+def test_active_is_not_a_default_for_requests(two_repos: tuple[Path, Path],
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """При двух и более конфигурациях выбор ОБЯЗАТЕЛЕН: отметка «активный» не подставляется.
+
+    Пока active был фолбэком, сервер с восемью конфигурациями на запрос без заголовка уверенно
+    отвечал про ту, что оператор когда-то отметил в админке: агент спрашивал про УТ, получал МДМ
+    и не имел ни одного признака подмены."""
     a, b = two_repos
     state = lite_admin.state_file()
     lite_admin.upsert_workspace(state, "a", str(a), [])
     lite_admin.upsert_workspace(state, "b", str(b), [])
     lite_admin.set_active(state, "a")
-    assert str(lite_server._ws().root) == str(a)  # noqa: SLF001 - active
-    monkeypatch.setenv("ONEC_LITE_WORKSPACE", "b")  # env сильнее active
+
+    assert lite_server.default_workspace_name() == ""
+    with pytest.raises(RuntimeError, match="не выбрана"):
+        lite_server._ws()  # noqa: SLF001
+    # отказ обязан быть действенным: перечень и способы выбора
+    with pytest.raises(RuntimeError, match="list_workspaces"):
+        lite_server._ws()  # noqa: SLF001
+    # а list_workspaces работает БЕЗ выбора — иначе из отказа не выбраться
+    catalog = lite_server.list_workspaces()
+    assert {w["name"] for w in catalog["workspaces"]} == {"a", "b"}
+    assert catalog["default_workspace"] == "" and catalog["active"] == "a"
+    assert "Дефолта НЕТ" in catalog["note"]
+
+    monkeypatch.setenv("ONEC_LITE_WORKSPACE", "b")  # явный выбор процесса
     assert str(lite_server._ws().root) == str(b)  # noqa: SLF001
     assert str(lite_server._ws("a").root) == str(a)  # noqa: SLF001 - аргумент сильнее env
     assert lite_server.default_workspace_name() == "b"
+
+
+def test_single_workspace_needs_no_choice(two_repos: tuple[Path, Path]) -> None:
+    """Одна конфигурация — выбирать не из чего, нулевая настройка сохраняется."""
+    a, _b = two_repos
+    lite_admin.upsert_workspace(lite_admin.state_file(), "a", str(a), [])
+    assert lite_server.default_workspace_name() == "a"
+    assert str(lite_server._ws().root) == str(a)  # noqa: SLF001
 
 
 def test_unknown_workspace_lists_known(two_repos: tuple[Path, Path]) -> None:
@@ -162,7 +187,7 @@ def test_resolve_from_http_header(two_repos: tuple[Path, Path],
     state = lite_admin.state_file()
     lite_admin.upsert_workspace(state, "a", str(a), [])
     lite_admin.upsert_workspace(state, "b", str(b), [])
-    lite_admin.set_active(state, "a")  # дефолт процесса = a
+    lite_admin.set_active(state, "a")  # отметка оператора; на запросы НЕ подставляется
 
     def use(headers: dict[str, str] | None) -> None:
         monkeypatch.setattr(lite_server.mcp, "get_context", lambda: _ctx_with(headers))
@@ -176,8 +201,9 @@ def test_resolve_from_http_header(two_repos: tuple[Path, Path],
     assert str(lite_server._ws().root) == str(a)  # noqa: SLF001 - X-Workspace приоритетнее X-Tenant-Id
     use({"X-Workspace": "a"})
     assert str(lite_server._ws("b").root) == str(b)  # noqa: SLF001 - явный аргумент сильнее заголовка
-    use(None)  # stdio: Request отсутствует
-    assert str(lite_server._ws().root) == str(a)  # noqa: SLF001 - → дефолт процесса (active)
+    use(None)  # stdio: Request отсутствует, а выбор процесса не сделан
+    with pytest.raises(RuntimeError, match="не выбрана"):
+        lite_server._ws()  # noqa: SLF001
 
 
 def test_header_workspace_name_configurable(two_repos: tuple[Path, Path],
@@ -193,7 +219,9 @@ def test_header_workspace_name_configurable(two_repos: tuple[Path, Path],
     monkeypatch.setattr(lite_server.mcp, "get_context", lambda: _ctx_with({"X-Proj": "b"}))
     assert str(lite_server._ws().root) == str(b)  # noqa: SLF001 - кастомный заголовок читается
     monkeypatch.setattr(lite_server.mcp, "get_context", lambda: _ctx_with({"X-Workspace": "b"}))
-    assert str(lite_server._ws().root) == str(a)  # noqa: SLF001 - дефолтные имена уже не смотрятся
+    # дефолтные имена уже не смотрятся, а фолбэка на active больше нет → честный отказ
+    with pytest.raises(RuntimeError, match="не выбрана"):
+        lite_server._ws()  # noqa: SLF001
 
 
 # --------------------------------------------------------------------------- #
