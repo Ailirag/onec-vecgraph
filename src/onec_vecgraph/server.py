@@ -14,7 +14,12 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from . import __version__, queries, tenancy
 from .config import get_settings
+from .sources.wiki import WikiSource
 from .storage import Neo4jStore
+
+# Тег корпуса вики. Берётся из адаптера, а не строкой: переименование корпуса не должно
+# тихо превратить wiki_semantic_search в поиск по пустоте.
+WIKI_CORPUS = WikiSource.source
 
 settings = get_settings()
 
@@ -493,6 +498,37 @@ def hybrid_search(
             kinds=kinds, chunk_kinds=chunk_kinds, subsystem=subsystem, source=source,
             platform_version=platform_version, doc_topic=doc_topic, corpus_version=corpus_version,
             help_kind=help_kind, expand=expand, shared_tenant_id=_shared(t),
+        )
+
+
+@_tool
+def wiki_semantic_search(
+    ctx: Context, query: str, top_k: int = 10, expand: bool = False,
+) -> dict[str, Any]:
+    """Поиск по ВЕКТОРИЗОВАННОЙ внутренней вики компании: требования, описания релизов,
+    инструкции, разборы ошибок.
+
+    Отвечает на «как это должно работать / что решили / что писали в релизе», в отличие от
+    поиска по коду, который отвечает «как это написано». Ищет по документации и НЕ возвращает
+    код конфигурации — для смешанных вопросов («как задумано и как сделано») берите
+    hybrid_search без фильтра.
+
+    Видно то, что доступно вашему тенанту: общедоступная часть вики читается аддитивно из
+    общего тенанта, закрытая часть — только та, что принадлежит этому проекту. Результат той
+    же формы, что у hybrid_search; у каждого попадания есть 'corpus'.
+
+    ЭТО НЕ ЖИВАЯ ВИКИ. Ищется срез на момент последней индексации; свежую страницу по ссылке
+    отдаёт инструмент wiki_get_page живого MCP Вики, если он выдан.
+    """
+    from .embeddings.runtime import provider, reranker
+
+    with Neo4jStore.from_settings(settings) as store:
+        t = _tenant(ctx)
+        return queries.hybrid_search(
+            store, t, query, provider(settings), top_k, reranker=reranker(settings),
+            # Корпус прибит намеренно: отдельный тул выбирается моделью надёжнее, чем
+            # необязательный параметр source у общего поиска, и раздаётся отдельным грантом.
+            source=[WIKI_CORPUS], expand=expand, shared_tenant_id=_shared(t),
         )
 
 
