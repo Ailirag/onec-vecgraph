@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -497,3 +499,148 @@ def test_index_without_source_fingerprint_is_not_trusted(ws: Workspace) -> None:
     assert st["built"] is True
     assert st["sources_changed"] is True, st
     assert "не подтверждён" in (st.get("note") or "").lower(), st
+
+
+# --------------------------------------------------------------------------- #
+# Быстрая перевалидация через git (обход ФС не нужен)
+# --------------------------------------------------------------------------- #
+
+_GIT = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+
+
+def _git_cmd(args: list[str], cwd: Path) -> None:
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                   cwd=str(cwd), check=True, capture_output=True)
+
+
+@pytest.fixture()
+def git_ws(ws: Workspace) -> Workspace:
+    """Тот же мини-воркспейс, но под git — иначе быстрый путь недоступен по построению."""
+    root = Path(ws.root)
+    _git_cmd(["init", "-q"], root)
+    _git_cmd(["add", "-A"], root)
+    _git_cmd(["commit", "-q", "-m", "base"], root)
+    return ws
+
+
+@_GIT
+def test_idle_revalidation_uses_git_delta_not_a_full_walk(git_ws: Workspace) -> None:
+    """Холостая перевалидация обязана идти через git, а не обходить файловую систему.
+
+    Полный обход на УТ стоил 4.8 с при НУЛЕ изменений (2.2 с по .bsl + 2.4 с по метаданным);
+    git отвечает за 0.7 с. Полный обход остаётся страховкой — не реже раза в час."""
+    idx = fts.index_for(git_ws)
+    first = idx.build(wait=120)
+    assert first["scan"] == "full"          # первая сборка: нечего сравнивать
+    again = idx.build(wait=120)
+    assert again["scan"] == "git-delta", again
+    assert (again["files_added"], again["files_updated"], again["files_removed"]) == (0, 0, 0)
+
+
+@_GIT
+def test_git_delta_picks_up_a_committed_change(git_ws: Workspace) -> None:
+    """Закоммиченная после сборки правка подхватывается быстрым путём."""
+    idx = fts.index_for(git_ws)
+    idx.build(wait=120)
+    src = Path(git_ws.sources[0].files_root)
+    _w(src / "CommonModules" / "РасчетЗатрат" / "Module.bsl",
+       _COMMON_BSL + "\nФункция ПослеКоммита() Экспорт\n    Возврат 1;\nКонецФункции\n")
+    _git_cmd(["add", "-A"], Path(git_ws.root))
+    _git_cmd(["commit", "-q", "-m", "add routine"], Path(git_ws.root))
+
+    res = idx.build(wait=120)
+    assert res["scan"] == "git-delta" and res["files_updated"] == 1, res
+    assert idx.has_name("ПослеКоммита") is True
+
+
+@_GIT
+def test_revert_to_committed_state_is_still_rechecked(git_ws: Workspace) -> None:
+    """Файл, ВОЗВРАЩЁННЫЙ к закоммиченному состоянию, обязан быть перепроверен.
+
+    Для `git status` он чист, поэтому без списка наблюдения быстрый путь его больше не видит — и
+    в индексе остаётся правленая версия. На живом УТ так осталась рутина, которой нет на диске."""
+    idx = fts.index_for(git_ws)
+    idx.build(wait=120)
+    module = Path(git_ws.sources[0].files_root) / "CommonModules" / "РасчетЗатрат" / "Module.bsl"
+    original = module.read_text(encoding="utf-8")
+
+    _w(module, original + "\nПроцедура Призрак() Экспорт\n    Возврат;\nКонецПроцедуры\n")
+    assert idx.build(wait=120)["files_updated"] == 1
+    assert idx.has_name("Призрак") is True   # правка попала в индекс
+
+    _w(module, original)                     # вернули как было — git об этом молчит
+    res = idx.build(wait=120)
+    assert res["scan"] == "git-delta", res
+    assert idx.has_name("Призрак") is False, "призрачная рутина осталась в индексе"
+
+
+@_GIT
+def test_source_set_change_forces_a_full_walk(git_ws: Workspace, tmp_path: Path) -> None:
+    """Подключение расширения — полный обход: git-дельта про целый новый источник не знает."""
+    idx = fts.index_for(git_ws)
+    idx.build(wait=120)
+    assert idx.build(wait=120)["scan"] == "git-delta"
+
+    ext = tmp_path / "ext2"
+    _w(ext / "src" / "Configuration" / "Configuration.mdo", _EXT_MDO)
+    _w(ext / "src" / "CommonModules" / "Новый" / "Новый.mdo",
+       _COMMON.replace("РасчетЗатрат", "Новый"))
+    _w(ext / "src" / "CommonModules" / "Новый" / "Module.bsl",
+       "Функция ИзРасширения() Экспорт\n    Возврат 1;\nКонецФункции\n")
+    wider = fts.FtsIndex(Workspace(git_ws.root, ext_roots=(str(ext),)))
+    res = wider.build(wait=120)
+    assert res["scan"] == "full", res
+    assert wider.has_name("ИзРасширения") is True
+
+
+def test_without_git_falls_back_to_full_walk(ws: Workspace) -> None:
+    """Не-git рабочая копия: быстрого пути нет, но перевалидация работает полным обходом."""
+    idx = fts.index_for(ws)
+    idx.build(wait=120)
+    assert idx.build(wait=120)["scan"] == "full"
+
+
+# --------------------------------------------------------------------------- #
+# bsl_sql: агрегаты по индексу
+# --------------------------------------------------------------------------- #
+
+def test_bsl_sql_schema_then_aggregate(ws: Workspace) -> None:
+    """Пустой sql отдаёт схему, GROUP BY считает агрегат — это дешёвая замена выдаче строками.
+
+    На живом УТ «распределение вызовов метода по объектам» стоило 37 437 токенов через
+    find_callers и 462 через один GROUP BY: агрегаты были нашим самым дорогим сценарием."""
+    fts.index_for(ws).build(wait=120)
+
+    schema = fts.sql_query(ws)
+    assert "symbols" in schema["schema"] and "calls" in schema["schema"]
+    assert schema["row_counts"]["symbols"] > 0
+    assert schema["examples"] and schema["index"]["live_merge"] is False
+
+    res = fts.sql_query(ws, "SELECT COUNT(*) AS n FROM symbols")
+    assert res["columns"] == ["n"] and res["rows"][0][0] == schema["row_counts"]["symbols"]
+    # честность: ответ по индексу, живого подмеса тут нет — и это сказано в ответе
+    assert res["index"]["live_merge"] is False and "НЕ учтены" in res["index"]["note"]
+
+
+def test_bsl_sql_is_read_only_and_single_statement(ws: Workspace) -> None:
+    """Индекс открывается только на чтение, и отказ обязан быть внятным, а не ошибкой SQLite."""
+    fts.index_for(ws).build(wait=120)
+    for bad in ("DROP TABLE symbols", "UPDATE symbols SET name='x'",
+                "PRAGMA table_info(symbols)", "SELECT 1; SELECT 2",
+                "WITH x AS (SELECT 1) DELETE FROM symbols"):
+        out = fts.sql_query(ws, bad)
+        assert "error" in out, f"пропущен запрос: {bad}"
+        assert "rows" not in out
+    # схема прилагается к отказу — агенту есть от чего оттолкнуться
+    assert "schema" in fts.sql_query(ws, "DROP TABLE symbols")
+
+
+def test_bsl_sql_truncation_is_declared(ws: Workspace) -> None:
+    """Обрезка выдачи заявлена, и сказано, как узнать полный счёт (его НЕ выдумываем)."""
+    fts.index_for(ws).build(wait=120)
+    res = fts.sql_query(ws, "SELECT name FROM symbols", max_rows=1)
+    assert res["row_count"] == 1
+    assert res["truncated"] is True
+    assert "COUNT(*)" in res["total_hint"]
+    full = fts.sql_query(ws, "SELECT name FROM symbols", max_rows=500)
+    assert full["truncated"] is False and full["total_hint"] is None

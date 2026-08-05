@@ -289,10 +289,13 @@ def test_lite_tool_profiles(monkeypatch) -> None:
     full = _lite_tool_names(monkeypatch, "full")
     review = _lite_tool_names(monkeypatch, "review")
 
-    assert len(review) < len(lean) < len(full) == 30
+    assert len(review) < len(lean) < len(full) == 31
     # то, что нельзя выразить поиском по тексту, есть во всех профилях
     for core in ("find_callers", "find_overrides", "get_object", "review_set", "writes_to"):
         assert core in review and core in lean and core in full
+    # bsl_sql — в lean: агрегаты через GROUP BY были нашим самым дорогим сценарием по токенам
+    # (на живом УТ 462 токена против 37 437 у find_callers на том же вопросе)
+    assert "bsl_sql" in lean and "bsl_sql" in full
     # дублирующее шелл — только в full
     for shellish in ("search_code", "changed_objects", "read_file", "list_routines"):
         assert shellish not in lean and shellish in full

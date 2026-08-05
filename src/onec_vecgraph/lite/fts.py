@@ -196,6 +196,124 @@ def prune_orphan_indexes(live_roots: list[str], *, dry_run: bool = True) -> dict
             "freed_bytes": freed, "dry_run": dry_run, "removed": removed[:20]}
 
 
+# --------------------------------------------------------------------------- #
+# Произвольный SELECT по индексу (агрегаты)
+# --------------------------------------------------------------------------- #
+
+_SQL_TIMEOUT = 10.0          # с: предохранитель от запроса, который «думает» бесконечно
+_SQL_STEP_CHECK = 20_000     # шагов VM между проверками дедлайна
+_SQL_FORBIDDEN = (
+    "attach", "detach", "pragma", "insert", "update", "delete", "drop", "create",
+    "alter", "replace", "vacuum", "reindex", "trigger", "savepoint", "begin", "commit",
+)
+# Таблицы индекса и смысл колонок — отдаётся при пустом sql, чтобы агент не угадывал схему.
+_SQL_SCHEMA_DOC: dict[str, str] = {
+    "symbols": "рутины: path, source, object, module, name, name_low, object_low, "
+               "start_line, end_line, export(0/1), directive, override_mode, override_target",
+    "calls": "рёбра вызовов, КАЖДОЕ вхождение: caller_id -> symbols.id, method_low, "
+             "qualifier, qualifier_low, line",
+    "files": "проиндексированные файлы: path, mtime, kind ('bsl' | 'meta')",
+    "meta": "служебное: built_at, root, sources (отпечаток состава), heads (коммиты репо)",
+    "unit_map": "связь path -> rowid юнита FTS (units); для агрегатов обычно не нужна",
+    "units": "FTS5-таблица юнитов поиска; полнотекстовый поиск — через fts_search, не SQL",
+}
+_SQL_EXAMPLES = [
+    "SELECT object, COUNT(*) n FROM symbols GROUP BY object ORDER BY n DESC LIMIT 20",
+    "SELECT s.object, COUNT(*) n FROM calls c JOIN symbols s ON s.id = c.caller_id "
+    "WHERE c.method_low = 'обработказаполнения' GROUP BY s.object ORDER BY n DESC LIMIT 20",
+    "SELECT source, COUNT(*) n FROM symbols WHERE override_mode IS NOT NULL GROUP BY source",
+    "SELECT qualifier, COUNT(*) n FROM calls WHERE qualifier IS NOT NULL "
+    "GROUP BY qualifier ORDER BY n DESC LIMIT 20",
+]
+
+
+def _sql_reject(sql: str) -> str | None:
+    """Почему запрос нельзя выполнять (None — можно). Соединение и так read-only, но внятный
+    отказ лучше загадочной ошибки SQLite."""
+    body = sql.strip().rstrip(";").strip()
+    if not body:
+        return "Пустой запрос."
+    if ";" in body:
+        return "Разрешён РОВНО ОДИН оператор: точка с запятой внутри запроса запрещена."
+    head = body.lstrip("( \t\n").lower()
+    if not (head.startswith("select") or head.startswith("with")):
+        return "Разрешены только SELECT и WITH … SELECT (индекс открывается только на чтение)."
+    words = set(re.findall(r"[a-z_]+", body.lower()))
+    hit = sorted(words & set(_SQL_FORBIDDEN))
+    if hit:
+        return f"Запрещённые конструкции: {', '.join(hit)}. Индекс доступен только на чтение."
+    return None
+
+
+def sql_query(ws: Workspace, sql: str = "", *, max_rows: int = 200) -> dict:
+    """Произвольный SELECT по индексу рутин и вызовов. Пустой sql — вернуть схему.
+
+    Зачем: агрегаты («сколько и по каким объектам») наши обычные инструменты отдают строками, и
+    на горячих именах это десятки тысяч токенов — один GROUP BY тут дешевле в разы. Ответ идёт по
+    ИНДЕКСУ: живого подмеса незакоммиченных и подтянутых после сборки файлов здесь НЕТ, поэтому
+    состояние индекса возвращается рядом с данными."""
+    if not fts_available():
+        return {"error": "FTS5 недоступен в этой сборке Python (sqlite3 без fts5)."}
+    idx = index_for(ws)
+    state = idx.status()
+    index_note = {
+        "built_at": state.get("built_at"),
+        "built": state.get("built"),
+        "sources_changed": state.get("sources_changed"),
+        "live_merge": False,
+        "note": "Данные из ИНДЕКСА. Незакоммиченные правки и подтянутое git'ом после сборки "
+                "здесь НЕ учтены (в отличие от find_callers/find_routine). Для точного ответа "
+                "по свежему коду берите их.",
+    }
+    if not state.get("built"):
+        return {"error": "Индекс не построен — SQL по нему невозможен.", "index": index_note}
+    if not sql.strip():
+        con = sqlite3.connect(f"file:{idx.path}?mode=ro", uri=True)
+        try:
+            counts = {}
+            for table in ("symbols", "calls", "files", "unit_map"):
+                try:
+                    counts[table] = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                except sqlite3.Error:
+                    counts[table] = None
+        finally:
+            con.close()
+        return {"schema": _SQL_SCHEMA_DOC, "row_counts": counts,
+                "examples": _SQL_EXAMPLES, "index": index_note}
+    if err := _sql_reject(sql):
+        return {"error": err, "schema": _SQL_SCHEMA_DOC, "examples": _SQL_EXAMPLES}
+
+    cap = max(1, min(int(max_rows or 200), 5000))
+    con = sqlite3.connect(f"file:{idx.path}?mode=ro", uri=True)
+    deadline = time.monotonic() + _SQL_TIMEOUT
+    con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, _SQL_STEP_CHECK)
+    t0 = time.monotonic()
+    try:
+        cur = con.execute(sql)
+        rows = cur.fetchmany(cap + 1)
+        columns = [d[0] for d in (cur.description or ())]
+    except sqlite3.Error as exc:
+        return {"error": f"SQL: {exc}", "schema": _SQL_SCHEMA_DOC, "examples": _SQL_EXAMPLES,
+                "index": index_note}
+    finally:
+        con.set_progress_handler(None, 0)
+        con.close()
+    truncated = len(rows) > cap
+    out_rows = [[v.hex() if isinstance(v, bytes) else v for v in r] for r in rows[:cap]]
+    return {
+        "columns": columns,
+        "rows": out_rows,
+        "row_count": len(out_rows),
+        "truncated": truncated,
+        # Полного счёта строк выборки НЕ выдумываем: узнать его можно только вторым запросом
+        # (обёрнутым в COUNT(*)), и подсказка честнее правдоподобного числа.
+        "total_hint": ("Строк больше, чем показано. Полный счёт: "
+                       "SELECT COUNT(*) FROM (<ваш запрос>)" if truncated else None),
+        "seconds": round(time.monotonic() - t0, 3),
+        "index": index_note,
+    }
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(path), timeout=30)
@@ -363,6 +481,70 @@ def _repo_heads(ws: Workspace) -> dict[str, str]:
         if code == 0 and sha.strip():
             out[str(repo)] = sha.strip()
     return out
+
+
+_FULL_WALK_TTL = 3600.0  # с: не реже раза в час всё равно обходим ФС целиком
+
+
+def _git_delta(ws: Workspace, was: dict[str, str],
+               watch: set[str] | None = None) -> tuple[set[str], set[str]] | None:
+    """(кандидаты на переиндексацию, «грязные сейчас» пути) по данным git. None — не доверять.
+
+    Зачем: тёплая перевалидация упиралась в полный обход ФС (на УТ 2.2 с по .bsl плюс 2.4 с по
+    метаданным — при нуле изменений). git знает ответ за доли секунды: закоммиченное с момента
+    сборки даёт `diff old..HEAD`, незакоммиченное и новое — `status --porcelain -uall`.
+
+    `watch` — пути, которые были ГРЯЗНЫМИ на прошлой сборке. Их обязательно перепроверяем, даже
+    если git о них больше не говорит: файл, ВОЗВРАЩЁННЫЙ к закоммиченному состоянию, для
+    `git status` чист, а в индексе остаётся его правленая версия. На живом УТ так в индексе
+    осталась рутина, которой на диске уже нет.
+
+    None возвращается при ЛЮБОМ сомнении (нет git, репозиторий не найден, сборка без записанных
+    коммитов, любая команда с ошибкой) — тогда вызывающий делает полный обход. Ошибиться в
+    сторону лишней работы можно, в сторону невидимой правки — нет."""
+    if not was:
+        return None                      # индекс собран версией без meta.heads
+    try:
+        from . import gitview as _gv
+        by_root, missing = _gv._repos(ws.sources)  # noqa: SLF001 — общий внутренний слой
+    except Exception:  # noqa: BLE001
+        return None
+    if missing or not by_root:
+        return None                      # источник вне git — полный обход
+    out: set[str] = set(watch or ())     # прошлые «грязные» перепроверяем всегда
+    dirty: set[str] = set()
+    for repo in by_root:
+        key = str(repo)
+        old = was.get(key)
+        if not old:
+            return None                  # про этот репозиторий на момент сборки ничего не знаем
+        code, cur = _gv._git(["rev-parse", "HEAD"], repo)  # noqa: SLF001
+        if code != 0 or not cur.strip():
+            return None
+        if cur.strip() != old:
+            code, txt = _gv._git(  # noqa: SLF001
+                ["diff", "--name-only", f"{old}..HEAD"], repo)
+            if code != 0:
+                return None              # старый коммит недостижим (rebase/force-push)
+            for rel in txt.splitlines():
+                rel = rel.strip().strip('"')
+                if rel:
+                    out.add(str(repo / rel))
+        # незакоммиченное и новое: -uall, иначе новый КАТАЛОГ сворачивается в одну запись
+        code, txt = _gv._git(["status", "--porcelain", "-uall"], repo)  # noqa: SLF001
+        if code != 0:
+            return None
+        for line in txt.splitlines():
+            if len(line) < 4:
+                continue
+            rel = line[3:].strip().strip('"')
+            paths = ([p.strip().strip('"') for p in rel.split(" -> ", 1)]
+                     if " -> " in rel else [rel])   # переименование: обе стороны
+            for one in paths:
+                if one:
+                    out.add(str(repo / one))
+                    dirty.add(str(repo / one))
+    return out, dirty
 
 
 def indexed_heads(ws: Workspace) -> dict[str, str]:
@@ -567,14 +749,17 @@ class FtsIndex:
             seen: set[str] = set()
             added = updated = removed = units_written = 0
 
-            def reindex(abs_path: Path, kind: str, rows: list[tuple], mtime: float) -> None:
-                nonlocal units_written
+            def reindex(abs_path: Path, kind: str, rows: list[tuple], mtime: float) -> int:
+                """Перезаписать юниты файла. Возвращает число записанных — счётчик обязан
+                считаться у ВЫЗЫВАЮЩЕГО: замыкание на nonlocal работало только для полного
+                обхода, а git-дельта отчитывалась «units_written: 0» при записанных юнитах."""
                 key = str(abs_path)
                 for (rid,) in con.execute(
                     "SELECT rowid_ref FROM unit_map WHERE path=?", (key,)
                 ):
                     con.execute("DELETE FROM units WHERE rowid=?", (rid,))
                 con.execute("DELETE FROM unit_map WHERE path=?", (key,))
+                written = 0
                 for row in rows:
                     cur = con.execute(
                         "INSERT INTO units(title, tokens, body, display, unit, source,"
@@ -582,25 +767,41 @@ class FtsIndex:
                     )
                     con.execute("INSERT INTO unit_map(path, rowid_ref) VALUES(?,?)",
                                 (key, cur.lastrowid))
-                    units_written += 1
+                    written += 1
                 con.execute(
                     "INSERT OR REPLACE INTO files(path, mtime, kind) VALUES(?,?,?)",
                     (key, mtime, kind),
                 )
+                return written
+
+            # БЫСТРЫЙ ПУТЬ: если git может перечислить изменения с момента сборки, полный обход
+            # ФС не нужен. Он остаётся обязательным, когда git молчит, состав источников
+            # разошёлся или прошёл час — иначе правка, невидимая для git, залежалась бы навсегда.
+            meta_rows = dict(con.execute("SELECT key, value FROM meta"))
+            fast = None
+            if not self._sources_changed(meta_rows) and self._full_walk_fresh(meta_rows):
+                try:
+                    was = json.loads(meta_rows.get("heads") or "{}")
+                    watch = set(json.loads(meta_rows.get("dirty_at_build") or "[]"))
+                except (TypeError, ValueError):
+                    was, watch = {}, set()
+                fast = _git_delta(self.ws, was, watch)
+            if fast is not None:
+                delta, dirty_now = fast
+                stats = self._apply_delta(con, delta, known, reindex)
+                return self._finish_build(con, t0, scan="git-delta", full_walk=False,
+                                          dirty=dirty_now, **stats)
 
             # fresh=True: TTL-кэши списков скрыли бы удалённые файлы; исчезнувший между
             # листингом и stat() файл не попадает в seen -> его подметёт свип удалений.
             for s in self.ws.sources:
-                for p in self.ws.bsl_files(s, fresh=True):
+                # mtime приходит из записи каталога (scandir) — без второго stat на файл
+                for p, mtime in self.ws.bsl_files_stat(s, fresh=True):
                     key = str(p)
-                    try:
-                        mtime = p.stat().st_mtime
-                    except OSError:
-                        continue
                     seen.add(key)
                     if known.get(key) == mtime:
                         continue
-                    reindex(p, "bsl", _bsl_units(self.ws, s, p), mtime)
+                    units_written += reindex(p, "bsl", _bsl_units(self.ws, s, p), mtime)
                     _write_symbols(con, self.ws, s, p)  # рутины+вызовы того же обхода
                     added += 1 if key not in known else 0
                     updated += 1 if key in known else 0
@@ -618,54 +819,123 @@ class FtsIndex:
                     seen.add(key)
                     if known.get(key) == mtime:
                         continue
-                    reindex(meta_path, "meta", _object_units(self.ws, s, ref), mtime)
+                    units_written += reindex(meta_path, "meta",
+                                            _object_units(self.ws, s, ref), mtime)
                     added += 1 if key not in known else 0
                     updated += 1 if key in known else 0
 
             for gone in set(known) - seen:
-                for (rid,) in con.execute(
-                    "SELECT rowid_ref FROM unit_map WHERE path=?", (gone,)
-                ):
-                    con.execute("DELETE FROM units WHERE rowid=?", (rid,))
-                con.execute("DELETE FROM unit_map WHERE path=?", (gone,))
-                con.execute("DELETE FROM files WHERE path=?", (gone,))
-                con.execute(
-                    "DELETE FROM calls WHERE caller_id IN (SELECT id FROM symbols WHERE path=?)",
-                    (gone,))
-                con.execute("DELETE FROM symbols WHERE path=?", (gone,))
+                self._forget(con, gone)
                 removed += 1
 
-            con.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES('built_at', ?)",
-                (time.strftime("%Y-%m-%d %H:%M:%S"),),
-            )
-            con.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES('root', ?)",
-                (json.dumps(str(self.ws.root), ensure_ascii=False),),
-            )
+            # Полный обход тоже фиксирует «грязные сейчас» — чтобы следующая быстрая
+            # перевалидация перепроверила их даже после возврата к закоммиченному состоянию.
+            dirty_now: set[str] = set()
+            try:
+                fresh = _git_delta(self.ws, _repo_heads(self.ws))
+                if fresh is not None:
+                    dirty_now = fresh[1]
+            except Exception:  # noqa: BLE001 — список наблюдения не обязателен для полного обхода
+                dirty_now = set()
+            return self._finish_build(con, t0, scan="full", full_walk=True, dirty=dirty_now,
+                                      added=added, updated=updated, removed=removed,
+                                      units_written=units_written)
+        finally:
+            con.close()
+
+    def _forget(self, con: sqlite3.Connection, gone: str) -> None:
+        """Убрать из индекса все следы файла (юниты, рутины, рёбра, запись о файле)."""
+        for (rid,) in con.execute("SELECT rowid_ref FROM unit_map WHERE path=?", (gone,)):
+            con.execute("DELETE FROM units WHERE rowid=?", (rid,))
+        con.execute("DELETE FROM unit_map WHERE path=?", (gone,))
+        con.execute("DELETE FROM files WHERE path=?", (gone,))
+        con.execute(
+            "DELETE FROM calls WHERE caller_id IN (SELECT id FROM symbols WHERE path=?)", (gone,))
+        con.execute("DELETE FROM symbols WHERE path=?", (gone,))
+
+    def _full_walk_fresh(self, meta: dict) -> bool:
+        """Не пора ли всё равно обойти ФС целиком (страховка от невидимого для git)."""
+        try:
+            return time.time() - float(meta.get("full_walk_at") or 0) < _FULL_WALK_TTL
+        except (TypeError, ValueError):
+            return False
+
+    def _apply_delta(self, con: sqlite3.Connection, delta: set[str],
+                     known: dict[str, float], reindex) -> dict:
+        """Переиндексировать ТОЛЬКО перечисленные git'ом пути. Обхода ФС нет."""
+        added = updated = removed = units_written = 0
+        by_source = {str(s.files_root): s for s in self.ws.sources}
+        listings: dict[str, dict[str, tuple]] = {}
+        for key in sorted(delta):
+            path = Path(key)
+            src = next((s for root, s in by_source.items() if key.startswith(root)), None)
+            if src is None:
+                continue                        # путь вне индексируемых источников
+            if not path.is_file():
+                if key in known:
+                    self._forget(con, key)
+                    removed += 1
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if known.get(key) == mtime:
+                continue                        # git знает о правке, а файл уже проиндексирован
+            if path.suffix.lower() == ".bsl":
+                units_written += reindex(path, "bsl",
+                                         _bsl_units(self.ws, src, path), mtime)
+                _write_symbols(con, self.ws, src, path)
+            else:
+                # метаданные: карточка объекта строится по ref из листинга источника
+                refs = listings.get(src.name)
+                if refs is None:
+                    refs = {str(r[1]): r for r in self.ws.listing(src, fresh=True)}
+                    listings[src.name] = refs
+                ref = refs.get(key)
+                if ref is None:
+                    continue                    # не файл-владелец объекта (форма, шаблон и пр.)
+                units_written += reindex(path, "meta",
+                                        _object_units(self.ws, src, ref), mtime)
+            added += 1 if key not in known else 0
+            updated += 1 if key in known else 0
+        return {"added": added, "updated": updated, "removed": removed,
+                "units_written": units_written}
+
+    def _finish_build(self, con: sqlite3.Connection, t0: float, *, scan: str, full_walk: bool,
+                      added: int, updated: int, removed: int, units_written: int,
+                      dirty: set[str] | None = None) -> dict:
+        """Записать метаданные сборки и вернуть отчёт (общее для полного обхода и git-дельты)."""
+        stamp = [
+            ("built_at", time.strftime("%Y-%m-%d %H:%M:%S")),
+            ("root", json.dumps(str(self.ws.root), ensure_ascii=False)),
             # Состав ИСТОЧНИКОВ на момент сборки. Имя БД — хэш только корня, а _is_stale
             # проверяет пофайлово: появление или отключение целого расширения так не заметить.
             # Подключив расширение на 689 файлов, мы получали built=true при отсутствии в
             # индексе всего источника — до следующего рефреша по TTL.
-            con.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES('sources', ?)",
-                (json.dumps(_source_fingerprint(self.ws), ensure_ascii=False),),
-            )
+            ("sources", json.dumps(_source_fingerprint(self.ws), ensure_ascii=False)),
             # Коммиты репозиториев на момент сборки. Без них ЗАКОММИЧЕННАЯ после сборки правка
             # была невидима: живым разбором подмешивается только незакоммиченное (git status),
             # а строк по такому файлу в выборке нет — значит и пометки stale не будет. Имея
             # базовый коммит, потребитель одним `git diff --name-only` узнаёт, что догонять.
-            con.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES('heads', ?)",
-                (json.dumps(_repo_heads(self.ws), ensure_ascii=False),),
-            )
-            con.commit()
-        finally:
-            con.close()
+            ("heads", json.dumps(_repo_heads(self.ws), ensure_ascii=False)),
+            ("last_scan", scan),
+            # Список наблюдения: пути, грязные на момент сборки. Файл, возвращённый к
+            # закоммиченному состоянию, для `git status` чист — без этого списка быстрый путь
+            # его больше не увидит, и в индексе останется правленая версия (на живом УТ так
+            # осталась рутина, которой на диске уже нет).
+            ("dirty_at_build", json.dumps(sorted(dirty or ()), ensure_ascii=False)),
+        ]
+        if full_walk:
+            stamp.append(("full_walk_at", str(time.time())))
+        for key, value in stamp:
+            con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (key, value))
+        con.commit()
         self._last_refresh = time.monotonic()
         return {
             "files_added": added, "files_updated": updated, "files_removed": removed,
-            "units_written": units_written, "seconds": round(time.monotonic() - t0, 1),
+            "units_written": units_written, "scan": scan,
+            "seconds": round(time.monotonic() - t0, 1),
             **{k: v for k, v in self.status().items() if k in ("units", "files")},
         }
 
