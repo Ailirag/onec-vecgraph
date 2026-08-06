@@ -289,7 +289,7 @@ def test_lite_tool_profiles(monkeypatch) -> None:
     full = _lite_tool_names(monkeypatch, "full")
     review = _lite_tool_names(monkeypatch, "review")
 
-    assert len(review) < len(lean) < len(full) == 31
+    assert len(review) < len(lean) < len(full) == 32
     # то, что нельзя выразить поиском по тексту, есть во всех профилях
     for core in ("find_callers", "find_overrides", "get_object", "review_set", "writes_to"):
         assert core in review and core in lean and core in full

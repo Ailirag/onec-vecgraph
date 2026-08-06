@@ -13,7 +13,10 @@ from pathlib import Path
 
 from lxml import etree
 
-from ..model import EnumValue, Field, FormRef, MetaObject, ModuleRef, Predefined, TabularSection
+from ..model import (
+    CommandRef, EnumValue, Field, FormRef, MetaObject, ModuleRef, Predefined, TabularSection,
+    TemplateRef, template_type_for,
+)
 from ..types import _REF_KIND_ALIASES, _REF_RE, TypeDescription, TypeRef
 from .ns import child_text, child_texts, local_name, synonym
 
@@ -150,6 +153,42 @@ def _scan_modules(object_dir: Path | None, obj_fqn: str) -> list[ModuleRef]:
     return modules
 
 
+def _scan_templates(object_dir: Path | None, obj_fqn: str) -> list[TemplateRef]:
+    """EDT: <объект>/Templates/<Имя>/Template.<расш>. Ни .mdo у макета, ни ссылки из .mdo
+    объекта нет, поэтому раскладка каталога — единственный источник."""
+    if object_dir is None:
+        return []
+    root = object_dir / "Templates"
+    if not root.is_dir():
+        return []
+    out: list[TemplateRef] = []
+    for tpl_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        content = next((f for f in sorted(tpl_dir.glob("Template.*")) if f.is_file()), None)
+        if content is None:  # каталог без содержимого — показывать нечего
+            continue
+        out.append(TemplateRef(
+            name=tpl_dir.name, fqn=f"{obj_fqn}.Template.{tpl_dir.name}",
+            template_type=template_type_for(content.suffix),
+            path=str(content), size=content.stat().st_size,
+        ))
+    return out
+
+
+def _scan_commands(object_dir: Path | None, obj_fqn: str) -> list[CommandRef]:
+    """EDT: <объект>/Commands/<Имя>/CommandModule.bsl."""
+    if object_dir is None:
+        return []
+    root = object_dir / "Commands"
+    if not root.is_dir():
+        return []
+    out: list[CommandRef] = []
+    for cmd_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        module = cmd_dir / "CommandModule.bsl"
+        out.append(CommandRef(name=cmd_dir.name, fqn=f"{obj_fqn}.Command.{cmd_dir.name}",
+                              module_path=str(module) if module.is_file() else None))
+    return out
+
+
 def _form_paths(object_dir: Path | None, form_name: str) -> tuple[str | None, str | None]:
     """EDT form layout: <object>/Forms/<Name>/Form.form + Module.bsl (no Ext/ wrapper)."""
     if object_dir is None:
@@ -208,6 +247,9 @@ def parse_object(
         module_path, form_path = _form_paths(object_dir, form_name)
         obj.forms.append(FormRef(name=form_name, fqn=f"{fqn}.Form.{form_name}",
                                  module_path=module_path, form_path=form_path))
+
+    obj.templates = _scan_templates(object_dir, fqn)
+    obj.commands = _scan_commands(object_dir, fqn)
 
     # Reference lists (plain 'Kind.Name' text refs).
     obj.owners = child_texts(obj_el, "owners")

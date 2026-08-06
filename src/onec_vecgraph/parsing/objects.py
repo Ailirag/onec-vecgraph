@@ -7,6 +7,7 @@ from pathlib import Path
 from lxml import etree
 
 from .model import (
+    CommandRef,
     EnumValue,
     Field,
     FormRef,
@@ -15,6 +16,8 @@ from .model import (
     Predefined,
     RoleRight,
     TabularSection,
+    TemplateRef,
+    template_type_for,
 )
 from .ns import MD, PREDEF, ROLES, XR, ln, q, synonym, text
 from .types import parse_type
@@ -124,6 +127,51 @@ def _scan_modules(object_dir: Path | None, obj_fqn: str) -> list[ModuleRef]:
             )
     return modules
 
+
+
+def _scan_templates(object_dir: Path | None, obj_fqn: str) -> list[TemplateRef]:
+    """Выгрузка Конфигуратора: <объект>/Templates/<Имя>.xml (дескриптор, отдаёт синоним) плюс
+    <объект>/Templates/<Имя>/Ext/Template.<расш> (содержимое). Читать надо содержимое, поэтому
+    в path кладём именно его."""
+    if object_dir is None:
+        return []
+    root = object_dir / "Templates"
+    if not root.is_dir():
+        return []
+    out: list[TemplateRef] = []
+    for tpl_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        ext_dir = tpl_dir / "Ext"
+        content = next((f for f in sorted(ext_dir.glob("Template.*")) if f.is_file()), None)             if ext_dir.is_dir() else None
+        if content is None:
+            continue
+        syn = ""
+        descriptor = root / f"{tpl_dir.name}.xml"
+        if descriptor.is_file():
+            try:
+                syn = synonym(etree.parse(str(descriptor)).getroot())
+            except Exception:  # noqa: BLE001 — битый дескриптор не должен прятать сам макет
+                syn = ""
+        out.append(TemplateRef(
+            name=tpl_dir.name, fqn=f"{obj_fqn}.Template.{tpl_dir.name}",
+            template_type=template_type_for(content.suffix),
+            path=str(content), size=content.stat().st_size, synonym=syn,
+        ))
+    return out
+
+
+def _scan_commands(object_dir: Path | None, obj_fqn: str) -> list[CommandRef]:
+    """Выгрузка Конфигуратора: <объект>/Commands/<Имя>/Ext/CommandModule.bsl."""
+    if object_dir is None:
+        return []
+    root = object_dir / "Commands"
+    if not root.is_dir():
+        return []
+    out: list[CommandRef] = []
+    for cmd_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        module = cmd_dir / "Ext" / "CommandModule.bsl"
+        out.append(CommandRef(name=cmd_dir.name, fqn=f"{obj_fqn}.Command.{cmd_dir.name}",
+                              module_path=str(module) if module.is_file() else None))
+    return out
 
 def _form_module_path(form_dir: Path | None) -> str | None:
     """Managed-form module path for a form directory (<form_dir>/Ext/Form/Module.bsl)."""
@@ -235,6 +283,9 @@ def parse_object(
                         form_path=_form_xml_path(form_dir),
                     )
                 )
+
+    obj.templates = _scan_templates(object_dir, fqn)
+    obj.commands = _scan_commands(object_dir, fqn)
 
     # A CommonForm IS a managed form (it has no owning object and no <Form> child): its
     # layout/module live directly in the object's own dir (CommonForms/<Name>/Ext/...).

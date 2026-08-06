@@ -68,6 +68,61 @@ class ModuleRef:
     size: int = 0
 
 
+#: Расширение файла содержимого макета -> вид макета в терминах 1С. Раскладка на диске —
+#: единственный надёжный источник: в EDT у макета нет ни .mdo, ни ссылки из .mdo объекта.
+TEMPLATE_TYPE_BY_EXT: dict[str, str] = {
+    ".mxlx": "SpreadsheetDocument",
+    ".mxl": "SpreadsheetDocument",
+    ".dcs": "DataCompositionSchema",
+    ".txt": "TextDocument",
+    ".html": "HTMLDocument",
+    ".htmldoc": "HTMLDocument",
+    ".bin": "BinaryData",
+    ".png": "Picture",
+    ".jpg": "Picture",
+    ".addin": "AddIn",
+    ".xml": "SpreadsheetDocument",   # выгрузка Конфигуратора: Ext/Template.xml
+    ".grs": "GraphicalSchema",
+    ".geo": "GeographicalSchema",
+    ".mob": "MobileAppTemplate",
+}
+
+
+def template_type_for(suffix: str) -> str:
+    """Вид макета по расширению файла содержимого ('Unknown' для незнакомых)."""
+    return TEMPLATE_TYPE_BY_EXT.get(suffix.lower(), "Unknown")
+
+
+@dataclass
+class CommandRef:
+    """Команда объекта: свой модуль с обработчиком, не видимый обычным резолвом модулей.
+
+    `_scan_modules` смотрит только .bsl в корне каталога объекта, поэтому
+    `<объект>/Commands/<Имя>/CommandModule.bsl` не попадал ни в карточку, ни в
+    `read_routine(module=…)`. В УТ таких объектов 392."""
+
+    name: str
+    fqn: str
+    module_path: str | None = None
+    synonym: str = ""
+
+
+@dataclass
+class TemplateRef:
+    """Макет объекта: СКД, табличный документ, текст, двоичные данные.
+
+    Макеты не были видны НИ ОДНИМ инструментом, хотя лежат на диске: модель узнавала об их
+    существовании из кода (`ПолучитьМакет("…")`) и дальше перебирала пути наугад — на живом
+    диалоге это давало круги по 8000 событий размышлений без единого символа ответа."""
+
+    name: str
+    fqn: str
+    template_type: str          # DataCompositionSchema | SpreadsheetDocument | TextDocument | ...
+    path: str                   # абсолютный путь к файлу содержимого
+    size: int = 0
+    synonym: str = ""
+
+
 @dataclass
 class RoleRight:
     object_fqn: str
@@ -98,6 +153,8 @@ class MetaObject:
     predefined: list[Predefined] = field(default_factory=list)
     forms: list[FormRef] = field(default_factory=list)
     modules: list[ModuleRef] = field(default_factory=list)
+    templates: list[TemplateRef] = field(default_factory=list)
+    commands: list[CommandRef] = field(default_factory=list)
 
     owners: list[str] = field(default_factory=list)  # target fqns (Catalog owners)
 

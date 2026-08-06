@@ -24,6 +24,7 @@ from ..chunking import KIND_RU
 from ..parsing.dump import CODE_FOLDERS, TYPE_FOLDERS
 from ..parsing.model import MetaObject
 from . import admin as lite_admin
+from . import templates as lite_templates
 from . import code_intel, fts, gitops, gitview, metaview, platform_help, search
 from .workspace import Workspace, read_text
 
@@ -108,6 +109,8 @@ grep дешевле в 2-5 раз (а на агрегатах через кон�
 изменения ветки (git) -> review_set (затронутые рутины + их вызывающие; сам дифф дешевле
 смотреть git'ом);
 UI и интеграции -> get_form (структура формы) / get_service (HTTP- и Web-сервисы);
+макеты объекта (СКД, печатные формы) -> они перечислены в get_object (поле templates
+с готовыми source+rel_path); разобранная схема компоновки -> get_template;
 справка платформы (синтаксис-помощник) -> platform_docinfo/platform_search/
 platform_get_document/platform_versions (пути к .hbk задаются в админке /admin).
 
@@ -667,6 +670,36 @@ def _object_payload(ws: Workspace, obj: MetaObject, detail: bool) -> dict:
         ]
     if obj.modules:
         out["modules"] = [{"module": m.module_type, "size": m.size} for m in obj.modules]
+    if obj.templates:
+        # ГОТОВЫЙ вызов, а не намёк: путь относительно корня источника + сам источник — ровно то,
+        # что принимает read_file. Без этого макет был не обнаружим ни одним инструментом, и
+        # модель перебирала пути наугад десятками вариантов.
+        out["templates"] = [
+            {
+                "name": t.name,
+                **({"synonym": t.synonym} if t.synonym else {}),
+                "type": t.template_type,
+                "size": t.size,
+                "source": ws.source_of_path(Path(t.path))[0],
+                "rel_path": ws.source_of_path(Path(t.path))[1],
+            }
+            for t in obj.templates
+        ]
+        out["templates_note"] = ("Читать: read_file(rel_path=…, source=…) — поля уже готовы. "
+                                 "Путь задан ОТНОСИТЕЛЬНО корня источника, не рабочей копии.")
+    if obj.commands:
+        # Команды объекта живут в <объект>/Commands/<Имя>/CommandModule.bsl и обычным резолвом
+        # модулей не достаются: он смотрит только .bsl в корне каталога объекта.
+        out["commands"] = [
+            {
+                "name": c.name,
+                **({"synonym": c.synonym} if c.synonym else {}),
+                **({"source": ws.source_of_path(Path(c.module_path))[0],
+                    "module_rel_path": ws.source_of_path(Path(c.module_path))[1]}
+                   if c.module_path else {"has_module": False}),
+            }
+            for c in obj.commands
+        ]
     if obj.owners:
         out["owners"] = obj.owners
     if obj.register_records:
@@ -747,6 +780,8 @@ def _merge_object_copies(parsed: list[tuple[str, MetaObject]]) -> tuple[MetaObje
     have_tab = {t.name.lower() for t in base.tabular}
     have_forms = {f.name.lower() for f in base.forms}
     have_mods = {m.module_type.lower() for m in base.modules}
+    have_tpl = {x.name.lower() for x in base.templates}
+    have_cmd = {c.name.lower() for c in base.commands}
     for name, other in parsed:
         if name == base_name:
             continue
@@ -754,6 +789,10 @@ def _merge_object_copies(parsed: list[tuple[str, MetaObject]]) -> tuple[MetaObje
         base.tabular += [t for t in other.tabular if t.name.lower() not in have_tab]
         base.forms += [f for f in other.forms if f.name.lower() not in have_forms]
         base.modules += [m for m in other.modules if m.module_type.lower() not in have_mods]
+        # Макеты расширение тоже ДОПОЛНЯЕТ: у заимствованного объекта собственные макеты живут
+        # в расширении, и без объединения карточка показывала бы только базовые.
+        base.templates += [x for x in other.templates if x.name.lower() not in have_tpl]
+        base.commands += [c for c in other.commands if c.name.lower() not in have_cmd]
         # Движения и владельцев расширение тоже ДОПОЛНЯЕТ: без объединения ответ показывал
         # 1 регистр из 4 при том, что merged_from перечислял три источника.
         base.register_records += [r for r in other.register_records
@@ -906,9 +945,61 @@ def read_routine(kind: str = "", name: str = "", routine_name: str = "", module:
     }
 
 
+def _read_file_miss(ws: Workspace, srcs: list, rel_path: str) -> dict:
+    """Промах read_file, из которого понятно, КАК исправить вызов.
+
+    Прежний ответ «Файл не найден ни в одном источнике: <путь>» не говорил ни от какого корня
+    ждётся путь, ни какие источники есть. На живом диалоге модель после такого перебирала
+    десятки путей подряд и уходила в круг на 8000 событий размышлений без единого символа
+    ответа. Отдаём корень, список источников и ближайшие РЕАЛЬНО существующие пути."""
+    # Укорачиваем путь до существующего префикса и показываем, ЧТО там лежит. Это O(глубины)
+    # обращений к ФС — мгновенно; поиск по имени (rglob) занимал 26 секунд на шести источниках
+    # и всё равно промахивался: угадывают `Template.xml`, а на диске `Template.dcs`.
+    parts = [p for p in rel_path.replace("\\", "/").split("/") if p not in ("", ".")]
+    best: tuple[int, object, Path] | None = None   # (длина префикса, источник, каталог)
+    for s in srcs:
+        root = Path(s.files_root)
+        for cut in range(len(parts) - 1, 0, -1):
+            if best is not None and cut <= best[0]:
+                break                       # короче уже найденного — смотреть нечего
+            prefix = root.joinpath(*parts[:cut])
+            if prefix.is_dir():
+                best = (cut, s, prefix)
+                break
+    unique: list[dict] = []
+    if best is not None:
+        cut, s, prefix = best
+        rel_prefix = "/".join(parts[:cut])
+        try:
+            entries = sorted(prefix.iterdir())[:8]
+        except OSError:
+            entries = []
+        unique = [
+            {"source": s.name,
+             "rel_path": f"{rel_prefix}/{e.name}" + ("/" if e.is_dir() else "")}
+            for e in entries
+        ]
+    out: dict = {
+        "error": f"Файл не найден ни в одном источнике: {rel_path}",
+        "path_is_relative_to": "корню ИСТОЧНИКА (не рабочей копии и не репозитория)",
+        "sources": [{"name": s.name, "root": str(s.files_root)} for s in srcs],
+        "hint": ("Путь задаётся от корня источника. Готовые пути к макетам объекта отдаёт "
+                 "get_object (поле templates: source + rel_path), к формам — get_form."),
+    }
+    if unique:
+        out["existing_nearby"] = unique[:8]
+        out["hint"] += (" Ниже existing_nearby — что РЕАЛЬНО лежит по самому длинному "
+                        "существующему префиксу вашего пути.")
+    return out
+
+
 @_tool
 def read_file(rel_path: str, start_line: int = 1, max_lines: int = 400, source: str = "", workspace: str = "") -> dict:
-    """Любой файл источника по пути относительно его корня (.mdo, .form, .xml, .bsl)."""
+    """Любой файл источника по пути относительно КОРНЯ ИСТОЧНИКА (не рабочей копии).
+
+    Расширение не ограничено: читается всё, что лежит в источнике (.bsl, .mdo, .xml, .form,
+    .dcs, .mxlx, .txt…). Готовые пути к макетам объекта отдаёт get_object (поле templates).
+    Промах возвращает корни источников и ближайшие существующие пути — не перебирай варианты."""
     ws = _ws(workspace)
     srcs, serr = ws.resolve_sources(source)
     if serr:
@@ -923,7 +1014,7 @@ def read_file(rel_path: str, start_line: int = 1, max_lines: int = 400, source: 
         if path is not None:
             hits.append((s.name, path, read_text(path).splitlines()))
     if not hits:
-        return _err(f"Файл не найден ни в одном источнике: {rel_path}")
+        return _read_file_miss(ws, srcs, rel_path)
     src_name, _path, lines = max(hits, key=lambda h: len(h[2]))
     start = max(1, start_line)
     chunk = lines[start - 1 : start - 1 + max(1, max_lines)]
@@ -1330,6 +1421,66 @@ def _form_files(ws: Workspace, src, obj_dir: Path, kind: str, name: str,
         return (fxml if fxml.is_file() else None,
                 ws.form_module_path(src, obj_dir, name, common_form_dir=obj_dir))
     return ws.form_xml_path(src, obj_dir, form), ws.form_module_path(src, obj_dir, form)
+
+
+def _resolve_merged(ws: Workspace, kind: str, name: str, source: str):
+    """Разобранный объект со слиянием копий (база + расширения) или dict с ошибкой.
+
+    Тот же путь, что у get_object: заимствованный объект лежит в расширении огрызком, и макеты
+    с командами могут быть в любой из копий."""
+    if err := _kind_ok(kind):
+        return _err(err)
+    found, err2 = ws.find_objects(kind, name, source) if source else ws.find_objects(kind, name)
+    if err2:
+        return _err(err2)
+    parsed: list[tuple[str, MetaObject]] = []
+    for cand_src, cand_ref in found:
+        try:
+            parsed.append((cand_src.name, ws.parse_object(cand_src, cand_ref)))
+        except ValueError:
+            continue
+    if not parsed:
+        return _err(f"Не удалось разобрать {kind}.{name}")
+    merged, _sources = _merge_object_copies(parsed)
+    return merged
+
+
+
+@_tool
+def get_template(kind: str, name: str, template: str = "", source: str = "",
+                 include_query: bool = True, max_query_chars: int = 8000,
+                 workspace: str = "") -> dict:
+    """Макет объекта РАЗОБРАННЫЙ: для схемы компоновки — наборы данных, поля, параметры и текст
+    запроса; для прочих видов — описание и путь для read_file.
+
+    Пустой template перечислит макеты объекта. Зачем не read_file: макет СКД на живой УТ — это
+    44 тыс. символов XML, из них половина разметка настроек; здесь возвращается то, ради чего
+    его открывают. Полный XML при необходимости — read_file по rel_path из get_object."""
+    ws = _ws(workspace)
+    obj = _resolve_merged(ws, kind, name, source)
+    if isinstance(obj, dict):
+        return obj                                    # ошибка резолва объекта
+    if not obj.templates:
+        return _err(f"У {kind}.{name} нет макетов.")
+    if not template:
+        return {"object": f"{kind}.{name}",
+                "templates": [{"name": t.name, "type": t.template_type, "size": t.size}
+                              for t in obj.templates],
+                "note": "Укажите template=<имя>."}
+    low = template.strip().lower()
+    ref = next((t for t in obj.templates if t.name.lower() == low), None)
+    if ref is None:
+        have = ", ".join(t.name for t in obj.templates)
+        return _err(f"Макет '{template}' не найден у {kind}.{name}. Есть: {have}")
+    src_name, rel = ws.source_of_path(Path(ref.path))
+    head = {"object": f"{kind}.{name}", "template": ref.name, "type": ref.template_type,
+            "source": src_name, "rel_path": rel, "size": ref.size}
+    if ref.template_type != "DataCompositionSchema":
+        head["note"] = ("Этот вид макета структурно не разбирается — читайте файл целиком: "
+                        "read_file(rel_path=…, source=…).")
+        return head
+    return {**head, **lite_templates.parse_dcs(
+        Path(ref.path), max_query_chars=max_query_chars, include_query=include_query)}
 
 
 @_tool

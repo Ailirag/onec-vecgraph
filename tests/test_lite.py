@@ -153,6 +153,29 @@ _WEB_SERVICE = f"""<?xml version="1.0" encoding="UTF-8"?>
 </mdclass:WebService>
 """
 
+# Минимальная схема компоновки: один набор данных с запросом и полями + параметр.
+_DCS = """<?xml version="1.0" encoding="UTF-8"?>
+<DataCompositionSchema xmlns="http://v8.1c.ru/8.1/data-composition-system/schema">
+  <dataSet xsi:type="DataSetQuery" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <name>НаборДанных</name>
+    <field xsi:type="DataSetFieldField">
+      <dataPath>Контрагент</dataPath><title>Контрагент</title>
+    </field>
+    <field xsi:type="DataSetFieldField">
+      <dataPath>СкладОтправитель</dataPath><title>Склад отправитель</title>
+    </field>
+    <query>ВЫБРАТЬ Контрагент, СкладОтправитель ИЗ Документ.ЗаказКлиента</query>
+  </dataSet>
+  <parameter><name>Период</name><title>Период</title></parameter>
+  <settingsVariant><name>Основной</name></settingsVariant>
+</DataCompositionSchema>
+"""
+
+_COMMAND_BSL = """Процедура ОбработкаКоманды(ПараметрКоманды, ПараметрыВыполненияКоманды) Экспорт
+    Возврат;
+КонецПроцедуры
+"""
+
 _COMMON_BSL = """Функция ПроверитьИНН(Знач ИНН) Экспорт
     Возврат СтрДлина(ИНН) = 10;
 КонецФункции
@@ -248,6 +271,9 @@ def edt_ws(tmp_path_factory: pytest.TempPathFactory) -> Workspace:
     _w(cat / "ManagerModule.bsl", _CATALOG_MANAGER_BSL)
     _w(cat / "Forms" / "ФормаЭлемента" / "Form.form", _DOT_FORM)
     _w(cat / "Forms" / "ФормаЭлемента" / "Module.bsl", _FORM_BSL)
+    _w(cat / "Templates" / "ПечатнаяФорма" / "Template.dcs", _DCS)
+    _w(cat / "Templates" / "Бинарный" / "Template.bin", "x")
+    _w(cat / "Commands" / "ОткрытьКарточку" / "CommandModule.bsl", _COMMAND_BSL)
     _w(conf / "CommonModules" / "РаботаСИНН" / "РаботаСИНН.mdo", _COMMON_MODULE)
     _w(conf / "CommonModules" / "РаботаСИНН" / "Module.bsl", _COMMON_BSL)
     doc = conf / "Documents" / "ЗаказКлиента"
@@ -448,8 +474,8 @@ def test_metrics(edt_ws: Workspace) -> None:
     base = rows["УправлениеТорговлей"]
     assert base["objects_by_kind"]["Catalog"] == 1
     # модули справочника (объектный/менеджерский/форменный), общий модуль, модуль
-    # документа, модуль HTTP-сервиса
-    assert base["bsl_files"] == 6 and base["code_bytes"] > 0
+    # документа, модуль HTTP-сервиса, модуль команды объекта
+    assert base["bsl_files"] == 7 and base["code_bytes"] > 0
     assert base["routines"] is None  # rg отключён фикстурой — честный None, не ноль
 
 
@@ -860,3 +886,78 @@ def test_module_is_auto_picked_when_object_has_only_one(served: Workspace) -> No
     assert "error" not in res, res
     assert res["module"], "ответ обязан назвать выбранный модуль"
     assert res["object"] == f"CommonModule.{obj}"
+
+
+# --------------------------------------------------------------------------- #
+# Макеты и команды объекта (были не обнаружимы ни одним инструментом)
+# --------------------------------------------------------------------------- #
+
+def test_object_card_exposes_templates_ready_to_read(served: Workspace) -> None:
+    """Макеты обязаны быть в карточке — с ГОТОВЫМИ source и rel_path для read_file.
+
+    Раньше макетов не было ни в модели, ни в карточке, ни отдельным видом метаданных: модель
+    узнавала об их существовании из кода (`ПолучитьМакет`) и перебирала пути наугад. На живом
+    диалоге это давало круги по 8000 событий размышлений без единого символа ответа."""
+    card = lite_server.get_object("Catalog", "Контрагенты")
+    by_name = {t["name"]: t for t in card["templates"]}
+    assert set(by_name) == {"ПечатнаяФорма", "Бинарный"}
+    assert by_name["ПечатнаяФорма"]["type"] == "DataCompositionSchema"
+    assert by_name["Бинарный"]["type"] == "BinaryData"
+
+    # путь из карточки обязан читаться без правок — иначе подсказка бесполезна
+    tpl = by_name["ПечатнаяФорма"]
+    got = lite_server.read_file(rel_path=tpl["rel_path"], source=tpl["source"])
+    assert "error" not in got and got["total_lines"] > 0
+
+
+def test_object_card_exposes_commands(served: Workspace) -> None:
+    """Команды объекта лежат в <объект>/Commands/<Имя>/CommandModule.bsl и обычным резолвом
+    модулей не достаются: он смотрит только .bsl в корне каталога объекта."""
+    card = lite_server.get_object("Catalog", "Контрагенты")
+    cmd = {c["name"]: c for c in card["commands"]}["ОткрытьКарточку"]
+    assert cmd["module_rel_path"].endswith("Commands/ОткрытьКарточку/CommandModule.bsl")
+    assert "error" not in lite_server.read_file(rel_path=cmd["module_rel_path"],
+                                                source=cmd["source"])
+
+
+def test_get_template_returns_structure_not_markup(served: Workspace) -> None:
+    """Для СКД возвращаются наборы данных, поля, параметры и запрос — то, ради чего открывают.
+
+    На живой УТ разбор стоит 5 741 токен против 23 455 у чтения того же макета целиком."""
+    res = lite_server.get_template("Catalog", "Контрагенты", "ПечатнаяФорма")
+    assert res["type"] == "DataCompositionSchema"
+    ds = res["data_sets"][0]
+    assert ds["name"] == "НаборДанных"
+    assert {f["field"] for f in ds["fields"]} == {"Контрагент", "СкладОтправитель"}
+    assert "ЗаказКлиента" in ds["query"] and ds["query_truncated"] is False
+    assert [p["name"] for p in res["parameters"]] == ["Период"]
+
+    # обрезка запроса заявлена, а не молчалива
+    trimmed = lite_server.get_template("Catalog", "Контрагенты", "ПечатнаяФорма",
+                                       max_query_chars=10)
+    assert trimmed["data_sets"][0]["query_truncated"] is True
+    assert trimmed["data_sets"][0]["query_chars"] > 10
+
+    # неразбираемый вид не притворяется разобранным
+    binary = lite_server.get_template("Catalog", "Контрагенты", "Бинарный")
+    assert binary["type"] == "BinaryData" and "read_file" in binary["note"]
+    assert "data_sets" not in binary
+
+    # пустое имя перечисляет макеты, неизвестное — говорит, какие есть
+    assert {t["name"] for t in lite_server.get_template("Catalog", "Контрагенты")["templates"]}
+    assert "Есть:" in lite_server.get_template("Catalog", "Контрагенты", "НетТакого")["error"]
+
+
+def test_read_file_miss_teaches_instead_of_just_failing(served: Workspace) -> None:
+    """Промах обязан объяснять, от какого корня путь, и показывать, что лежит рядом.
+
+    Прежний ответ «не найден ни в одном источнике» не давал модели ничего, и она перебирала
+    пути десятками вариантов подряд."""
+    miss = lite_server.read_file(
+        rel_path="Catalogs/Контрагенты/Templates/ПечатнаяФорма/Ext/Template.xml")
+    assert "error" in miss
+    assert "ИСТОЧНИКА" in miss["path_is_relative_to"]
+    assert miss["sources"] and "get_object" in miss["hint"]
+    # подсказка ведёт к РЕАЛЬНОМУ файлу, а не к случайному каталогу
+    nearby = {n["rel_path"] for n in miss["existing_nearby"]}
+    assert any(p.endswith("Templates/ПечатнаяФорма/Template.dcs") for p in nearby), nearby
