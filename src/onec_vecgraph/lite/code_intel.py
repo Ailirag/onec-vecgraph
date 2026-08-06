@@ -998,15 +998,33 @@ def find_callers_batch(
     return out
 
 
+def _matches_object(row: dict, hint_low: str, kind: str, name: str) -> bool:
+    """Подходит ли строка объявления под сужение по объекту (`object_hint` либо kind+name)."""
+    obj = str(row.get("object") or "")
+    if kind and name and obj.lower() != f"{kind}.{name}".lower():
+        return False
+    if hint_low:
+        tail = obj.partition(".")[2].lower()
+        if hint_low not in obj.lower() and hint_low != tail:
+            return False
+    return True
+
+
 def find_declarations(
     ws: Workspace, routine_name: str, *, exported_only: bool = False, max_results: int = 50,
     source: str = "", decl_offset: int = 0, substring: bool = False,
+    object_hint: str = "", kind: str = "", name: str = "",
 ) -> dict:
     """Where a procedure/function with this exact name is declared (all sources).
 
     При готовом индексе символов счёт объявлений ПОЛНЫЙ (declaration_count), а не «сколько
     успели найти до обрезки по файлам-кандидатам»: у популярных имён вроде ПриСозданииНаСервере
-    объявлений тысячи, и произвольная выборка вводила в заблуждение."""
+    объявлений тысячи, и произвольная выборка вводила в заблуждение.
+
+    object_hint / kind+name сужают до конкретного объекта. Раньше их тут не было, хотя соседние
+    инструменты их принимают (find_callers — object_hint, read_routine и get_object — kind+name):
+    модель переносила интерфейс соседа и систематически получала «неизвестные аргументы» — в
+    чужом замере это четыре отказа из девяти прогонов на трёх разных задачах."""
     srcs, err = ws.resolve_sources(source)
     if err:
         return {"error": err}
@@ -1028,7 +1046,10 @@ def find_declarations(
         # скан ради него не нужен.
         if not indexed and not _index_knows(ws, routine_name):
             indexed = None
+    hint_low = object_hint.strip().lower()
     if indexed is not None:
+        if hint_low or (kind and name):
+            indexed = [r for r in indexed if _matches_object(r, hint_low, kind, name)]
         offset = max(0, decl_offset)
         window = indexed[offset: offset + max(1, max_results)]
         return {
@@ -1054,9 +1075,10 @@ def find_declarations(
             src_name, rel = ws.source_of_path(path)
             src = next((s for s in ws.sources if s.name == src_name), None)
             descr = describe_bsl_path(src, rel) if src else {}
-            rows.append({
-                "source": src_name, "path": rel, **descr, **routine_row(path, rt),
-            })
+            row = {"source": src_name, "path": rel, **descr, **routine_row(path, rt)}
+            if (hint_low or (kind and name)) and not _matches_object(row, hint_low, kind, name):
+                continue
+            rows.append(row)
             if len(rows) >= max_results:
                 return _decl_answer(routine_name, rows, truncated=True)
     return _decl_answer(routine_name, rows, truncated=truncated)

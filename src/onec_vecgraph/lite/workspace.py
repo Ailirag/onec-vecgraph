@@ -239,10 +239,28 @@ class Workspace:
     def module_path(
         self, src: LiteSource, kind: str, name: str, module: str
     ) -> tuple[Path | None, str]:
-        """Resolve a module alias/stem/'Form:<Имя>' to a .bsl path; ('', msg) lists what exists."""
+        """Resolve a module alias/stem/'Form:<Имя>' to a .bsl path; ('', msg) lists what exists.
+
+        Пустой `module` — «выбери сам»: если у объекта РОВНО ОДИН модуль, берём его. У
+        Report/DataProcessor модуль называется ObjectModule, и умолчание 'Module' упиралось в
+        «Модуль 'Module' не найден. Доступны: ObjectModule» — ход терялся на угадывании имени,
+        которое тут же напечатано в ошибке. Когда модулей несколько, по-прежнему отказ со
+        списком: выбирать за пользователя между Object и Manager нельзя."""
         _fqn, _meta, obj_dir = self._require_ref(src, kind, name)
         if obj_dir is None:
             return None, f"Объект {kind}.{name} не найден в '{src.name}'."
+
+        if not module:
+            available = self.available_modules(src, obj_dir)
+            if len(available) == 1:
+                module = available[0]
+            elif not available:
+                return None, f"У {kind}.{name} нет модулей (.bsl) в '{src.name}'."
+            else:
+                return None, (
+                    f"У {kind}.{name} несколько модулей: {', '.join(available)}. "
+                    "Укажите module=<имя>."
+                )
 
         if module.startswith("Form:"):
             form = module[len("Form:") :]

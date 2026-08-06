@@ -806,3 +806,50 @@ def test_find_callers_keeps_qualified_same_name_call(edt_ws: Workspace) -> None:
     self_calls = [c for c in res["callers"]
                   if c["routine"].lower() == "проверитьинн" and not c.get("qualifier")]
     assert self_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Единообразие интерфейса (по замечаниям из чужого замера код-ревью)
+# --------------------------------------------------------------------------- #
+
+def test_find_routine_narrows_by_object_like_its_neighbours(served: Workspace) -> None:
+    """find_routine обязан принимать object_hint и kind+name, как соседние инструменты.
+
+    find_callers принимает object_hint, read_routine и get_object — kind+name, а find_routine
+    не принимал ничего из этого. Модель переносила интерфейс соседа и получала «неизвестные
+    аргументы»: в чужом замере это четыре отказа из девяти прогонов на трёх разных задачах."""
+    wide = lite_server.find_routine(routine_name="ПередЗаписью", max_results=50)
+    objects = {d["object"] for d in wide["declarations"]}
+    assert objects, "в фикстуре нужна хотя бы одна ПередЗаписью"
+    target = sorted(objects)[0]
+    kind, _, name = target.partition(".")
+
+    for narrowed in (
+        lite_server.find_routine(routine_name="ПередЗаписью", kind=kind, name=name,
+                                 max_results=50),
+        lite_server.find_routine(routine_name="ПередЗаписью", object_hint=name, max_results=50),
+    ):
+        assert {d["object"] for d in narrowed["declarations"]} == {target}
+        assert narrowed["declaration_count"] == len(narrowed["declarations"])
+
+    # сужение действительно фильтрует, а не игнорируется: чужой объект даёт честный ноль
+    alien = lite_server.find_routine(routine_name="ПередЗаписью", kind=kind,
+                                     name="ЗаведомоНетТакогоОбъекта", max_results=50)
+    assert alien["declarations"] == [] and alien["declaration_count"] == 0
+
+
+def test_module_is_auto_picked_when_object_has_only_one(served: Workspace) -> None:
+    """Пустой module = «выбери сам», если модуль один; ответ говорит, какой именно взят.
+
+    Умолчание было "Module", а у Report/DataProcessor модуль называется ObjectModule — вызов
+    упирался в «Модуль 'Module' не найден. Доступны: ObjectModule», то есть в угадывание имени,
+    напечатанного тут же в ошибке."""
+    listed = lite_server.list_objects("CommonModule")["objects"]
+    assert listed, "в фикстуре нужен общий модуль"
+    obj = listed[0]["name"]
+    res = lite_server.read_routine(kind="CommonModule", name=obj,
+                                   routine_name=lite_server.list_routines(
+                                       kind="CommonModule", name=obj)["routines"][0]["name"])
+    assert "error" not in res, res
+    assert res["module"], "ответ обязан назвать выбранный модуль"
+    assert res["object"] == f"CommonModule.{obj}"

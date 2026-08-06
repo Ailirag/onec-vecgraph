@@ -816,12 +816,14 @@ def _resolve_module(ws: Workspace, kind: str, name: str, module: str, source: st
 
 
 @_tool
-def list_routines(kind: str, name: str, module: str = "Module", source: str = "",
+def list_routines(kind: str, name: str, module: str = "", source: str = "",
                   max_results: int = 100, offset: int = 0, exported_only: bool = False,
                   name_filter: str = "", workspace: str = "") -> dict:
     """Процедуры/функции модуля: сигнатуры, Экспорт, директивы, точки входа, override-аннотации.
 
-    module: Module|Object|Manager|RecordSet|Value|Command|Form:<Имя>|<имя .bsl>.
+    module: пусто = выбрать сам, если модуль у объекта один (у Report/DataProcessor это
+    ObjectModule, а не Module); иначе Module|Object|Manager|RecordSet|Value|Command|
+    Form:<Имя>|<имя .bsl>. Когда модулей несколько, ответ перечислит их.
     В крупных модулях 1С бывает больше тысячи рутин, поэтому ответ ограничен бюджетом:
     routine_count — всего в модуле, отдаётся окно max_results от offset; сузить можно
     exported_only=True или name_filter=<подстрока имени>."""
@@ -863,7 +865,7 @@ def read_module(kind: str, name: str, module: str = "Module", start_line: int = 
 
 
 @_tool
-def read_routine(kind: str = "", name: str = "", routine_name: str = "", module: str = "Module",
+def read_routine(kind: str = "", name: str = "", routine_name: str = "", module: str = "",
                  source: str = "", workspace: str = "") -> dict:
     """Тело одной процедуры/функции по имени (для заимствованных объектов рутина ищется по
     источникам: расширения, затем база).
@@ -890,6 +892,10 @@ def read_routine(kind: str = "", name: str = "", routine_name: str = "", module:
         return _err(f"Рутина '{routine_name}' не найдена. Есть: {avail}")
     return {
         "source": src.name,
+        "object": f"{kind}.{name}",
+        # Модуль берём из ПУТИ, а не из аргумента: при module="" его выбрал резолвер, и ответ
+        # обязан сказать, какой именно, — иначе непонятно, что вообще прочитано.
+        "module": path.stem,
         "path": ws.source_of_path(path)[1],
         **code_intel.routine_row(path, rt),
         "text": code_intel.routine_body(path, rt),
@@ -1024,19 +1030,24 @@ def _locate_routine(ws: Workspace, routine_name: str, source: str = "") -> tuple
 
 
 @_tool
-def find_routine(routine_name: str, exported_only: bool = False, max_results: int = 50,
+def find_routine(routine_name: str, object_hint: str = "", kind: str = "", name: str = "",
+                 exported_only: bool = False, max_results: int = 50,
                  source: str = "", offset: int = 0, substring: bool = False,
                  workspace: str = "") -> dict:
     """Где ОБЪЯВЛЕНА процедура/функция с этим именем (по всем источникам, точный парс).
 
-    declaration_count — сколько объявлений ВСЕГО (у типовых обработчиков вроде
-    ПриСозданииНаСервере их тысячи), отдаётся окно max_results от offset; окно упорядочено по
-    значимости (экспортные и общие модули выше), а не по алфавиту. engine показывает, отвечал
-    индекс или живой скан. При `engine: "scan"` с `truncated: true` полный счёт НЕИЗВЕСТЕН и
-    declaration_count равен null — не считай размер окна (`returned`) числом объявлений."""
+    Сузить до объекта: object_hint="<Имя объекта>" либо kind+name (как у find_callers,
+    read_routine и get_object) — у типовых обработчиков объявлений тысячи, и без сужения
+    приходится листать окно.
+
+    declaration_count — сколько объявлений ВСЕГО, отдаётся окно max_results от offset; окно
+    упорядочено по значимости (экспортные и общие модули выше), а не по алфавиту. engine
+    показывает, отвечал индекс или живой скан. При `engine: "scan"` с `truncated: true` полный
+    счёт НЕИЗВЕСТЕН и declaration_count равен null — не считай размер окна числом объявлений."""
     return code_intel.find_declarations(
         _ws(workspace), routine_name, exported_only=exported_only, max_results=max_results,
         source=source, decl_offset=offset, substring=substring,
+        object_hint=object_hint, kind=kind, name=name,
     )
 
 
