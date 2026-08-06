@@ -85,7 +85,8 @@ MCP — в проверенности и полноте. Поэтому проф
 `rg` и `git diff --name-status` (профиль `full` возвращает их, если у агента нет шелла).
 Незаменимы: `find_callers`/`call_graph`/`find_callees` (вызов против объявления, полный счёт),
 `get_object`/`writes_to` (слияние базы с расширениями), `find_overrides`, `fts_search`,
-`find_routine`, `review_set`, `read_routine`, `get_form`/`get_service`.
+`find_routine`, `review_set`, `read_routine`, `get_form`/`get_service`, `bsl_sql`
+(агрегаты одним SELECT по индексу — дешевле выдачи строками в десятки раз).
 Корни для rg брать из `overview()` — база и КАЖДОЕ расширение отдельным корнем, иначе теряется
 до 75 % результатов. Полная карта с замерами:
 [docs/LITE_USAGE.md#rg-или-mcp-карта-маршрутизации](docs/LITE_USAGE.md#rg-или-mcp-карта-маршрутизации).

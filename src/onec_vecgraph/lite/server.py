@@ -872,7 +872,11 @@ def read_routine(kind: str = "", name: str = "", routine_name: str = "", module:
 
     Достаточно одного routine_name — объект и модуль находятся сами (по индексу символов;
     без индекса — поиском объявления). kind+name+module указывают, только если нужно снять
-    неоднозначность одноимённых рутин; при неоднозначности ответ перечислит кандидатов."""
+    неоднозначность одноимённых рутин; при неоднозначности ответ перечислит кандидатов.
+
+    module оставляй пустым: он подбирается сам (у Report/DataProcessor модуль называется
+    ObjectModule, а не Module — угадывать не надо). Если модулей несколько и среди них нет
+    Module, ответ их перечислит. Прочитанный модуль всегда назван в поле module ответа."""
     if not routine_name:
         return _err("read_routine требует routine_name=<имя процедуры/функции>; "
                     "kind/name/module необязательны (объект находится сам).")
@@ -1040,10 +1044,13 @@ def find_routine(routine_name: str, object_hint: str = "", kind: str = "", name:
     read_routine и get_object) — у типовых обработчиков объявлений тысячи, и без сужения
     приходится листать окно.
 
-    declaration_count — сколько объявлений ВСЕГО, отдаётся окно max_results от offset; окно
-    упорядочено по значимости (экспортные и общие модули выше), а не по алфавиту. engine
-    показывает, отвечал индекс или живой скан. При `engine: "scan"` с `truncated: true` полный
-    счёт НЕИЗВЕСТЕН и declaration_count равен null — не считай размер окна числом объявлений."""
+    declaration_count — сколько объявлений всего В ОБЛАСТИ ЗАПРОСА, отдаётся окно max_results от
+    offset; окно упорядочено по значимости (экспортные и общие модули выше), а не по алфавиту.
+    Область читай по declaration_scope: `all_sources` — по всем источникам, `object` — только у
+    объекта из narrowed_by. С сужением 563 объявления ОбработкаЗаполнения превращаются в 1, и это
+    НЕ значит «объявлена один раз в конфигурации».
+    engine показывает, отвечал индекс или живой скан. При `engine: "scan"` с `truncated: true`
+    полный счёт НЕИЗВЕСТЕН и declaration_count равен null — не считай размер окна числом."""
     return code_intel.find_declarations(
         _ws(workspace), routine_name, exported_only=exported_only, max_results=max_results,
         source=source, decl_offset=offset, substring=substring,

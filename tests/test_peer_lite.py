@@ -428,3 +428,19 @@ def test_index_state_is_reachable_from_published_tool(monkeypatch) -> None:
     assert "index" in doc, "overview обязан описывать блок index в своём описании"
     src = inspect.getsource(lite_server.overview)
     assert "_index_brief" in src, "overview обязан отдавать состояние индекса"
+
+
+def test_every_published_lite_tool_is_documented(monkeypatch) -> None:
+    """Новый инструмент обязан попасть в руководство, а не только в код.
+
+    bsl_sql я добавил в инструкции сервера и в таблицу маршрутизации, но забыл про инвентарь
+    инструментов в LITE_USAGE и про README с AGENTS.md — агент, который читает документацию, а не
+    схемы, о нём бы не узнал. Проверяем весь профиль full, чтобы расхождение ловилось сразу."""
+    from pathlib import Path
+
+    names = _lite_tool_names(monkeypatch, "full")
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "LITE_USAGE.md").read_text(
+        encoding="utf-8")
+    missing = sorted(n for n in names if f"`{n}`" not in doc)
+    assert not missing, f"инструменты не описаны в docs/LITE_USAGE.md: {missing}"
+    _lite_tool_names(monkeypatch, None)  # вернуть модуль в дефолтное состояние

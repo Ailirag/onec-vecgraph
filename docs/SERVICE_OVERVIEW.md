@@ -43,8 +43,8 @@ MCP-сервер, который векторизует конфигурации
 стандарты разработки 1С (`dev_standards_search`/`dev_standards_get`) · обзор (`metrics`).
 
 ## Lite-режим (без Neo4j и векторов)
-`onec-lite admin` (или двойной клик `lite-admin.cmd`) — отдельный MCP (30 инструментов, по
-умолчанию публикуются 21, пакет `lite/`) по **живой** рабочей копии (Конфигуратор XML | EDT):
+`onec-lite admin` (или двойной клик `lite-admin.cmd`) — отдельный MCP (31 инструмент, по
+умолчанию публикуются 22, пакет `lite/`) по **живой** рабочей копии (Конфигуратор XML | EDT):
 навигация/структура, код-анализ BSL-парсером (callers/callees/overrides/handlers/writes_to),
 поиск rg + opt-in SQLite FTS5 (BM25), справка платформы из `.hbk`, git-осведомлённость
 (`changed_objects`/`review_set`); веб-админка (пути base/ext/справка/rg, построение индексов,
@@ -74,7 +74,7 @@ MCP-сервер, который векторизует конфигурации
 | [OPERATOR_PLAYBOOK.md](OPERATOR_PLAYBOOK.md) | Управление: index / callgraph / vectorize / ingest / ingest-help |
 | [VECTORIZATION_GUIDE.md](VECTORIZATION_GUIDE.md) | Рецепты векторизации корпусов (ИТС по конфигурации / стандарты v8std / справка платформы по версии), agent-runnable |
 | [MCP_USAGE.md](MCP_USAGE.md) | Гайд для агентов-потребителей (подключение, словари, инструменты, сценарии) |
-| [LITE_USAGE.md](LITE_USAGE.md) | Руководство onec-lite: запуск одним словом, админка, воркспейсы (несколько конфигураций), 30 инструментов, сценарии, lite vs big |
+| [LITE_USAGE.md](LITE_USAGE.md) | Руководство onec-lite: запуск одним словом, админка, воркспейсы (несколько конфигураций), 31 инструмент, сценарии, lite vs big |
 | [OVERLAY.md](OVERLAY.md) | Overlay-тенанты: baseline + per-task дельта, write-эндпоинт `index_overlay`, union-граф (Phase 2) |
 | [DEPLOY_DETAILED.md](DEPLOY_DETAILED.md) · [DEPLOYMENT.md](DEPLOYMENT.md) | Деплой, докер (CPU/GPU), настройки, auth |
 | [../AGENTS.md](../AGENTS.md) | Точка входа для Codex / AGENTS.md-совместимых агентов |
