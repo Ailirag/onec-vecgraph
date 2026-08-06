@@ -1047,14 +1047,20 @@ def find_declarations(
         if not indexed and not _index_knows(ws, routine_name):
             indexed = None
     hint_low = object_hint.strip().lower()
+    narrowed_by = (f"{kind}.{name}" if kind and name else object_hint.strip()) or None
     if indexed is not None:
-        if hint_low or (kind and name):
+        if narrowed_by:
             indexed = [r for r in indexed if _matches_object(r, hint_low, kind, name)]
         offset = max(0, decl_offset)
         window = indexed[offset: offset + max(1, max_results)]
         return {
             "routine": routine_name,
+            # При сужении счёт относится к ОДНОМУ объекту, а не ко всей конфигурации. Без явного
+            # признака `narrowed_by` агент читал бы «declaration_count: 1» как «рутина объявлена
+            # один раз во всей базе» — молчаливая подмена смысла поля.
+            "narrowed_by": narrowed_by,
             "declaration_count": len(indexed),
+            "declaration_scope": "object" if narrowed_by else "all_sources",
             "returned": len(window),
             "offset": offset,
             "truncated": offset + len(window) < len(indexed),
@@ -1080,11 +1086,13 @@ def find_declarations(
                 continue
             rows.append(row)
             if len(rows) >= max_results:
-                return _decl_answer(routine_name, rows, truncated=True)
-    return _decl_answer(routine_name, rows, truncated=truncated)
+                return _decl_answer(routine_name, rows, truncated=True,
+                                    narrowed_by=narrowed_by)
+    return _decl_answer(routine_name, rows, truncated=truncated, narrowed_by=narrowed_by)
 
 
-def _decl_answer(routine_name: str, rows: list[dict], *, truncated: bool) -> dict:
+def _decl_answer(routine_name: str, rows: list[dict], *, truncated: bool,
+                 narrowed_by: str | None = None) -> dict:
     """Ответ скан-пути в ТОЙ ЖЕ форме, что и индексного (declaration_count/returned/engine).
 
     Раньше формы расходились, и вызывающий, получив фолбэк, не находил ожидаемых полей —
@@ -1098,7 +1106,9 @@ def _decl_answer(routine_name: str, rows: list[dict], *, truncated: bool) -> dic
     `call_rows_total` у find_callers), а не правдоподобное число."""
     return {
         "routine": routine_name,
+        "narrowed_by": narrowed_by,
         "declaration_count": None if truncated else len(rows),
+        "declaration_scope": "object" if narrowed_by else "all_sources",
         "returned": len(rows),
         "offset": 0,
         "truncated": truncated,

@@ -252,7 +252,9 @@ class Workspace:
 
         if not module:
             available = self.available_modules(src, obj_dir)
-            if len(available) == 1:
+            if "Module" in available:
+                module = "Module"      # прежнее умолчание: где оно работало, поведение прежнее
+            elif len(available) == 1:
                 module = available[0]
             elif not available:
                 return None, f"У {kind}.{name} нет модулей (.bsl) в '{src.name}'."

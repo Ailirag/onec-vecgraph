@@ -837,6 +837,13 @@ def test_find_routine_narrows_by_object_like_its_neighbours(served: Workspace) -
                                      name="ЗаведомоНетТакогоОбъекта", max_results=50)
     assert alien["declarations"] == [] and alien["declaration_count"] == 0
 
+    # смысл счёта не подменяется молча: при сужении он про объект, а не про всю конфигурацию
+    assert wide["narrowed_by"] is None and wide["declaration_scope"] == "all_sources"
+    scoped = lite_server.find_routine(routine_name="ПередЗаписью", kind=kind, name=name,
+                                      max_results=50)
+    assert scoped["narrowed_by"] == f"{kind}.{name}"
+    assert scoped["declaration_scope"] == "object"
+
 
 def test_module_is_auto_picked_when_object_has_only_one(served: Workspace) -> None:
     """Пустой module = «выбери сам», если модуль один; ответ говорит, какой именно взят.
