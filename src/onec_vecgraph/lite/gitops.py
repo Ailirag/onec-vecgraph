@@ -34,7 +34,10 @@ def run_git(args: list[str], cwd: Path | None, timeout: int = _TIMEOUT) -> tuple
     env.setdefault("GCM_INTERACTIVE", "Never")
     try:
         proc = subprocess.run(
-            ["git", "-c", "core.quotepath=off", *args],
+            # safe.directory=*, как в gitview._git: рабочая копия нередко принадлежит
+            # другому пользователю (монтирование в контейнер, общий диск), и без этого
+            # git отказывает на ЛЮБОЙ команде с "dubious ownership".
+            ["git", "-c", "core.quotepath=off", "-c", "safe.directory=*", *args],
             cwd=str(cwd) if cwd is not None else None,
             capture_output=True,
             text=True,
@@ -53,14 +56,40 @@ def run_git(args: list[str], cwd: Path | None, timeout: int = _TIMEOUT) -> tuple
 
 
 def is_git_repo(root: Path) -> bool:
+    return repo_problem(root) is None
+
+
+def repo_problem(root: Path) -> str | None:
+    """Почему каталог нельзя обслуживать как git-репозиторий (None — можно).
+
+    Раньше любой отказ сворачивался в «не git-репозиторий», включая ОТСУТСТВИЕ git в PATH. На
+    боевой машине это дало 900+ часовых проходов sync с ошибкой «не git-репозиторий» по всем
+    десяти воркспейсам, хотя репозитории были целы: git просто не был в постоянном PATH, который
+    видит планировщик. Диагноз уводил в сторону — сообщение обязано называть настоящую причину."""
+    if not root.is_dir():
+        return f"каталог не найден: {root}"
     code, out = run_git(["rev-parse", "--is-inside-work-tree"], root, timeout=30)
-    return code == 0 and out.strip() == "true"
+    if code == 127:
+        return ("git не найден в PATH процесса. Под планировщиком/сервисом окружение НЕ то же, "
+                "что в интерактивной консоли: добавьте каталог git в постоянный PATH или "
+                "пропишите его в скрипте запуска.")
+    if code != 0:
+        # git ответил, но отказал. «Не репозиторий» оставляем прежней формулировкой — там она
+        # была верна; всё прочее (права, битый индекс, таймаут) отдаём как есть, не переклеивая
+        # ярлык «не репозиторий» на чужую беду.
+        low = out.lower()
+        if "not a git repository" in low or "не найден репозиторий" in low:
+            return f"не git-репозиторий: {root}"
+        return f"git отказал: {out[:200] or f'код {code}'}"
+    if out.strip() != "true":
+        return f"не git-репозиторий: {root}"
+    return None
 
 
 def status_brief(root: Path) -> dict:
     """Cheap git view for the admin table: branch, dirty flag, ahead/behind vs upstream."""
-    if not root.is_dir() or not is_git_repo(root):
-        return {"git": False}
+    if (why := repo_problem(root)) is not None:
+        return {"git": False, "reason": why}
     _c, branch = run_git(["rev-parse", "--abbrev-ref", "HEAD"], root, timeout=30)
     code, porcelain = run_git(["status", "--porcelain"], root, timeout=60)
     dirty = bool(porcelain.strip()) if code == 0 else None
@@ -76,8 +105,8 @@ def status_brief(root: Path) -> dict:
 
 def fetch(root: Path) -> dict:
     """Safe for any working copy: updates origin/* refs only, never the tree."""
-    if not is_git_repo(root):
-        return {"ok": False, "op": "fetch", "error": f"не git-репозиторий: {root}"}
+    if (why := repo_problem(root)) is not None:
+        return {"ok": False, "op": "fetch", "error": why}
     code, out = run_git(["fetch", "--prune"], root)
     if code != 0:
         return {"ok": False, "op": "fetch", "error": out or f"git fetch: код {code}"}
@@ -87,8 +116,8 @@ def fetch(root: Path) -> dict:
 
 def pull_ff(root: Path) -> dict:
     """Guarded update of a path workspace: clean tree + on-branch + fast-forward only."""
-    if not is_git_repo(root):
-        return {"ok": False, "op": "pull", "error": f"не git-репозиторий: {root}"}
+    if (why := repo_problem(root)) is not None:
+        return {"ok": False, "op": "pull", "error": why}
     code, porcelain = run_git(["status", "--porcelain"], root, timeout=60)
     if code != 0:
         return {"ok": False, "op": "pull", "error": porcelain}

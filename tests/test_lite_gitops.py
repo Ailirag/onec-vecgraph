@@ -88,7 +88,8 @@ def test_guards_nonrepo_dirty_detached(tmp_path: Path, remote_and_clone) -> None
     _bare, clone, _author = remote_and_clone
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert gitops.status_brief(plain) == {"git": False}
+    assert gitops.status_brief(plain)["git"] is False
+    assert "не git-репозиторий" in gitops.status_brief(plain)["reason"]
     assert gitops.fetch(plain)["ok"] is False
     assert "не git" in gitops.pull_ff(plain)["error"]
     # грязное дерево -> pull отменяется
@@ -230,3 +231,59 @@ def test_launcher_sync_requires_schedule() -> None:
     """Без --once/--interval/--at sync не запускается (код 2), не трогая репозитории."""
     assert launcher.main(["sync"]) == 2
     assert launcher.main(["sync", "--at", "25:00", "--once"]) == 2  # неверное время
+
+
+def test_missing_git_is_not_reported_as_missing_repo(tmp_path, monkeypatch) -> None:
+    """Отсутствие git в PATH обязано называться своим именем, а не «не git-репозиторий».
+
+    На боевой машине это дало 900+ часовых проходов sync с ошибкой «не git-репозиторий» по всем
+    десяти воркспейсам при целых репозиториях: git просто не был в постоянном PATH, который видит
+    планировщик. Диагноз уводил в сторону — я сам сначала пошёл проверять раскладку .git."""
+    from onec_vecgraph.lite import gitops
+
+    repo = tmp_path / "wc"
+    repo.mkdir()
+    monkeypatch.setattr(gitops, "run_git", lambda *a, **k: (127, "git не найден в PATH"))
+    why = gitops.repo_problem(repo)
+    assert why and "PATH" in why
+    assert "не git-репозиторий" not in why
+    assert gitops.is_git_repo(repo) is False
+    # причина доезжает до вызывающих, а не теряется по дороге
+    assert "PATH" in gitops.fetch(repo)["error"]
+    assert "PATH" in gitops.pull_ff(repo)["error"]
+    assert "PATH" in gitops.status_brief(repo)["reason"]
+
+
+def test_missing_directory_and_plain_dir_are_told_apart(tmp_path, monkeypatch) -> None:
+    """Нет каталога, есть-но-не-репозиторий и нет git — три разных сообщения."""
+    from onec_vecgraph.lite import gitops
+
+    assert "не найден" in (gitops.repo_problem(tmp_path / "нет") or "")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setattr(gitops, "run_git", lambda *a, **k: (128, "fatal: not a git repository"))
+    assert "не git-репозиторий" in (gitops.repo_problem(plain) or "")
+    # чужая беда (права, битый индекс) не переклеивается в «не репозиторий»
+    monkeypatch.setattr(gitops, "run_git", lambda *a, **k: (128, "error: index file corrupt"))
+    why = gitops.repo_problem(plain) or ""
+    assert "git отказал" in why and "index file corrupt" in why
+
+
+def test_gitops_opts_out_of_dubious_ownership(monkeypatch) -> None:
+    """run_git обязан передавать safe.directory=*, как gitview._git.
+
+    Второй git-слой этот фикс не получил: в контейнере под чужим uid sync отказывал бы на любой
+    команде, хотя gitview рядом работал."""
+    from pathlib import Path
+
+    from onec_vecgraph.lite import gitops
+
+    seen: dict[str, list[str]] = {}
+
+    class _Proc:
+        returncode, stdout, stderr = 0, "true", ""
+
+    monkeypatch.setattr(gitops.subprocess, "run",
+                        lambda argv, **kw: (seen.__setitem__("argv", argv), _Proc())[1])
+    gitops.run_git(["rev-parse", "--is-inside-work-tree"], Path("."))
+    assert "safe.directory=*" in seen["argv"]
