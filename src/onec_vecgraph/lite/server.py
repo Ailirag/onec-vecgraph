@@ -1817,10 +1817,10 @@ async def admin_page(request: Request) -> Response:
             res = fts.index_for(ws).build()
             if "error" in res:
                 return _redir("err", res["error"])
-            msg = (f"Индекс поиска: +{res['files_added']} файлов, ~{res['files_updated']} "
-                   f"обновлено, -{res['files_removed']}; юнитов записано "
-                   f"{res['units_written']} за {res['seconds']} с (всего {res.get('units')})")
-            return _redir("msg", msg)
+            # Счётчиков может не быть вовсе: сборку ведёт фоновый прогрев или другой процесс.
+            # Отчёт собирает fts.format_build_report — иначе кнопка админки отдавала бы 500
+            # (KeyError) ровно там, где индекс как раз строится.
+            return _redir("msg", f"Индекс поиска: {fts.format_build_report(res)}")
         if action == "build_help":
             cat = _help()
             if not cat.entries:

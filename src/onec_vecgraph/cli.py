@@ -256,9 +256,14 @@ def serve_lite(
         if "error" in res:
             rprint(f"[red]{res['error']}[/]")
             raise typer.Exit(code=1)
-        rprint(f"  +{res['files_added']} файлов, ~{res['files_updated']} обновлено, "
-               f"-{res['files_removed']}; юнитов записано {res['units_written']} "
-               f"за {res['seconds']} с (всего {res.get('units')})")
+        if res.get("status"):
+            # Сборку уже ведёт фоновый прогрев или другой процесс. Это не отказ: индекс
+            # строится (или уже собран) — сообщаем и идём дальше, к --check или к запуску
+            # сервера. Прерывать здесь нельзя: --build-fts стоит ПЕРЕД тем, ради чего
+            # запускали serve-lite.
+            rprint(f"  [yellow]{lite_fts.format_build_report(res)}[/]")
+        else:
+            rprint(f"  {lite_fts.format_build_report(res)}")
 
     if check:
         if ws is None:

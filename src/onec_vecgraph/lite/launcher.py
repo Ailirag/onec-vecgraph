@@ -133,6 +133,11 @@ def _refresh_index_after_pull(name: str, entry: dict, logger) -> None:
     if err := res.get("error"):
         logger.warning("%s: догон индекса: %s", name, err)
         return
+    if res.get("status"):
+        # Сборку перехватил фоновый прогрев или другой процесс — счётчиков в ответе нет, и
+        # рапорт «файлов затронуто 0» был бы неправдой о проходе, который ничего не пропустил.
+        logger.info("%s: догон индекса: %s", name, lite_fts.format_build_report(res))
+        return
     changed = sum(int(res.get(k) or 0) for k in ("files_added", "files_updated", "files_removed"))
     logger.info("%s: индекс догнан — файлов затронуто %d, за %s с", name, changed,
                 res.get("seconds", "?"))

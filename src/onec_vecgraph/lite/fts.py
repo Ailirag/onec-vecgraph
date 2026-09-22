@@ -1349,3 +1349,29 @@ def index_for(ws: Workspace) -> FtsIndex:
         idx = FtsIndex(ws)
         _INDEXES[key] = idx
     return idx
+
+
+def format_build_report(res: dict) -> str:
+    """Отчёт о сборке одной строкой — общий для `--build-fts`, кнопки админки и догона в синке.
+
+    У build() есть ШТАТНЫЕ ранние ветки без счётчиков: сборку уже ведёт фоновый прогрев (он
+    стартует при загрузке воркспейса) или вовсе другой процесс (общий каталог ~/.onec-lite/fts).
+    Вызывающие читали счётчики по индексу и проверяли только "error" — поэтому на самой большой
+    рабочей копии (bp-hr) `serve-lite --build-fts --check` падал с KeyError: 'files_added' при
+    УСПЕШНО собранном индексе: обслуживающий скрипт записал отказ, а индекс через шесть минут
+    был готов. Формат живёт здесь, чтобы ветку статусов нельзя было забыть в каждом вызывающем
+    по отдельности, а счётчики читаются через .get(): даже в обычной сборке `units`/`files`
+    подмешиваются из status(), а тот имеет свои ранние возвраты (БД занята, схема устарела)."""
+    if err := res.get("error"):
+        return str(err)
+    status = res.get("status")
+    if status == "built_by_background":
+        return (f"{res.get('note') or 'Сборку завершил фоновый прогрев.'} "
+                f"Юнитов {res.get('units', '?')}, файлов {res.get('files', '?')}.")
+    if status:
+        # Любой другой статус (сейчас это две ветки "building") — не отказ: индекс строится,
+        # просто не нами. Печатаем пояснение автора ветки, а не выдуманные нули.
+        return str(res.get("note") or f"Сборка не выполнялась (status={status}).")
+    return (f"+{res.get('files_added', 0)} файлов, ~{res.get('files_updated', 0)} обновлено, "
+            f"-{res.get('files_removed', 0)}; юнитов записано {res.get('units_written', 0)} "
+            f"за {res.get('seconds', '?')} с (всего {res.get('units')})")

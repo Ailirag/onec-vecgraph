@@ -644,3 +644,61 @@ def test_bsl_sql_truncation_is_declared(ws: Workspace) -> None:
     assert "COUNT(*)" in res["total_hint"]
     full = fts.sql_query(ws, "SELECT name FROM symbols", max_rows=500)
     assert full["truncated"] is False and full["total_hint"] is None
+
+
+def test_build_report_survives_status_only_answers(ws: Workspace) -> None:
+    """Регресс: отчёт о сборке не должен падать на ШТАТНЫХ ранних ветках build().
+
+    Когда сборку уже ведёт фоновый прогрев (он стартует при загрузке воркспейса) или другой
+    процесс, build() возвращает только `status` и `note` — без счётчиков. Вызывающие
+    (`--build-fts`, кнопка админки, догон в синке) проверяли лишь "error" и читали счётчики по
+    индексу, поэтому на самой большой рабочей копии (bp-hr) `serve-lite --build-fts --check`
+    падал с KeyError: 'files_added' — при том что индекс через шесть минут был собран.
+
+    Ответы берём у настоящего build(), а не из выдуманных словарей: иначе тест разъедется с
+    кодом ровно тогда, когда ветка изменится."""
+    idx = fts.index_for(ws)
+    assert "error" not in idx.build()  # индекс собран — как на песочнице к моменту падения
+
+    # 1. Вторым писателем не встали, дождались чужой сборки и взяли её результат.
+    with pytest.MonkeyPatch.context() as mp:   # свой контекст: фикстура ws держит свои патчи
+        mp.setattr(idx, "_try_start_build", lambda **_kw: False)
+        done = idx.build(wait=0)
+    assert done["status"] == "built_by_background" and "files_added" not in done
+    report = fts.format_build_report(done)
+    assert "фоновый прогрев" in report
+    assert str(done["units"]) in report  # доступные счётчики всё же напечатаны
+
+    # 2. Сборка идёт в этом процессе и не успела за отпущенное время.
+    idx._building = True
+    try:
+        busy = idx.build(wait=0)
+    finally:
+        idx._building = False
+    assert busy["status"] == "building" and "files_added" not in busy
+    assert fts.format_build_report(busy) == busy["note"]
+
+    # 3. Индекс строит ДРУГОЙ процесс (общий каталог ~/.onec-lite/fts).
+    handle = fts._acquire_build_lock(idx.path)
+    assert handle is not None
+    try:
+        elsewhere = idx._build_locked()
+    finally:
+        fts._release_build_lock(handle)
+    assert elsewhere["status"] == "building" and "files_added" not in elsewhere
+    assert fts.format_build_report(elsewhere) == elsewhere["note"]
+
+
+def test_build_report_keeps_counters_and_never_invents_them(ws: Workspace) -> None:
+    """Обычная сборка отчитывается счётчиками, а неполный ответ не превращается в нули.
+
+    `units`/`files` подмешиваются в отчёт из status(), у которого есть свои ранние возвраты
+    (БД занята чужой записью, схема устарела) — значит и в обычной ветке их может не быть."""
+    report = fts.format_build_report(fts.index_for(ws).build())
+    assert "юнитов записано" in report and "файлов" in report
+
+    # ветка со статусом, но без счётчиков: печатаем «?», а не выдуманный ноль
+    assert "?" in fts.format_build_report({"status": "built_by_background",
+                                           "note": "Сборку завершил фоновый прогрев."})
+    # ошибка остаётся ошибкой, а не «+0 файлов» — вызывающий не отрапортует ею об успехе
+    assert fts.format_build_report({"error": "FTS5 недоступен"}) == "FTS5 недоступен"
