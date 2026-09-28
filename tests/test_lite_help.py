@@ -51,7 +51,7 @@ def _fake_named_elements(path):
 
 
 @pytest.fixture()
-def catalog(monkeypatch: pytest.MonkeyPatch) -> ph.HelpCatalog:
+def catalog(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ph.HelpCatalog:
     def fake_resolve(entry: dict):
         key = str(entry.get("path"))
         if key not in _RESOLVED:
@@ -60,7 +60,7 @@ def catalog(monkeypatch: pytest.MonkeyPatch) -> ph.HelpCatalog:
 
     monkeypatch.setattr(ph, "_resolve_files", fake_resolve)
     monkeypatch.setattr(ph.hbk_container, "named_elements", _fake_named_elements)
-    cat = ph.HelpCatalog()
+    cat = ph.HelpCatalog(index_dir=tmp_path / "fts")
     errs = cat.configure([{"version": "", "path": "v27"}, {"version": "", "path": "v18"}])
     assert errs == []
     return cat
@@ -129,6 +129,28 @@ def test_search_titles_rank_and_version_filter(catalog: ph.HelpCatalog) -> None:
     assert res["matches"][0]["title"] == "Найти"  # startswith ранжируется выше
     v18 = catalog.search_titles("найти", platform_version="8.3.18.1289")
     assert v18["match_count"] == 1
+    assert v18["index"]["topics"] == 1  # строится только запрошенная сборка
+
+
+def test_search_uses_topic_text_and_natural_language(catalog: ph.HelpCatalog) -> None:
+    res = catalog.search_titles("как найти элемент в массиве по значению", "8.3.27.2130")
+
+    assert res["matches"][0]["title"] == "Массив.Найти"
+    assert res["matches"][0]["snippet"]
+    assert res["index"]["built_at"]
+
+    body_only = catalog.search_titles("глобальный поиск подстроки", "8.3.27.2130")
+    assert body_only["matches"][0]["title"] == "Найти"
+
+
+def test_explicit_help_build_creates_one_index_per_version(catalog: ph.HelpCatalog) -> None:
+    result = catalog.build_text_indexes()
+
+    assert result["topics"] == 4
+    assert {v["platform_version"] for v in result["versions"]} == {
+        "8.3.27.2130", "8.3.18.1289",
+    }
+    assert sorted(v["topics"] for v in result["versions"]) == [1, 3]
 
 
 def test_versions_topics_after_index(catalog: ph.HelpCatalog) -> None:

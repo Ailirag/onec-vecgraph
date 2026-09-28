@@ -225,7 +225,8 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   изменённые объекты ветки/рабочей копии, `review_set` — затронутые рутины + их callers/handlers/
   overrides; уникально для lite — big работает по снимку); **справка платформы .hbk БЕЗ векторов**
   (`platform_help.py`: `platform_docinfo/platform_search/platform_get_document/platform_versions`,
-  индекс имён ~0.9 с/25.5k тем на версию, лениво/кнопкой). **Веб-админка** `/admin` (opt-in `--admin`,
+  индекс имён ~0.9 с/25.5k тем на версию + дисковый FTS5 по полному тексту; замер 8.3.27:
+  ~6.5 с на первую сборку, инвалидация по mtime/размеру `.hbk`). **Веб-админка** `/admin` (opt-in `--admin`,
   только http): статус источников, пути base+ext+справка+**rg-override**, применение на лету без
   рестарта, персист `~/.onec-lite/config.json` (env `ONEC_LITE_STATE`), кнопки построения индексов
   (FTS/справка), `/admin.json`. CLI `serve-lite` (`--root/--ext-root/--help-path/--admin/--host/--port/
