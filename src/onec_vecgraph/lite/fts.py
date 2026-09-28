@@ -579,6 +579,21 @@ class FtsIndex:
 
     # -- status -------------------------------------------------------------
 
+    def build_in_progress(self) -> bool:
+        """Строится ли индекс в этом или другом процессе — без открытия SQLite.
+
+        Этот быстрый предикат нужен структурным инструментам: во время полной пересборки
+        таблица symbols временно пуста, и прежний фолбэк запускал многоминутный живой скан.
+        Проверка только памяти и heartbeat-файла не ждёт SQLite-lock и годится для hot path.
+        """
+        if self._building:
+            return True
+        lock = Path(str(self.path) + ".building")
+        try:
+            return lock.is_file() and time.time() - lock.stat().st_mtime <= _BUILD_LOCK_STALE
+        except OSError:
+            return False
+
     def status(self) -> dict:
         """Состояние индекса, включая идущую сборку в ДРУГОМ процессе.
 
@@ -586,16 +601,11 @@ class FtsIndex:
         коммитом — поэтому всё окно пересборки (на большой конфигурации это минуты) читатели
         видели `symbols=0` и молча уезжали в полный скан, не понимая, что индекс строится, а не
         отсутствует. Теперь это видно в ответе и в metrics."""
+        building = self.build_in_progress()
         out: dict = {"available": fts_available(), "db": str(self.path),
-                     "built": False, "building": self._building}
-        lock = Path(str(self.path) + ".building")
-        try:
-            if lock.is_file() and time.time() - lock.stat().st_mtime <= _BUILD_LOCK_STALE:
-                out["building"] = True
-                if not self._building:
-                    out["building_elsewhere"] = True  # строит другой процесс, не мы
-        except OSError:
-            pass
+                     "built": False, "building": building}
+        if building and not self._building:
+            out["building_elsewhere"] = True  # строит другой процесс, не мы
         if not self.path.is_file():
             return out
         try:

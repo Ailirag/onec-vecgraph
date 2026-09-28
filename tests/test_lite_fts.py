@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from onec_vecgraph.lite import Workspace, fts
+from onec_vecgraph.lite import server as lite_server
 
 pytestmark = pytest.mark.skipif(not fts.fts_available(), reason="sqlite3 without FTS5")
 
@@ -170,6 +171,63 @@ def test_explicit_build_yields_to_running_background(ws: Workspace) -> None:
     finally:
         idx._building = False
     assert idx.build().get("units_written", 0) >= 1  # после снятия флага сборка снова идёт
+
+
+def test_build_in_progress_is_fast_for_local_and_external_builder(ws: Workspace) -> None:
+    idx = fts.index_for(ws)
+    assert idx.build_in_progress() is False
+
+    idx._building = True
+    try:
+        assert idx.build_in_progress() is True
+    finally:
+        idx._building = False
+
+    handle = fts._acquire_build_lock(idx.path)
+    assert handle is not None
+    try:
+        assert idx.build_in_progress() is True
+    finally:
+        fts._release_build_lock(handle)
+    assert idx.build_in_progress() is False
+
+
+def test_http_prebuild_waits_for_each_workspace_before_starting_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeIndex:
+        def __init__(self, name: str):
+            self.name = name
+
+        def build(self, *, wait: float) -> dict:
+            events.append(f"build:{self.name}:{int(wait)}")
+            return {"status": "built_by_background"}
+
+    class InlineThread:
+        def __init__(self, *, target, name: str, daemon: bool):
+            self.target = target
+            assert name == "fts-prebuild" and daemon is True
+
+        def start(self) -> None:
+            self.target()
+
+    monkeypatch.setattr(lite_server, "_fts_autobuild_enabled", lambda: True)
+    monkeypatch.setattr(
+        lite_server.lite_admin, "load_workspaces",
+        lambda _path: ({"ut": {}, "bp": {}}, "ut"),
+    )
+    monkeypatch.setattr(
+        lite_server, "_ws",
+        lambda name: events.append(f"load:{name}") or name,
+    )
+    monkeypatch.setattr(lite_server.fts, "index_for", lambda name: FakeIndex(name))
+    monkeypatch.setattr(lite_server.threading, "Thread", InlineThread)
+
+    lite_server._prebuild_all_workspaces()
+
+    assert events == ["load:ut", "build:ut:3600", "load:bp", "build:bp:3600"]
 
 
 def test_fts_build_lock_is_cross_process(ws: Workspace) -> None:

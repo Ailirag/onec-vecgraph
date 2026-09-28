@@ -445,6 +445,29 @@ def test_find_overrides(edt_ws: Workspace) -> None:
     assert code_intel.find_overrides(edt_ws, method="Другое")["override_count"] == 0
 
 
+def test_find_overrides_does_not_full_scan_while_index_is_building(
+    edt_ws: Workspace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Пересборка symbols не должна превращать запрос в многоминутный полный скан."""
+    from onec_vecgraph.lite import fts
+
+    code_intel.clear_caches()
+    index = fts.index_for(edt_ws)
+    monkeypatch.setattr(index, "overrides", lambda: None)
+    monkeypatch.setattr(index, "build_in_progress", lambda: True)
+
+    def forbidden_scan(*_args, **_kwargs):
+        raise AssertionError("full override scan must not run while index is building")
+
+    monkeypatch.setattr(code_intel, "_candidate_files", forbidden_scan)
+    res = code_intel.find_overrides(edt_ws)
+
+    assert res["ready"] is False
+    assert res["reason"] == "index_building"
+    assert res["retryable"] is True
+    assert res["override_count"] is None
+
+
 def test_find_handlers_merged_across_sources(edt_ws: Workspace) -> None:
     # Без source: заимствованный объект собирается из расширения И базы (платформенный вид).
     res = code_intel.find_handlers(edt_ws, "Catalog", "Контрагенты")

@@ -292,7 +292,14 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str =
     # Полный детерминированный индекс переопределений (TTL-кэш): раньше здесь был скан с
     # обрезкой по 300 файлам в недетерминированном порядке — переопределения изменённых
     # рутин могли молча не попасть в ревью-набор.
-    all_overrides = code_intel.override_index(ws)
+    overrides_complete = True
+    try:
+        all_overrides = code_intel.override_index(ws)
+    except code_intel.OverrideIndexBuilding:
+        # Остальная часть review_set остаётся полезной, но молча считать отсутствие
+        # перехватов доказанным нельзя. Явный флаг попадёт модели вместе с результатом.
+        all_overrides = []
+        overrides_complete = False
     by_target: dict[str, list[dict]] = {}
     for o in all_overrides:
         target = (o.get("target") or "").lower()
@@ -437,5 +444,7 @@ def review_set(ws: Workspace, ref: str = "", max_callers: int = 5, source: str =
         # затронутых рутин, получив 25. Теперь два разных флага с говорящими именами.
         "window_incomplete": routines_total > len(routines) + max(0, offset),
         "safety_valve_fired": truncated,
+        "overrides_complete": overrides_complete,
+        "limitations": ([] if overrides_complete else ["override_index_building"]),
         "routines": routines,
     }

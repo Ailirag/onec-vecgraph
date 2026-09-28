@@ -1864,8 +1864,9 @@ async def admin_json(request: Request) -> Response:
 def _prebuild_all_workspaces() -> None:
     """HTTP shared-сервис: фоново прогреть FTS-индексы всех сконфигурированных воркспейсов,
     чтобы первый запрос любого tenant'а не упирался в «индекс ещё строится». Один фоновый
-    поток последовательно грузит воркспейсы; сборка каждого идёт в своём потоке (по одному
-    писателю на воркспейс). Отключить: ONEC_LITE_FTS_AUTOBUILD=off."""
+    поток ПОСЛЕДОВАТЕЛЬНО собирает воркспейсы: прежний код запускал из `_ws` отдельный поток
+    на каждый индекс и фактически перестраивал все многогигабайтные БД одновременно.
+    Отключить: ONEC_LITE_FTS_AUTOBUILD=off."""
     if not _fts_autobuild_enabled():
         return
 
@@ -1876,7 +1877,14 @@ def _prebuild_all_workspaces() -> None:
             names = [default_workspace_name()]
         for name in names:
             try:
-                _ws(name)  # загрузка + update_on_start + _maybe_build_fts (прогрев индекса)
+                ws = _ws(name)  # загрузка запускает background build этого workspace
+                # Дожидаемся его здесь, прежде чем переходить к следующему workspace.
+                # Сам MCP уже обслуживает запросы; это блокирует только prebuild-поток.
+                result = fts.index_for(ws).build(wait=3600)
+                if result.get("error") or result.get("status") == "building":
+                    logging.getLogger(__name__).warning(
+                        "fts prebuild: воркспейс %s не готов: %s", name, result,
+                    )
             except Exception:  # noqa: BLE001 — один плохой воркспейс не срывает прогрев прочих
                 logging.getLogger(__name__).exception("fts prebuild: воркспейс %s", name)
 

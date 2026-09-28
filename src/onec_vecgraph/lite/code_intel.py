@@ -1179,6 +1179,10 @@ _OVERRIDE_INDEX_TTL = 60.0  # с: полный скан переопределе
 _OVERRIDE_INDEX: dict[str, tuple[float, list[dict]]] = {}
 
 
+class OverrideIndexBuilding(RuntimeError):
+    """Полный индекс override-хуков временно недоступен из-за пересборки."""
+
+
 def override_index(ws: Workspace, source: str = "") -> list[dict]:
     """ВСЕ переопределения расширений — полный детерминированный список, TTL-кэш.
 
@@ -1196,7 +1200,15 @@ def override_index(ws: Workspace, source: str = "") -> list[dict]:
     # полного текстового скана расширений с повторным разбором модулей.
     try:
         from . import fts as _fts
-        indexed = _fts.index_for(ws).overrides()
+        index = _fts.index_for(ws)
+        indexed = index.overrides()
+        if indexed is None and index.build_in_progress():
+            # Не уходим в полный обход десятков тысяч файлов: фильтры kind/name/method
+            # применяются лишь ПОСЛЕ него и не сокращают стоимость. Агент получит явный
+            # retryable-ответ и сможет продолжить остальной анализ или повторить позднее.
+            raise OverrideIndexBuilding
+    except OverrideIndexBuilding:
+        raise
     except Exception:  # noqa: BLE001 — падение индекса не должно ломать ответ
         indexed = None
     if indexed is not None:
@@ -1260,8 +1272,20 @@ def find_overrides(
     want_obj = f"{kind}.{name}".lower() if kind and name else ""
     want_kind = f"{kind}.".lower() if kind and not name else ""
     method_low = method.lower()
+    try:
+        all_rows = override_index(ws, source)
+    except OverrideIndexBuilding:
+        return {
+            "ready": False,
+            "reason": "index_building",
+            "retryable": True,
+            "override_count": None,
+            "overrides": [],
+            "note": ("Индекс переопределений перестраивается. Полный живой скан намеренно "
+                     "не запущен; повторите find_overrides после завершения сборки."),
+        }
     rows = [
-        r for r in override_index(ws, source)
+        r for r in all_rows
         if (not want_obj or (r.get("object") or "").lower() == want_obj)
         and (not want_kind or (r.get("object") or "").lower().startswith(want_kind))
         and (not method_low or method_low in ((r.get("target") or "").lower(),
