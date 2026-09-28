@@ -77,6 +77,7 @@ def two_repos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Pa
     monkeypatch.setattr(lite_server, "_WORKSPACES", {})
     monkeypatch.setattr(lite_server, "_HELP", ph.HelpCatalog())
     monkeypatch.setattr(lite_server, "_HELP_INIT", True)
+    monkeypatch.setattr(lite_server, "_HELPS", {})
     a = _repo(tmp_path / "repo_a", "А_Товары", "МетодА", "aa")
     b = _repo(tmp_path / "repo_b", "Б_Партнеры", "МетодБ", "bb")
     return a, b
@@ -94,6 +95,7 @@ def test_v1_state_migrates_to_default_workspace(tmp_path: Path) -> None:
     assert set(wss) == {"default"}
     d = wss["default"]
     assert d["root"] == "H:\\ut" and d["ext_roots"] == ["D:\\ext"]
+    assert d["bsp_roots"] == [] and d["platform_help"] == []
     assert d["repo"] == "" and d["update_on_start"] == "off"  # дефолты новых полей
     assert active == "default"
     # legacy-шимы работают поверх v2
@@ -299,6 +301,32 @@ def test_fts_per_workspace(two_repos: tuple[Path, Path]) -> None:
     hits_b = lite_server.fts_search("МетодА", workspace="b")
     assert any(r["title"] == "МетодА" for r in hits_a["results"])
     assert all(r["title"] != "МетодА" for r in hits_b["results"])
+
+
+def test_bsp_corpus_is_search_only_and_per_workspace(
+    two_repos: tuple[Path, Path], tmp_path: Path,
+) -> None:
+    """БСП попадает в FTS выбранного проекта, но не в его модель метаданных."""
+    if not lite_fts.fts_available():
+        pytest.skip("FTS5 недоступен в этой сборке sqlite3")
+    a, b = two_repos
+    bsp = _repo(tmp_path / "bsp", "СлужебныйСправочникБСП", "МетодБСП", "cc")
+    state = lite_admin.state_file()
+    lite_admin.upsert_workspace(state, "a", str(a), [], bsp_roots=[str(bsp)])
+    lite_admin.upsert_workspace(state, "b", str(b), [])
+
+    ws_a = lite_server._ws("a")  # noqa: SLF001
+    ws_b = lite_server._ws("b")  # noqa: SLF001
+    assert [s.name for s in ws_a.sources] == ["ТестБаза"]
+    assert [s.name for s in ws_a.bsp_sources] == ["БСП:ТестБаза"]
+    assert "error" not in lite_fts.index_for(ws_a).build()
+    assert "error" not in lite_fts.index_for(ws_b).build()
+    assert any(r["title"] == "МетодБСП"
+               for r in lite_server.fts_search("МетодБСП", workspace="a")["results"])
+    assert all(r["title"] != "МетодБСП"
+               for r in lite_server.fts_search("МетодБСП", workspace="b")["results"])
+    assert lite_server.list_objects("Catalog", workspace="a")["objects"][0]["name"] \
+        != "СлужебныйСправочникБСП"
 
 
 def test_launcher_workspace_flag(two_repos: tuple[Path, Path],

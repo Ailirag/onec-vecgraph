@@ -78,9 +78,14 @@ def _discover_root(root: Path) -> list[LiteSource]:
 class Workspace:
     """A set of sources (base + extensions) with cached listings and object parsing."""
 
-    def __init__(self, root: str | Path, ext_roots: tuple[str | Path, ...] = ()) -> None:
+    def __init__(self, root: str | Path, ext_roots: tuple[str | Path, ...] = (),
+                 bsp_roots: tuple[str | Path, ...] = ()) -> None:
         self.root = Path(root)
         self.ext_roots = tuple(str(p) for p in ext_roots)  # as configured (admin prefill)
+        # BSP roots are search-only corpora.  They deliberately do not participate in
+        # metadata resolution: a library configuration must help fts_search without
+        # making get_object/find_callers silently resolve objects from another project.
+        self.bsp_roots = tuple(str(p) for p in bsp_roots)
         found: list[LiteSource] = _discover_root(self.root)
         for extra in ext_roots:
             found.extend(_discover_root(Path(extra)))
@@ -97,11 +102,31 @@ class Workspace:
             )
         self._by_name = {s.name.lower(): s for s in self.sources}
 
+        bsp_found: list[LiteSource] = []
+        for extra in bsp_roots:
+            bsp_found.extend(_discover_root(Path(extra)))
+        used = {s.name.lower() for s in self.sources}
+        self.bsp_sources: list[LiteSource] = []
+        for s in sorted(bsp_found, key=lambda item: item.name.lower()):
+            base = f"БСП:{s.name}"
+            name = base
+            suffix = 2
+            while name.lower() in used:
+                name = f"{base}#{suffix}"
+                suffix += 1
+            used.add(name.lower())
+            self.bsp_sources.append(LiteSource(name=name, fmt=s.fmt, part=s.part))
+
         self._listing: dict[str, tuple[float, list[ObjectRef]]] = {}
         self._by_kind_name: dict[str, dict[tuple[str, str], ObjectRef]] = {}
         self._objects: dict[tuple[str, str], tuple[float, MetaObject]] = {}
         self._bsl: dict[str, tuple[float, list[Path]]] = {}
         self._names: dict[str, tuple[float, dict[str, list[tuple[str, str]]]]] = {}
+
+    @property
+    def fts_sources(self) -> list[LiteSource]:
+        """Project sources plus optional BSP corpora used only by the search index."""
+        return [*self.sources, *self.bsp_sources]
 
     # ------------------------------------------------------------------ sources
 
@@ -118,7 +143,7 @@ class Workspace:
     def source_of_path(self, abs_path: Path) -> tuple[str, str]:
         """Map an absolute path back to (source name, path relative to its files_root)."""
         best: tuple[int, LiteSource] | None = None
-        for s in self.sources:
+        for s in self.fts_sources:
             root = str(s.files_root)
             ap = str(abs_path)
             if ap.startswith(root) and (best is None or len(root) > best[0]):
