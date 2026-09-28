@@ -75,7 +75,9 @@ def test_fts_query_builder() -> None:
     # усечение на 2 символа: префикс «себестоимос» матчит и «…ость», и «…ости»
     assert '("себестоимость" OR "себестоимос"*)' in q
     assert '("считается" OR "считает"*)' in q
-    assert '"где"' in q  # короткие токены — как есть
+    assert '"где"' not in q  # вопросительное слово не размывает кандидатов
+    assert fts._fts_query("где") == '"где"'  # запрос из одних stop words не пустой
+    assert '"не"' in fts._fts_query("как не проводить")  # отрицание меняет смысл
     assert fts._fts_query("") == ""
 
 
@@ -102,6 +104,26 @@ def test_build_search_rank_and_freshness(ws: Workspace) -> None:
     # карточка объекта находится по синониму реквизита
     obj = idx.search("плановая себестоимость", unit="object")
     assert obj["results"] and obj["results"][0]["title"] == "Catalog.Номенклатура"
+
+
+def test_exact_owner_method_beats_a_routine_that_only_mentions_it(ws: Workspace) -> None:
+    module = ws.root / "conf" / "src" / "CommonModules" / "РасчетЗатрат" / "Module.bsl"
+    module.write_text(_COMMON_BSL + """
+
+Процедура ПроверитьПараметрыОжидатьЗавершение()
+    // Упоминаем РасчетЗатрат.ОжидатьЗавершение, но это другая процедура.
+КонецПроцедуры
+
+// Ожидает завершение расчета.
+Процедура ОжидатьЗавершение() Экспорт
+КонецПроцедуры
+""", encoding="utf-8")
+    idx = fts.index_for(ws)
+    idx.build()
+
+    result = idx.search("РасчетЗатрат.ОжидатьЗавершение", limit=5)
+
+    assert result["results"][0]["title"] == "ОжидатьЗавершение"
 
 
 def test_incremental_update_and_delete(ws: Workspace) -> None:

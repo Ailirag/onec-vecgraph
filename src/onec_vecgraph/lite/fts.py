@@ -2,8 +2,9 @@
 
 Opt-in layer between substring rg and the big server's vectors: units are BSL routines
 (title = routine, tokens = CamelCase sub-words via the shared `chunking.search_tokens`,
-body = source) and object cards (name/synonym/attribute names). BM25 column weights
-favour identifier hits over body mentions; Cyrillic query tokens get a trimmed prefix
+documentation = the comment header, body = source) and object cards (name/synonym/attribute
+names). BM25 column weights favour identifier/documentation hits over body mentions;
+Cyrillic query tokens get a trimmed prefix
 alternative («себестоимости» ↔ «Себестоимость» без стеммера).
 
 Consistency by design:
@@ -33,10 +34,11 @@ from pathlib import Path
 
 from ..chunking import search_tokens
 from . import admin as lite_admin
-from . import code_intel
+from . import code_intel, text_search
 from .workspace import LiteSource, Workspace, read_text
 
-_SCHEMA_VERSION = 8  # v8: исправлен разбор — конец рутины после `;` и многострочный
+_SCHEMA_VERSION = 9  # v9: documentation is a separately weighted FTS column
+# v8: исправлен разбор — конец рутины после `;` и многострочный
 # литерал с закомментированным продолжением (парсер терял рутины ЦЕЛИКОМ, а их тело
 # приписывалось предыдущей); инкремент по mtime сам бы это не пересобрал — файлы не менялись
 # v7: calls хранит КАЖДОЕ вхождение вызова (парсер больше не схлопывает
@@ -50,7 +52,6 @@ _SCHEMA_VERSION = 8  # v8: исправлен разбор — конец рут
 _REFRESH_TTL = 30.0  # seconds between implicit mtime rescans on search
 _BODY_CAP = 40_000  # предел текста юнита (по замеру критика на 20k молча обрезалось 873 юнита)
 _DOC_HEAD_LINES = 40  # сколько строк «шапки» над объявлением берём в юнит (док-комментарий)
-_CYR = re.compile(r"[а-яё]", re.IGNORECASE)
 _BUILD_LOCK_STALE = 120.0  # сек без «касания» лока -> процесс-владелец умер, лок забираем
 _LOCK_HEARTBEAT = 20.0     # сек: как часто живая сборка обновляет mtime своего лока
 _BUILD_WAIT = 900.0  # сек: сколько синхронный build() ждёт уже идущую сборку
@@ -337,7 +338,7 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
         DROP TABLE IF EXISTS calls;
         DROP TABLE IF EXISTS symbols;
         CREATE VIRTUAL TABLE units USING fts5(
-            title, tokens, body,
+            title, tokens, documentation, body,
             display UNINDEXED, unit UNINDEXED, source UNINDEXED, object UNINDEXED,
             path UNINDEXED, line UNINDEXED,
             tokenize='unicode61 remove_diacritics 2'
@@ -394,10 +395,11 @@ def _bsl_units(ws: Workspace, src: LiteSource, path: Path) -> list[tuple]:
         # запросов «где считается X». Раньше индексировалось только тело, и 13.8% строк модуля
         # (в первую очередь эти комментарии) не искались вообще.
         head_from = max(prev_end, rt.start_line - 1 - _DOC_HEAD_LINES)
-        body = "\n".join(lines[head_from: rt.end_line])[:_BODY_CAP]
+        documentation = "\n".join(lines[head_from: rt.start_line - 1])[:_BODY_CAP]
+        body = "\n".join(lines[rt.start_line - 1: rt.end_line])[:_BODY_CAP]
         tokens = search_tokens(rt.name, descr.get("object"), descr.get("module"), rt.region)
         rows.append((
-            search_tokens(rt.name), tokens, body,
+            search_tokens(rt.name), tokens, documentation, body,
             rt.name, "routine", src_name, descr.get("object", ""), rel, rt.start_line,
         ))
         prev_end = rt.end_line
@@ -455,7 +457,7 @@ def _object_units(ws: Workspace, src: LiteSource, ref) -> list[tuple]:
         token_srcs += [v.name, v.synonym]
     _src_name, rel = ws.source_of_path(meta)
     return [(
-        search_tokens(obj.kind, obj.name, obj.synonym), search_tokens(*token_srcs),
+        search_tokens(obj.kind, obj.name, obj.synonym), search_tokens(*token_srcs), obj.synonym or "",
         "\n".join(p for p in parts if p)[:_BODY_CAP],
         fqn, "object", src.name, fqn, rel, 1,
     )]
@@ -772,8 +774,8 @@ class FtsIndex:
                 written = 0
                 for row in rows:
                     cur = con.execute(
-                        "INSERT INTO units(title, tokens, body, display, unit, source,"
-                        " object, path, line) VALUES(?,?,?,?,?,?,?,?,?)", row,
+                        "INSERT INTO units(title, tokens, documentation, body, display, unit, source,"
+                        " object, path, line) VALUES(?,?,?,?,?,?,?,?,?,?)", row,
                     )
                     con.execute("INSERT INTO unit_map(path, rowid_ref) VALUES(?,?)",
                                 (key, cur.lastrowid))
@@ -1013,20 +1015,30 @@ class FtsIndex:
             if source:
                 where += " AND source = ?"
                 args.append(source)
-            args.append(max(1, limit))
-            args.append(max(0, offset))
+            where_args = list(args)
+            # BM25 first narrows the corpus; the deterministic second pass needs a wider window
+            # to reward exact FQN/title hits and candidates covering more meaningful query terms.
+            # Deep pagination keeps the old direct path instead of reading an unbounded prefix.
+            rerank = max(0, offset) < 1000
+            fetch_limit = min(2000, max(50, (max(0, offset) + max(1, limit)) * 8))
+            args.append(fetch_limit if rerank else max(1, limit))
+            args.append(0 if rerank else max(0, offset))
             rows = con.execute(
                 "SELECT display, unit, source, object, path, line,"
-                "       snippet(units, 2, '[', ']', '…', 12) AS snip,"
-                "       bm25(units, 10.0, 5.0, 1.0) AS rank"
+                "       snippet(units, -1, '[', ']', '…', 12) AS snip,"
+                "       bm25(units, 12.0, 6.0, 4.0, 1.0) AS rank,"
+                "       title, tokens, documentation, body"
                 f" FROM units WHERE {where} ORDER BY rank LIMIT ? OFFSET ?",
                 args,
             ).fetchall()
+            if rerank:
+                rows.sort(key=lambda row: _fts_rerank_key(row, query), reverse=True)
+                rows = rows[max(0, offset): max(0, offset) + max(1, limit)]
             built_at = dict(con.execute("SELECT key, value FROM meta")).get("built_at")
             # Полный счёт совпадений: без него `match_count` читался как «столько и есть», хотя
             # это лишь размер окна (limit). Тот же MATCH и те же фильтры, без ORDER BY/LIMIT.
             total = con.execute(f"SELECT count(*) FROM units WHERE {where}",
-                                args[:-2]).fetchone()[0]
+                                where_args).fetchone()[0]
             # Файлы юнитов сверяем с индексом: путь и строка могли уехать после правки, и
             # выдавать их как факт нельзя — остальные тулы такую сверку уже делают.
             idx_mtimes = dict(con.execute("SELECT path, mtime FROM files"))
@@ -1331,21 +1343,33 @@ class FtsIndex:
 
 
 def _fts_query(query: str) -> str:
-    """User text -> FTS5 MATCH: CamelCase-подслова, кириллице добавляется усечённый
-    префикс-вариант («себестоимости» -> (себестоимости OR себестоимост*))."""
-    tokens = search_tokens(query).split()
-    parts: list[str] = []
-    for tok in tokens:
-        safe = tok.replace('"', " ").strip()
-        if not safe:
-            continue
-        if _CYR.search(safe) and len(safe) >= 6:
-            parts.append(f'("{safe}" OR "{safe[:-2]}"*)')
-        else:
-            parts.append(f'"{safe}"')
-    # OR + BM25: юниты с бОльшим числом совпавших термов ранжируются выше сами, а
-    # AND-семантика губит NL-запросы («где считается X» — слова «где» в коде нет).
-    return " OR ".join(parts)
+    """Compatibility wrapper; shared with platform-help FTS in ``text_search``."""
+    return text_search.fts_query(query)
+
+
+def _fts_rerank_key(row: tuple, query: str) -> tuple:
+    """Stable, non-ML second-stage key over a BM25 candidate window.
+
+    Exact ``Owner.Method`` and method-name queries must beat routines merely mentioning the
+    method.  Natural-language queries prefer candidates covering more significant terms and
+    terms present in the documentation header, then fall back to the original BM25 score.
+    """
+    display = str(row[0] or "")
+    owner = str(row[3] or "")
+    q = query.strip().lower()
+    title = display.lower()
+    owner_low = owner.lower()
+    owner_short = owner_low.split(".", 1)[-1]
+    full_names = {title, f"{owner_low}.{title}", f"{owner_short}.{title}"}
+    exact_full = int(q in full_names)
+    exact_title = int(q.rsplit(".", 1)[-1] == title)
+
+    terms = text_search.query_terms(query)
+    coverage = text_search.term_coverage(terms, row[8], row[9], row[10], row[11])
+    documentation_hits = text_search.term_coverage(terms, row[10])
+    title_hits = text_search.term_coverage(terms, row[8], row[9])
+    bm25_score = -float(row[7] or 0.0)  # SQLite: lower rank is better.
+    return exact_full, exact_title, coverage, documentation_hits, title_hits, bm25_score
 
 
 # Per-workspace index cache (keyed by root; the Workspace object may be re-created).

@@ -1617,9 +1617,11 @@ def platform_get_document(name: str, platform_version: str = "") -> dict:
 
 @_tool
 def platform_search(query: str, platform_version: str = "", limit: int = 20) -> dict:
-    """Поиск по НАЗВАНИЯМ тем справки (подстрока, RU/EN) — навигация по API платформы.
+    """Ранжированный FTS5-поиск по названиям RU/EN и полному тексту тем справки.
 
-    Семантический поиск по содержимому справки — у большого onec-vecgraph сервера."""
+    platform_version сужает выдачу до точной сборки. Индекс содержимого .hbk строится
+    лениво и сохраняется рядо с индексами onec-lite. Это лексический поиск; синонимию
+    без общих слов по-прежнему ловит только большой onec-vecgraph."""
     return _help().search_titles(query, platform_version, limit)
 
 
@@ -1825,11 +1827,12 @@ async def admin_page(request: Request) -> Response:
             cat = _help()
             if not cat.entries:
                 return _redir("err", "Сначала задайте и примените пути к справке.")
-            from time import perf_counter
-
-            t0 = perf_counter()
-            topics = len(cat.index())
-            return _redir("msg", f"Индекс справки построен: {topics} тем за {perf_counter() - t0:.1f} с")
+            result = cat.build_text_indexes()
+            return _redir(
+                "msg",
+                f"Индексы справки построены: {result['topics']} тем, "
+                f"{len(result['versions'])} сборок за {result['seconds']:.1f} с",
+            )
         name = str(form.get("ws_name") or "").strip() or sel
         _snap, err = apply_admin_paths(
             str(form.get("root") or ""),
