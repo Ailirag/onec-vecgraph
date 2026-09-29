@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Eliminates the common START-OF-SESSION errors before index/callgraph/vectorize/ingest:
-    - uv not on PATH (fresh shell)      -> prepend D:\tools\uv
+    - uv not on PATH (fresh shell)      -> discover it in PATH / user-local bin
     - console codepage (Cyrillic mojibake) -> UTF-8 + PYTHONUTF8
     - HF model cache                    -> HF_HOME
     - empty .venv in a git worktree     -> uv sync --frozen
@@ -27,16 +27,20 @@
 
 .PARAMETER SkipSync
   Skip uv sync (when you are sure .venv is already populated).
+
+.PARAMETER UvDir
+  Optional machine-local directory containing uv.exe when it is not on PATH.
+
+.PARAMETER HfHome
+  Optional machine-local HuggingFace cache directory. Empty keeps the library default.
 #>
 [CmdletBinding()]
 param(
     [switch]$StartNeo4j,
-    [switch]$SkipSync
+    [switch]$SkipSync,
+    [string]$UvDir = "",
+    [string]$HfHome = ""
 )
-
-# Paths on this machine (Windows, everything on drive D). Adjust here if the env moves.
-$UvDir  = 'D:\tools\uv'
-$HfHome = 'D:\tools\hf-cache'
 
 $issues = @()
 function Test-Uv { [bool](Get-Command uv -ErrorAction SilentlyContinue) }
@@ -44,12 +48,20 @@ function Test-Uv { [bool](Get-Command uv -ErrorAction SilentlyContinue) }
 # 1) uv on PATH
 if (Test-Uv) {
     Write-Host '[ok]  uv on PATH'
-} elseif (Test-Path (Join-Path $UvDir 'uv.exe')) {
-    $env:Path = "$UvDir;$env:Path"
-    Write-Host "[fix] uv prepended to PATH from $UvDir"
 } else {
-    $issues += "uv not found on PATH or in $UvDir -- install uv or edit `$UvDir in this script."
-    Write-Host '[!!]  uv not found'
+    $uvCandidates = @()
+    if ($UvDir) { $uvCandidates += $UvDir }
+    $uvCandidates += (Join-Path ([string]$env:USERPROFILE) '.local\bin')
+    $foundUvDir = @($uvCandidates | Where-Object {
+        $_ -and (Test-Path -LiteralPath (Join-Path $_ 'uv.exe') -PathType Leaf)
+    } | Select-Object -First 1)
+    if ($foundUvDir.Count -gt 0) {
+        $env:Path = "$($foundUvDir[0]);$env:Path"
+        Write-Host "[fix] uv prepended to PATH from $($foundUvDir[0])"
+    } else {
+        $issues += 'uv not found -- install it (`winget install astral-sh.uv`) or pass -UvDir.'
+        Write-Host '[!!]  uv not found'
+    }
 }
 
 # 2) UTF-8 console (Cyrillic output; data in Neo4j/JSON is correct regardless)
@@ -58,9 +70,13 @@ $OutputEncoding = [Text.Encoding]::UTF8
 $env:PYTHONUTF8 = '1'
 Write-Host '[ok]  console UTF-8 + PYTHONUTF8=1'
 
-# 3) HF cache for embedding models
-if (-not $env:HF_HOME) { $env:HF_HOME = $HfHome }
-Write-Host "[ok]  HF_HOME=$env:HF_HOME"
+# 3) HF cache for embedding models. Empty means the library's user-profile default.
+if ($HfHome) { $env:HF_HOME = [System.IO.Path]::GetFullPath($HfHome) }
+if ($env:HF_HOME) {
+    Write-Host "[ok]  HF_HOME=$env:HF_HOME"
+} else {
+    Write-Host '[ok]  HF_HOME uses the library default (set env or pass -HfHome to override)'
+}
 
 # 4) .venv populated (a fresh git worktree has an empty .venv -> 'program not found')
 if (-not $SkipSync -and (Test-Uv)) {

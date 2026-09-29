@@ -19,9 +19,12 @@ description: >-
 **Рецепты векторизации корпусов знаний** (ИТС по конфигурации / стандарты разработки v8std / справка платформы по версии) — agent-runnable план, запуск в контейнере, верификация, ошибка «владельцы без чанков»: [docs/VECTORIZATION_GUIDE.md](../../../docs/VECTORIZATION_GUIDE.md).
 
 ## Старт сессии (выполни ПЕРВЫМ — иначе типовые ошибки окружения)
-Свежая сессия PowerShell не настроена (uv не в PATH, консоль cp1251, кеш моделей не задан), а env между вызовами инструментов **не сохраняется** → добавляй префикс в **каждую** команду `uv …`:
+Сначала проверь `uv` в PATH. Пути к `uv` и кешам принадлежат машине; не фиксируй
+их в репозитории. Если владелец машины использует нестандартные каталоги, он задаёт
+`UV_CACHE_DIR`/`HF_HOME` вне Git. Env между вызовами инструментов **не сохраняется**,
+поэтому добавляй нейтральный префикс в команды `uv …`:
 ```powershell
-$env:Path="D:\tools\uv;$env:Path"; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $env:PYTHONUTF8='1'; $env:HF_HOME='D:\tools\hf-cache'
+Get-Command uv -ErrorAction Stop | Out-Null; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $env:PYTHONUTF8='1'
 ```
 В **git-worktree** `.venv` свой и часто пуст → `program not found`; лечить `uv sync --frozen`. Интерактивно можно один раз прогнать предполёт: `. .\scripts\preflight.ps1 -StartNeo4j`.
 **Полная таблица «симптом → причина → фикс» (uv/кодировка/torch-exit/docker/pytest/VRAM):** [docs/SESSION_BOOTSTRAP.md](../../../docs/SESSION_BOOTSTRAP.md) — открой при любой непонятной ошибке старта.

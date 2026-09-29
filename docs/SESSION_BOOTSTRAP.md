@@ -4,22 +4,23 @@
 Прочитай это первым, если собираешься запускать CLI. Сами операции — в
 [OPERATOR_PLAYBOOK.md](OPERATOR_PLAYBOOK.md). Инварианты/состояние — в [STATE.md](STATE.md).
 
-Среда этого проекта: **Windows + PowerShell, всё на диске D**, `uv`, Neo4j в Docker.
+Среда проекта: **Windows + PowerShell**, `uv`, Neo4j в Docker. Пути к инструментам
+и кешам принадлежат машине и в Git не фиксируются.
 
 ---
 
 ## 1. Однострочный префикс (главное средство от ошибок)
 
-Окружение свежей сессии PowerShell **не настроено**: `uv` не в PATH, консоль в cp1251,
-не задан кеш моделей. Внутри инструментов агента переменные окружения **не сохраняются
-между вызовами** — поэтому добавляй этот префикс в **КАЖДУЮ** команду `uv …`:
+Окружение свежей сессии PowerShell может быть не настроено: сначала проверь `uv`
+в PATH и кодировку. Внутри инструментов агента переменные окружения **не сохраняются
+между вызовами** — поэтому добавляй этот нейтральный префикс в команды `uv …`:
 
 ```powershell
-$env:Path="D:\tools\uv;$env:Path"; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $env:PYTHONUTF8='1'; $env:HF_HOME='D:\tools\hf-cache'
+Get-Command uv -ErrorAction Stop | Out-Null; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $env:PYTHONUTF8='1'
 ```
 
-Что он чинит: `uv` в PATH · кириллица в выводе (UTF-8) · кеш HF-моделей (чтобы модель
-не качалась повторно).
+Что он проверяет/чинит: наличие `uv` · кириллица в выводе (UTF-8). Нестандартные
+каталоги кешей задаются на машине через `UV_CACHE_DIR` и `HF_HOME`, не в проекте.
 
 ## 2. Один раз за сессию — предполётная проверка
 
@@ -30,8 +31,10 @@ $env:Path="D:\tools\uv;$env:Path"; [Console]::OutputEncoding=[Text.Encoding]::UT
 . .\scripts\preflight.ps1 -StartNeo4j  # + поднять Neo4j
 ```
 
-Скрипт настраивает PATH/UTF-8/HF_HOME, доустанавливает `.venv` при необходимости,
+Скрипт обнаруживает uv/настраивает UTF-8, доустанавливает `.venv` при необходимости,
 проверяет связность Neo4j и печатает итог (`Preflight OK` либо список проблем).
+Для нестандартных путей доступны `-UvDir` и `-HfHome`; они действуют только в
+текущем процессе.
 Вывод скрипта намеренно на английском и ASCII — PowerShell 5.1 читает `.ps1` в cp1251
 без BOM, поэтому кириллица в коде скрипта сломала бы парсинг (см. таблицу ниже).
 
@@ -56,7 +59,7 @@ uv sync               # если lock устарел (нужна сеть)
 
 | Симптом | Причина | Фикс |
 |---|---|---|
-| `program not found` / `uv не распознан` | `uv` не в PATH (свежая сессия) | префикс п.1 или `. .\scripts\preflight.ps1` |
+| `program not found` / `uv не распознан` | `uv` не в PATH (свежая сессия) | установить `winget install astral-sh.uv`, обновить shell или передать `preflight.ps1 -UvDir <путь>` |
 | `pytest`/`onec-vecgraph` → `program not found`, хотя `uv` есть | пустой/несинхр. `.venv` (git-worktree) | `uv sync --frozen` (см. п.3) |
 | Кракозябры вместо кириллицы | консоль в cp1251 | UTF-8 из префикса п.1. Это **только отображение** — в Neo4j/JSON данные верны; для проверки пиши результат в JSON и читай файл |
 | `.ps1` не парсится, «Unexpected token» на русских словах | PowerShell 5.1 читает `.ps1` как cp1251 без BOM | держи скрипты в ASCII **или** сохраняй `.ps1` с UTF-8 BOM (`Out-File -Encoding utf8`) |
@@ -67,7 +70,7 @@ uv sync               # если lock устарел (нужна сеть)
 | Docker не подхватил новые env | `docker compose up -d` не пересоздаёт контейнер при смене env | `docker compose up -d --force-recreate` |
 | Осиротевший `python` держит VRAM | зависший фоновый прогон | убить процесс через Task Manager (из неэлевированной сессии возможен Access denied) |
 | `vector.similarity.cosine` падает | Neo4j < 5.18 (точный фильтрованный поиск) | на 5.26 ок; на старых — только индексный путь |
-| Первый `vectorize`/`docinfo` долго «молчит» | качается модель (~1.2 ГБ) в `HF_HOME` | подождать; кеш `D:\tools\hf-cache` переиспользуется (см. п.1) |
+| Первый `vectorize`/`docinfo` долго «молчит» | качается модель (~1.2 ГБ) в пользовательский кеш или `HF_HOME` | подождать; при нехватке места задать машинный `HF_HOME` вне Git |
 | Пустой результат поиска/графа вызовов | слой не построен для тенанта (а не «не найдено») | `uv run onec-vecgraph metrics --tenant-id <t>` — есть ли chunks/routines |
 | OOM на GPU при `vectorize` | длинные последовательности/большой батч | `EMBEDDING_MAX_SEQ_LENGTH=256` + меньше `EMBEDDING_BATCH_SIZE` (`expandable_segments` на Windows игнорируется) |
 

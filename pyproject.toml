@@ -57,9 +57,6 @@ python_version = "3.12"
 ignore_missing_imports = true
 
 [tool.uv]
-# Keep uv's cache on disk D (project convention).
-cache-dir = "D:/tools/uv/cache"
-
 # PyTorch CUDA 12.8 wheels (Blackwell / RTX 50xx). Used by the 'local-embeddings' extra:
 #   uv sync --extra local-embeddings
 [[tool.uv.index]]

@@ -12,9 +12,13 @@
 - Окружение: Windows + PowerShell; `uv` для запуска; Neo4j через `docker compose`.
 
 ## Старт сессии (выполни ПЕРВЫМ — снимает типовые ошибки окружения)
-Свежая сессия не настроена (uv не в PATH, консоль cp1251, кеш моделей), env между вызовами не сохраняется → префикс в **каждую** команду `uv …`:
+Проверь, что `uv` доступен через PATH, затем настрой кодировку текущего процесса. Не
+записывай в репозиторий путь к `uv`, Python или кешу моделей: это настройки машины.
+Если кеш должен лежать не в стандартном профиле пользователя, владелец машины задаёт
+`UV_CACHE_DIR` и `HF_HOME` вне Git. Для вызовов агента, где env не сохраняется, нужен
+нейтральный префикс:
 ```powershell
-$env:Path="D:\tools\uv;$env:Path"; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $env:PYTHONUTF8='1'; $env:HF_HOME='D:\tools\hf-cache'
+Get-Command uv -ErrorAction Stop | Out-Null; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $env:PYTHONUTF8='1'
 ```
 В git-worktree `.venv` свой и часто пуст (`program not found`) → `uv sync --frozen`. Интерактивно: `. .\scripts\preflight.ps1 -StartNeo4j`.
 **Таблица «симптом → причина → фикс» — [docs/SESSION_BOOTSTRAP.md](docs/SESSION_BOOTSTRAP.md)** (открой при любой ошибке старта).
