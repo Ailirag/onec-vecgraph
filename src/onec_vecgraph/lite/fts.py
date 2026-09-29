@@ -163,7 +163,7 @@ def _source_fingerprint(ws: Workspace) -> list[str]:
 
     Сравнение с записанным при сборке отвечает на вопрос, который пофайловая проверка задать не
     может: не появился ли / не отключён ли ЦЕЛЫЙ источник."""
-    return sorted(str(s.root).lower() for s in ws.sources)
+    return sorted(str(s.root).lower() for s in ws.fts_sources)
 
 
 def prune_orphan_indexes(live_roots: list[str], *, dry_run: bool = True) -> dict:
@@ -471,7 +471,7 @@ def _repo_heads(ws: Workspace) -> dict[str, str]:
     """{корень репозитория: sha HEAD} для источников воркспейса (пусто, если git недоступен)."""
     try:
         from . import gitview as _gv
-        by_root, _missing = _gv._repos(ws.sources)  # noqa: SLF001 — общий внутренний слой
+        by_root, _missing = _gv._repos(ws.fts_sources)  # noqa: SLF001 — общий внутренний слой
     except Exception:  # noqa: BLE001
         return {}
     out: dict[str, str] = {}
@@ -508,7 +508,7 @@ def _git_delta(ws: Workspace, was: dict[str, str],
         return None                      # индекс собран версией без meta.heads
     try:
         from . import gitview as _gv
-        by_root, missing = _gv._repos(ws.sources)  # noqa: SLF001 — общий внутренний слой
+        by_root, missing = _gv._repos(ws.fts_sources)  # noqa: SLF001 — общий внутренний слой
     except Exception:  # noqa: BLE001
         return None
     if missing or not by_root:
@@ -806,7 +806,7 @@ class FtsIndex:
 
             # fresh=True: TTL-кэши списков скрыли бы удалённые файлы; исчезнувший между
             # листингом и stat() файл не попадает в seen -> его подметёт свип удалений.
-            for s in self.ws.sources:
+            for s in self.ws.fts_sources:
                 # mtime приходит из записи каталога (scandir) — без второго stat на файл
                 for p, mtime in self.ws.bsl_files_stat(s, fresh=True):
                     key = str(p)
@@ -876,7 +876,7 @@ class FtsIndex:
                      known: dict[str, float], reindex) -> dict:
         """Переиндексировать ТОЛЬКО перечисленные git'ом пути. Обхода ФС нет."""
         added = updated = removed = units_written = 0
-        by_source = {str(s.files_root): s for s in self.ws.sources}
+        by_source = {str(s.files_root): s for s in self.ws.fts_sources}
         listings: dict[str, dict[str, tuple]] = {}
         for key in sorted(delta):
             path = Path(key)
@@ -1049,7 +1049,7 @@ class FtsIndex:
         results = []
         for r in rows:
             abs_path = None
-            for s in self.ws.sources:
+            for s in self.ws.fts_sources:
                 cand = s.files_root / r[4]
                 if str(cand) in idx_mtimes:
                     abs_path = str(cand)

@@ -252,14 +252,14 @@ def admin_default_workspace() -> str:
 
 
 def configure(root: str | Path, ext_roots: tuple[str | Path, ...] = (),
-              name: str = "default") -> Workspace:
+              name: str = "default", bsp_roots: tuple[str | Path, ...] = ()) -> Workspace:
     """Build a workspace and register it under `name` (CLI startup / admin apply / lazy).
 
     Registration happens only after Workspace() succeeds, so a bad path keeps serving
     the previous workspace. Code-intel caches are dropped: source names may stay the
     same while pointing at a different checkout."""
     _init_rg_from_state()
-    ws = Workspace(root, ext_roots)
+    ws = Workspace(root, ext_roots, bsp_roots)
     _WORKSPACES[name] = ws
     code_intel.clear_caches()
     return ws
@@ -410,25 +410,46 @@ def _ws(workspace: str = "") -> Workspace:
             f"--workspace {name}`."
         )
     _maybe_update_on_start(name, entry)
-    ws = configure(root, tuple(entry["ext_roots"]), name=name)
+    ws = configure(root, tuple(entry["ext_roots"]), name=name,
+                   bsp_roots=tuple(entry.get("bsp_roots") or ()))
     _maybe_build_fts(ws)
     return ws
 
 
 _HELP = platform_help.HelpCatalog()
 _HELP_INIT = False
+_HELPS: dict[str, platform_help.HelpCatalog] = {}
 
 
-def configure_help(entries: list[dict]) -> list[str]:
+def configure_help(entries: list[dict], workspace: str = "") -> list[str]:
     """Swap the platform-help config (CLI startup / admin apply); returns per-entry errors."""
     global _HELP_INIT
+    if workspace:
+        catalog = platform_help.HelpCatalog()
+        errors = catalog.configure(entries)
+        _HELPS[workspace] = catalog
+        return errors
     _HELP_INIT = True
     return _HELP.configure(entries)
 
 
-def _help() -> platform_help.HelpCatalog:
-    """Catalog with lazy first-use config: env ONEC_LITE_HELP, затем сохранённое состояние."""
+def _help(workspace: str = "") -> platform_help.HelpCatalog:
+    """Per-workspace catalog; legacy env/global entries remain a compatible fallback."""
     global _HELP_INIT
+    name = _resolve_ws_name(workspace) if workspace or _workspace_from_headers() else ""
+    if name:
+        cached = _HELPS.get(name)
+        if cached is not None:
+            return cached
+        wss, _active = lite_admin.load_workspaces(lite_admin.state_file())
+        entry = wss.get(name)
+        if entry is not None:
+            entries = list(entry.get("platform_help") or [])
+            catalog = platform_help.HelpCatalog()
+            if entries:
+                catalog.configure(entries)
+            _HELPS[name] = catalog
+            return catalog
     if not _HELP_INIT:
         _HELP_INIT = True
         entries = platform_help.parse_help_lines(os.environ.get("ONEC_LITE_HELP", ""))
@@ -439,9 +460,9 @@ def _help() -> platform_help.HelpCatalog:
     return _HELP
 
 
-def help_catalog() -> platform_help.HelpCatalog:
+def help_catalog(workspace: str = "") -> platform_help.HelpCatalog:
     """Public accessor for the CLI (--check) and tests."""
-    return _help()
+    return _help(workspace)
 
 
 def _err(msg: str) -> dict:
@@ -559,11 +580,15 @@ def list_workspaces() -> dict:
     wss, active = lite_admin.load_workspaces(lite_admin.state_file())
     for name, ws in _WORKSPACES.items():  # сконфигурированные в процессе (env/--root)
         wss.setdefault(name, {"root": str(ws.root),
-                              "ext_roots": [str(p) for p in ws.ext_roots]})
+                              "ext_roots": [str(p) for p in ws.ext_roots],
+                              "bsp_roots": [str(p) for p in ws.bsp_roots],
+                              "platform_help": []})
     default = default_workspace_name()
     return {
         "workspaces": [
             {"name": n, "root": e["root"], "ext_roots": e["ext_roots"],
+             "bsp_roots": e.get("bsp_roots") or [],
+             "platform_help": e.get("platform_help") or [],
              "active": n == active, "loaded": n in _WORKSPACES}
             for n, e in sorted(wss.items())
         ],
@@ -1591,38 +1616,39 @@ def _forms_hint(ws: Workspace, cands: list) -> str:
 # --------------------------------------------------------------------------- #
 
 @_tool
-def platform_versions() -> dict:
+def platform_versions(workspace: str = "") -> dict:
     """Настроенные сборки справки платформы: версии, файлы .hbk, число тем.
 
     topics = null, пока индекс не построен (строится при первом запросе или кнопкой в админке)."""
-    return _help().versions()
+    return _help(workspace).versions()
 
 
 @_tool
-def platform_docinfo(name: str, platform_version: str = "") -> dict:
+def platform_docinfo(name: str, platform_version: str = "", workspace: str = "") -> dict:
     """Синтаксис-помощник: точный лукап темы по каноническому имени — русскому
     («Массив.Найти»), английскому («Array.Find») или короткому («Найти», с дизамбигуацией).
 
     platform_version сужает до конкретной сборки. Первый вызов строит индекс имён
     (десятки секунд на версию), дальше — мгновенно."""
-    return _help().docinfo(name, platform_version)
+    return _help(workspace).docinfo(name, platform_version)
 
 
 @_tool
-def platform_get_document(name: str, platform_version: str = "") -> dict:
+def platform_get_document(name: str, platform_version: str = "", workspace: str = "") -> dict:
     """Полный текст темы справки по точному имени («Объект.Метод») или fqn
     `platform_help:<версия>|<Имя>`. Без версии берётся самая свежая сборка."""
-    return _help().get_document(name, platform_version)
+    return _help(workspace).get_document(name, platform_version)
 
 
 @_tool
-def platform_search(query: str, platform_version: str = "", limit: int = 20) -> dict:
+def platform_search(query: str, platform_version: str = "", limit: int = 20,
+                    workspace: str = "") -> dict:
     """Ранжированный FTS5-поиск по названиям RU/EN и полному тексту тем справки.
 
     platform_version сужает выдачу до точной сборки. Индекс содержимого .hbk строится
     лениво и сохраняется рядо с индексами onec-lite. Это лексический поиск; синонимию
     без общих слов по-прежнему ловит только большой onec-vecgraph."""
-    return _help().search_titles(query, platform_version, limit)
+    return _help(workspace).search_titles(query, platform_version, limit)
 
 
 # --------------------------------------------------------------------------- #
@@ -1653,6 +1679,8 @@ def _snapshot(workspace: str = "") -> dict:
         row_root = _entry_root(n, e) if (e.get("repo") or e.get("root")) else Path(e.get("root") or "")
         rows.append({
             "name": n, "root": str(row_root), "ext_roots": e.get("ext_roots") or [],
+            "bsp_roots": e.get("bsp_roots") or [],
+            "platform_help": e.get("platform_help") or [],
             "repo": e.get("repo") or "", "branch": e.get("branch") or "",
             "update_on_start": e.get("update_on_start") or "off",
             "kind": "mirror" if e.get("repo") else "path",
@@ -1668,7 +1696,7 @@ def _snapshot(workspace: str = "") -> dict:
     snap["rg"] = search.rg_path()
     snap["rg_override"] = search.rg_override()
     snap["state_file"] = str(lite_admin.state_file())
-    help_cat = _help()
+    help_cat = _help(name)
     hv = help_cat.versions()
     snap["platform_help"] = {
         "entries": help_cat.entries,
@@ -1685,6 +1713,7 @@ def _snapshot(workspace: str = "") -> dict:
 def apply_admin_paths(
     root: str, ext_text: str, help_text: str = "", rg_text: str | None = None,
     name: str = "", repo: str = "", branch: str = "", update_on_start: str = "",
+    bsp_text: str = "",
 ) -> tuple[dict | None, str | None]:
     """Upsert workspace `name` (путь ИЛИ git-зеркало) + help/rg and persist; (snapshot, errors).
 
@@ -1699,6 +1728,7 @@ def apply_admin_paths(
     if mode not in lite_admin.UPDATE_MODES:
         mode = "off"
     ext = lite_admin.parse_ext_roots(ext_text)
+    bsp_roots = lite_admin.parse_ext_roots(bsp_text)
     help_entries = platform_help.parse_help_lines(help_text)
     errors: list[str] = []
     ws_name = (name or "").strip() or admin_default_workspace()
@@ -1710,8 +1740,16 @@ def apply_admin_paths(
             errors.append(f"ripgrep: файл не найден: {cleaned}")
         else:
             search.set_rg_path(cleaned or None)  # пусто = вернуться к автопоиску
-    if not root and not repo and not help_entries and rg_text is None:
-        return None, "Укажите корень конфигурации, git-URL зеркала и/или пути к справке."
+    if not root and not repo and not help_entries and not bsp_roots and rg_text is None:
+        return None, "Укажите корень конфигурации, git-URL зеркала и/или пути к корпусам."
+    saved_workspaces, _saved_active = lite_admin.load_workspaces(lite_admin.state_file())
+    existing = saved_workspaces.get(ws_name)
+    legacy_global_help = not root and not repo and existing is None
+    help_errors = configure_help(help_entries, "" if legacy_global_help else ws_name)
+    applied_help_entries = (
+        list(_HELP.entries) if legacy_global_help
+        else list(_HELPS[ws_name].entries)
+    )
     if repo:
         res = gitops.update_workspace(ws_name, {"repo": repo, "branch": branch})
         _UPDATE_RESULTS[ws_name] = res
@@ -1720,7 +1758,8 @@ def apply_admin_paths(
         else:
             ws = None
             try:
-                ws = configure(gitops.mirror_path(ws_name), tuple(ext), name=ws_name)
+                ws = configure(gitops.mirror_path(ws_name), tuple(ext), name=ws_name,
+                               bsp_roots=tuple(bsp_roots))
             except Exception as exc:  # noqa: BLE001 - клон есть, но не парсится как конфигурация
                 errors.append(f"Рабочая копия: {exc}")
             if ws is not None:
@@ -1728,13 +1767,15 @@ def apply_admin_paths(
                     lite_admin.upsert_workspace(
                         lite_admin.state_file(), ws_name, "", [str(p) for p in ws.ext_roots],
                         repo=repo, branch=branch, update_on_start=mode,
+                        bsp_roots=[str(p) for p in ws.bsp_roots],
+                        platform_help=applied_help_entries,
                     )
                 except OSError as exc:
                     errors.append(f"Состояние не сохранено: {exc}")
     elif root:
         ws = None
         try:
-            ws = configure(root, tuple(ext), name=ws_name)
+            ws = configure(root, tuple(ext), name=ws_name, bsp_roots=tuple(bsp_roots))
         except Exception as exc:  # noqa: BLE001 - показать причину, оставив прежний workspace
             errors.append(f"Рабочая копия: {exc}")
         if ws is not None:
@@ -1742,15 +1783,32 @@ def apply_admin_paths(
                 lite_admin.upsert_workspace(
                     lite_admin.state_file(), ws_name, str(ws.root),
                     [str(p) for p in ws.ext_roots], update_on_start=mode,
+                    bsp_roots=[str(p) for p in ws.bsp_roots],
+                    platform_help=applied_help_entries,
                 )
             except OSError as exc:
                 errors.append(f"Состояние не сохранено: {exc}")
-    errors.extend(f"Справка: {e}" for e in configure_help(help_entries))
+    elif existing is not None:
+        existing_root = _entry_root(ws_name, existing)
+        try:
+            ws = configure(existing_root, tuple(existing.get("ext_roots") or ()), name=ws_name,
+                           bsp_roots=tuple(bsp_roots))
+            lite_admin.upsert_workspace(
+                lite_admin.state_file(), ws_name, str(existing.get("root") or ""),
+                list(existing.get("ext_roots") or ()), repo=str(existing.get("repo") or ""),
+                branch=str(existing.get("branch") or ""),
+                update_on_start=str(existing.get("update_on_start") or "off"),
+                bsp_roots=bsp_roots, platform_help=applied_help_entries,
+            )
+        except Exception as exc:  # noqa: BLE001 - same validation as root path apply
+            errors.append(f"Рабочая копия: {exc}")
+    errors.extend(f"Справка: {e}" for e in help_errors)
     try:
         wss, active = lite_admin.load_workspaces(lite_admin.state_file())
         lite_admin.save_state(
             lite_admin.state_file(), wss, active,
-            platform_help=_HELP.entries, rg_path=search.rg_override() or "",
+            platform_help=_HELP.entries if legacy_global_help else None,
+            rg_path=search.rg_override() or "",
         )
     except OSError as exc:
         errors.append(f"Состояние не сохранено: {exc}")
@@ -1781,7 +1839,7 @@ async def admin_page(request: Request) -> Response:
             for loaded in _WORKSPACES.values():
                 loaded.refresh()
             code_intel.clear_caches()
-            _help().refresh()
+            _help(sel).refresh()
             return _redir("msg", "Кэши сброшены")
         if action == "activate":
             if lite_admin.set_active(lite_admin.state_file(), sel):
@@ -1789,6 +1847,7 @@ async def admin_page(request: Request) -> Response:
             return _redir("err", f"Воркспейс '{sel}' не найден в сохранённом состоянии.")
         if action == "delete":
             _WORKSPACES.pop(sel, None)
+            _HELPS.pop(sel, None)
             if lite_admin.delete_workspace(lite_admin.state_file(), sel):
                 return RedirectResponse(
                     "admin?msg=" + quote(f"Воркспейс '{sel}' удалён (индексы на диске не тронуты)."),
@@ -1824,7 +1883,7 @@ async def admin_page(request: Request) -> Response:
             # (KeyError) ровно там, где индекс как раз строится.
             return _redir("msg", f"Индекс поиска: {fts.format_build_report(res)}")
         if action == "build_help":
-            cat = _help()
+            cat = _help(sel)
             if not cat.entries:
                 return _redir("err", "Сначала задайте и примените пути к справке.")
             result = cat.build_text_indexes()
@@ -1843,6 +1902,7 @@ async def admin_page(request: Request) -> Response:
             repo=str(form.get("repo") or ""),
             branch=str(form.get("branch") or ""),
             update_on_start=str(form.get("update_on_start") or ""),
+            bsp_text=str(form.get("bsp_roots") or ""),
         )
         if err:
             return _redir("err", err, ws_name=name)
@@ -1862,6 +1922,68 @@ async def admin_json(request: Request) -> Response:
     if not _admin_enabled():
         return JSONResponse({"error": "admin disabled"}, status_code=404)
     return JSONResponse(_snapshot(request.query_params.get("ws", "")))
+
+
+@mcp.custom_route("/admin/workspace", methods=["POST"])
+async def admin_workspace(request: Request) -> Response:
+    """Machine-facing per-project workspace registration used by workflow Start.
+
+    Paths are local to the onec-lite host.  Platform help and BSP roots belong to the
+    named workspace, so projects using different platform/BSP versions cannot leak
+    corpora into one another.  The endpoint is intentionally guarded by the same
+    loopback-only admin opt-in as the HTML page.
+    """
+    if not _admin_enabled():
+        return JSONResponse({"error": "admin disabled"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed operator request
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "JSON object expected"}, status_code=400)
+
+    name = str(body.get("name") or "").strip()
+    ext_roots = body.get("ext_roots") or []
+    bsp_roots = body.get("bsp_roots") or []
+    help_entries = body.get("platform_help") or []
+    if not isinstance(ext_roots, list) or not isinstance(bsp_roots, list) \
+            or not isinstance(help_entries, list):
+        return JSONResponse({"error": "ext_roots, bsp_roots and platform_help must be arrays"},
+                            status_code=400)
+    help_text = platform_help.render_help_lines(
+        [entry for entry in help_entries if isinstance(entry, dict)]
+    )
+    snap, error = apply_admin_paths(
+        str(body.get("root") or ""),
+        "\n".join(str(item) for item in ext_roots),
+        help_text,
+        name=name,
+        bsp_text="\n".join(str(item) for item in bsp_roots),
+    )
+    if error:
+        return JSONResponse({"error": error, "workspace": snap}, status_code=400)
+
+    builds: dict[str, dict] = {}
+    if bool(body.get("build")):
+        ws = _ws(name)
+        builds["fts"] = fts.index_for(ws).build()
+        if help_entries:
+            builds["platform_help"] = _help(name).build_text_indexes()
+        failed = builds["fts"].get("error")
+        if failed:
+            return JSONResponse({"error": failed, "workspace": snap, "builds": builds},
+                                status_code=500)
+    else:
+        # Machine API is an explicit request to provision these corpora. Honour it even
+        # when generic startup prebuild is disabled: otherwise workflow Start reports a
+        # registered corpus that no process ever indexes.
+        fts.index_for(_ws(name)).ensure_background(force=True)
+        if help_entries:
+            threading.Thread(
+                target=_help(name).build_text_indexes,
+                name=f"help-prebuild-{name}", daemon=True,
+            ).start()
+    return JSONResponse({"ok": True, "workspace": snap, "builds": builds})
 
 
 def _prebuild_all_workspaces() -> None:

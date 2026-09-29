@@ -5,6 +5,8 @@ HTTP-маршруты тонкие (см. lite/server.py) — тестируем
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -45,6 +47,7 @@ def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("ONEC_LITE_EXT_ROOTS", raising=False)
     monkeypatch.delenv("ONEC_LITE_WORKSPACE", raising=False)
     monkeypatch.setattr(lite_server, "_WORKSPACES", {})
+    monkeypatch.setattr(lite_server, "_HELPS", {})
     monkeypatch.setattr(lite_server, "_RG_INIT", False)
     monkeypatch.setattr(lite_search, "_RG_OVERRIDE", None)
 
@@ -193,3 +196,43 @@ def test_workspace_edits_preserve_other_state_keys(tmp_path: Path) -> None:
     final = json.loads(state.read_text(encoding="utf-8"))
     assert final["fts_dir"] == r"D:\tools\onec-lite-fts", "потерян при set_active/delete"
     assert final["active"] == "b"
+
+
+def test_admin_workspace_api_registers_project_corpora(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Workflow Start uses JSON API, not the browser form; cover that contract directly."""
+    from starlette.requests import Request
+
+    root = _mini_edt(tmp_path / "project")
+    bsp = _mini_edt(tmp_path / "bsp")
+    monkeypatch.setenv("ONEC_LITE_ADMIN", "true")
+    monkeypatch.setattr(lite_server.fts.FtsIndex, "ensure_background",
+                        lambda self, force=False: None)
+    encoded = json.dumps({
+        "name": "project_feature",
+        "root": str(root),
+        "ext_roots": [],
+        "platform_help": [],
+        "bsp_roots": [str(bsp)],
+        "build": False,
+    }).encode("utf-8")
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        delivered = True
+        return {"type": "http.request", "body": encoded, "more_body": False}
+
+    request = Request({
+        "type": "http", "method": "POST", "path": "/admin/workspace",
+        "headers": [(b"content-type", b"application/json")],
+    }, receive)
+    response = asyncio.run(lite_server.admin_workspace(request))
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["ok"] is True
+    saved, _active = lite_admin.load_workspaces(lite_admin.state_file())
+    assert saved["project_feature"]["bsp_roots"] == [str(bsp)]

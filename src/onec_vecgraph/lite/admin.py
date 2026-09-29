@@ -58,6 +58,13 @@ def _norm_entry(e: dict) -> dict | None:
     return {
         "root": root,
         "ext_roots": [str(p).strip() for p in (e.get("ext_roots") or []) if str(p).strip()],
+        "bsp_roots": [str(p).strip() for p in (e.get("bsp_roots") or []) if str(p).strip()],
+        "platform_help": [
+            {"version": str(item.get("version") or "").strip(),
+             "path": str(item.get("path") or "").strip()}
+            for item in (e.get("platform_help") or [])
+            if isinstance(item, dict) and str(item.get("path") or "").strip()
+        ],
         "repo": repo,
         "branch": str(e.get("branch") or "").strip(),
         "update_on_start": mode if mode in UPDATE_MODES else "off",
@@ -116,10 +123,16 @@ def save_state(path: Path, workspaces: dict[str, dict], active: str,
 
 def upsert_workspace(path: Path, name: str, root: str, ext_roots: list[str],
                      make_active: bool = False, repo: str = "", branch: str = "",
-                     update_on_start: str = "off") -> None:
+                     update_on_start: str = "off", bsp_roots: list[str] | None = None,
+                     platform_help: list[dict] | None = None) -> None:
     wss, active = load_workspaces(path)
+    previous = wss.get(name) or {}
     entry = _norm_entry({"root": root, "ext_roots": list(ext_roots), "repo": repo,
-                         "branch": branch, "update_on_start": update_on_start})
+                         "branch": branch, "update_on_start": update_on_start,
+                         "bsp_roots": (previous.get("bsp_roots") or [])
+                         if bsp_roots is None else list(bsp_roots),
+                         "platform_help": (previous.get("platform_help") or [])
+                         if platform_help is None else list(platform_help)})
     if entry is None:
         raise ValueError("воркспейсу нужен путь (root) и/или git-URL (repo)")
     wss[name] = entry
@@ -187,20 +200,34 @@ def parse_ext_roots(text: str) -> list[str]:
 def workspace_snapshot(ws: Any) -> dict:
     """JSON-ready state of the current workspace (None -> unconfigured)."""
     if ws is None:
-        return {"configured": False, "root": "", "ext_roots": [], "sources": []}
+        return {"configured": False, "root": "", "ext_roots": [], "bsp_roots": [],
+                "sources": [], "bsp_sources": []}
     return {
         "configured": True,
         "root": str(ws.root),
         "ext_roots": list(getattr(ws, "ext_roots", ())),
+        "bsp_roots": list(getattr(ws, "bsp_roots", ())),
         "sources": [
             {
                 "source": s.name,
                 "format": s.fmt,
                 "is_extension": s.is_extension,
+                "corpus": "project",
                 "root": str(s.root),
                 "objects": sum(ws.kind_counts(s).values()),
             }
             for s in ws.sources
+        ],
+        "bsp_sources": [
+            {
+                "source": s.name,
+                "format": s.fmt,
+                "is_extension": s.is_extension,
+                "corpus": "bsp",
+                "root": str(s.root),
+                "objects": sum(ws.kind_counts(s).values()),
+            }
+            for s in getattr(ws, "bsp_sources", ())
         ],
     }
 
@@ -313,7 +340,8 @@ def _source_rows(sources: list[dict]) -> str:
         return '<tr><td colspan="4" class="empty">Источники не загружены — задайте пути ниже.</td></tr>'
     rows = []
     for s in sources:
-        tag = "расширение" if s.get("is_extension") else "база"
+        tag = ("корпус БСП" if s.get("corpus") == "bsp" else
+               ("расширение" if s.get("is_extension") else "база"))
         rows.append(
             "<tr>"
             f"<td class=\"mono\">{escape(str(s.get('source', '')))}</td>"
@@ -346,6 +374,7 @@ def render_admin_page(
     elif error:
         banner = f'<div class="banner err-b">{escape(error)}</div>'
     ext_text = "\n".join(snap.get("ext_roots") or [])
+    bsp_text = "\n".join(snap.get("bsp_roots") or [])
     sel_row = next((w for w in (snap.get("workspaces") or []) if w.get("selected")), {})
     sel_mode = str(sel_row.get("update_on_start") or "off")
     mode_opts = "".join(
@@ -421,7 +450,7 @@ def render_admin_page(
   <table>
     <thead><tr><th>источник</th><th>формат</th><th>объектов</th><th>каталог</th></tr></thead>
     <tbody>
-{_source_rows(snap.get("sources") or [])}
+{_source_rows([*(snap.get("sources") or []), *(snap.get("bsp_sources") or [])])}
     </tbody>
   </table>
   <h2>Пути рабочей копии</h2>
@@ -437,6 +466,11 @@ def render_admin_page(
     <label for="ext_roots">Дополнительные корни расширений (по одному пути в строке; обычно не нужно)</label>
     <textarea id="ext_roots" name="ext_roots"
               placeholder="D:\\ext\\ДИТ_Расширение">{escape(ext_text)}</textarea>
+    <label for="bsp_roots">Корпуса БСП для поиска (по одному корню XML/EDT в строке)</label>
+    <textarea id="bsp_roots" name="bsp_roots"
+              placeholder="D:\\knowledge\\bsp-3.1.10">{escape(bsp_text)}</textarea>
+    <div class="hint">Попадают только в fts_search и не участвуют в разрешении объектов
+      текущей конфигурации. Пусто = поиск по БСП для этого воркспейса выключен.</div>
     <label for="repo">…ИЛИ git-URL зеркала (клон будет жить в ~/.onec-lite/mirrors/&lt;имя&gt;;
       поле «Корень» тогда не заполняйте)</label>
     <input type="text" id="repo" name="repo" value="{escape(str(sel_row.get("repo") or ""))}"

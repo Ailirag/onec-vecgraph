@@ -183,6 +183,7 @@ def test_admin_apply_help_only_and_tools(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(lite_server, "_WORKSPACES", {})
     monkeypatch.setattr(lite_server, "_HELP", ph.HelpCatalog())
     monkeypatch.setattr(lite_server, "_HELP_INIT", True)
+    monkeypatch.setattr(lite_server, "_HELPS", {})
     monkeypatch.setattr(ph, "_resolve_files", lambda e: _RESOLVED[str(e.get("path"))])
     monkeypatch.setattr(ph.hbk_container, "named_elements", _fake_named_elements)
 
@@ -207,6 +208,37 @@ def test_unconfigured_help_tools_answer_gracefully(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(lite_server, "_HELP_INIT", True)
     assert "не настроена" in lite_server.platform_docinfo("Массив.Найти")["error"]
     assert lite_server.platform_versions()["count"] == 0
+
+
+def test_platform_help_isolated_per_workspace(tmp_path: Path,
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """Два проекта с разными версиями платформы не видят справку друг друга."""
+    monkeypatch.setenv("ONEC_LITE_STATE", str(tmp_path / "state.json"))
+    monkeypatch.delenv("ONEC_LITE_WORKSPACE", raising=False)
+    monkeypatch.setattr(lite_server, "_HELPS", {})
+    monkeypatch.setattr(ph, "_resolve_files", lambda e: _RESOLVED[str(e.get("path"))])
+    monkeypatch.setattr(ph.hbk_container, "named_elements", _fake_named_elements)
+    state = lite_admin.state_file()
+    lite_admin.upsert_workspace(
+        state, "new", "H:\\new", [],
+        platform_help=[{"version": "", "path": "v27"}],
+    )
+    lite_admin.upsert_workspace(
+        state, "old", "H:\\old", [],
+        platform_help=[{"version": "", "path": "v18"}],
+    )
+    lite_admin.upsert_workspace(state, "disabled", "H:\\disabled", [])
+
+    global_catalog = ph.HelpCatalog()
+    assert global_catalog.configure([{"version": "", "path": "v27"}]) == []
+    monkeypatch.setattr(lite_server, "_HELP", global_catalog)
+    monkeypatch.setattr(lite_server, "_HELP_INIT", True)
+
+    new_versions = lite_server.platform_versions(workspace="new")
+    old_versions = lite_server.platform_versions(workspace="old")
+    assert [v["platform_version"] for v in new_versions["versions"]] == ["8.3.27.2130"]
+    assert [v["platform_version"] for v in old_versions["versions"]] == ["8.3.18.1289"]
+    assert lite_server.platform_versions(workspace="disabled")["count"] == 0
 
 
 @pytest.mark.skipif(not _REAL_BINS, reason="no installed 1C platform help (.hbk) on this machine")
