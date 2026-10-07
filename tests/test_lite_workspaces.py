@@ -125,7 +125,7 @@ def test_ws_name_validation() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Резолв воркспейса
+# Внутренний Python/CLI/admin резолв (MCP-контракт: test_lite_strict_workspace.py)
 # --------------------------------------------------------------------------- #
 
 def test_active_is_not_a_default_for_requests(two_repos: tuple[Path, Path],
@@ -264,7 +264,8 @@ def test_list_workspaces_tool(two_repos: tuple[Path, Path],
     rows = {w["name"]: w for w in res["workspaces"]}
     assert set(rows) == {"a", "b"}
     assert rows["a"]["active"] is True and rows["a"]["loaded"] is True
-    assert res["default_workspace"] == "b"
+    assert res["default_workspace"] == ""  # MCP has no implicit selection
+    assert lite_server.admin_default_workspace() == "b"  # CLI/admin convenience is preserved
 
 
 # --------------------------------------------------------------------------- #

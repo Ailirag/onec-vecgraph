@@ -9,12 +9,17 @@ Start via CLI: `onec-vecgraph serve-lite --root <путь>` (stdio by default).
 
 from __future__ import annotations
 
+import inspect
 import logging
+from functools import wraps
 import os
 import threading
 from copy import deepcopy
 from pathlib import Path
 from urllib.parse import quote
+from typing import Annotated
+
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
@@ -35,16 +40,15 @@ INSTRUCTIONS = """onec-lite: навигация по ЖИВОЙ рабочей �
 модуля (Module|Object|Manager|RecordSet|Value|Command|Form:<Имя>|<имя файла .bsl>);
 source — имя источника из overview() (пусто = все, расширения раньше базы);
 workspace — рабочая копия из list_workspaces() (сервер держит несколько репозиториев 1С).
-Выбор конфигурации ОБЯЗАТЕЛЕН, когда сервер держит несколько: молчаливого дефолта НЕТ, и
-инструменты откажут с перечнем вариантов вместо ответа по чужой конфигурации. Штатный способ —
-project-scope .mcp.json проекта шлёт заголовок X-Workspace: тогда работай, НЕ указывая workspace.
-Если отказ получен (заголовка нет), вызови list_workspaces() — он работает без выбора — и передай
-workspace="<имя>" явно; при неочевидном выборе спроси пользователя, а не угадывай.
-Аргумент workspace=<имя> при настроенном заголовке передавай ТОЛЬКО когда пользователь ЯВНО
-просит другую конфигурацию (или сравнить с ней).
-Полный приоритет: аргумент workspace → заголовок X-Workspace/X-Tenant-Id → env
-ONEC_LITE_WORKSPACE → единственная сконфигурированная. Отметка «активный» в админке — для
-человека, на запросы она НЕ подставляется.
+Каждый MCP-инструмент, кроме list_workspaces, требует явный непустой строковый аргумент
+workspace="<имя>" — даже при единственной конфигурации, включая инструменты справки платформы.
+Заголовки X-Workspace/X-Tenant-Id, env ONEC_LITE_WORKSPACE, --workspace и отметка «активный»
+НЕ заменяют аргумент. Пропущенное, null, нестроковое, пустое, пробельное или неизвестное имя
+отклоняется ДО доступа к данным, кэшам, индексам и git. Сначала вызови list_workspaces(),
+затем передавай выбранное имя в КАЖДОМ вызове; при неочевидном выборе спроси пользователя.
+К другой конфигурации обращайся только по явной просьбе пользователя. Инициализация протокола
+и получение списка инструментов доступны без workspace. CLI и админка сохраняют свои
+предвыборы отдельно от строгого MCP-контракта.
 
 ЧЕМ ПОЛЬЗОВАТЬСЯ. Эти инструменты НЕ заменяют Grep/ripgrep — они отвечают на вопросы, которые
 поиском по тексту выразить нельзя. Замеры на конфигурации в 15 тыс. модулей: по токенам обычный
@@ -183,7 +187,28 @@ def _tool(fn):
     напрямую, а не через протокол."""
     if not _published(fn.__name__):
         return fn
-    return mcp.tool(structured_output=False)(fn)
+    if fn.__name__ == "list_workspaces":
+        mcp.tool(structured_output=False)(fn)
+        return fn
+
+    # Keep Python/CLI/admin defaults separate from the public MCP contract.
+    signature = inspect.signature(fn)
+    parameters = [p for p in signature.parameters.values() if p.name != "workspace"]
+    parameters.append(inspect.Parameter(
+        "workspace", inspect.Parameter.KEYWORD_ONLY,
+        annotation=Annotated[str, Field(strict=True, min_length=1, pattern=r"\S",
+                                        description="Explicit name from list_workspaces(); required on every call.")]))
+
+    @wraps(fn)
+    def explicit_workspace_tool(*args, **kwargs):
+        workspace = _explicit_mcp_workspace(kwargs.pop("workspace"))
+        if "workspace" in signature.parameters:
+            kwargs["workspace"] = workspace
+        return fn(*args, **kwargs)
+
+    explicit_workspace_tool.__signature__ = signature.replace(parameters=parameters)
+    mcp.tool(structured_output=False)(explicit_workspace_tool)
+    return fn
 
 
 # Own host/port envs (not the big server's MCP_PORT): the docker read-MCP holds :8000,
@@ -351,6 +376,27 @@ def _workspace_from_headers() -> str:
     return ""
 
 
+def _explicit_mcp_workspace(workspace: str) -> str:
+    """Validate selection without loading data, warming caches or running git.
+
+    Only registry/configuration metadata is read here. CLI/admin helpers retain their
+    own defaults; no header, environment or active selection supplies an MCP argument.
+    """
+    if not isinstance(workspace, str) or not workspace.strip():
+        raise ValueError('workspace must be a nonempty explicit name from list_workspaces()')
+    name = workspace.strip()
+    wss, _active = lite_admin.load_workspaces(lite_admin.state_file())
+    known = set(wss) | set(_WORKSPACES)
+    # A --root / ONEC_LITE_ROOT setup is a configured workspace too, but its name
+    # must still be supplied explicitly by the caller.
+    if os.environ.get("ONEC_LITE_ROOT", "").strip():
+        known.add(default_workspace_name())
+    if name not in known:
+        raise ValueError(f"Unknown workspace '{name}'. Use list_workspaces(); known: "
+                         + ", ".join(sorted(known)))
+    return name
+
+
 def _resolve_ws_name(workspace: str = "") -> str:
     """Эффективное имя воркспейса для вызова: явный аргумент → заголовок запроса → дефолт.
 
@@ -490,7 +536,7 @@ def overview(workspace: str = "") -> dict:
     Блок `index` — состояние индекса символов. При `built: false` ответы идут живым сканом: они
     верны, но медленнее, и полные счётчики (declaration_count, call_rows_total) вернутся null.
 
-    workspace — имя из list_workspaces(); пусто = дефолт сессии."""
+    workspace — обязательное явное имя из list_workspaces() для MCP-вызова."""
     ws = _ws(workspace)
     return {
         "workspace": _resolve_ws_name(workspace),
@@ -572,10 +618,10 @@ def _unattached_projects(ws: Workspace) -> list[dict]:
 
 @_tool
 def list_workspaces() -> dict:
-    """Рабочие копии, которые знает сервер: имена, корни, активная и дефолт этой сессии.
+    """Рабочие копии, которые знает сервер: имена, корни и отметка оператора.
 
-    Любой инструмент принимает workspace=<имя>. `default_workspace` пуст, когда конфигураций
-    несколько и выбор не сделан: тогда остальные инструменты откажут, а не ответят по случайной.
+    Каждый другой MCP-инструмент требует явный workspace=<имя>. `default_workspace`
+    всегда пуст: заголовки, env и единственная конфигурация не заменяют аргумент.
     `active` — отметка ОПЕРАТОРА в админке, она на запросы НЕ подставляется."""
     wss, active = lite_admin.load_workspaces(lite_admin.state_file())
     for name, ws in _WORKSPACES.items():  # сконфигурированные в процессе (env/--root)
@@ -583,7 +629,6 @@ def list_workspaces() -> dict:
                               "ext_roots": [str(p) for p in ws.ext_roots],
                               "bsp_roots": [str(p) for p in ws.bsp_roots],
                               "platform_help": []})
-    default = default_workspace_name()
     return {
         "workspaces": [
             {"name": n, "root": e["root"], "ext_roots": e["ext_roots"],
@@ -593,13 +638,10 @@ def list_workspaces() -> dict:
             for n, e in sorted(wss.items())
         ],
         "active": active,
-        "default_workspace": default,
-        "note": ("workspace=<имя> в любом инструменте; пусто = default_workspace."
-                 if default else
-                 "Дефолта НЕТ: конфигураций несколько. Передай workspace=\"<имя>\" в вызове, "
-                 "либо пропиши заголовок X-Workspace в project-scope .mcp.json (для HTTP), "
-                 "либо ONEC_LITE_WORKSPACE/--workspace (для stdio). Поле active — отметка "
-                 "оператора в админке, на запросы она не подставляется."),
+        "default_workspace": "",
+        "note": "Дефолта НЕТ: каждый MCP-вызов требует явный workspace=\"<имя>\". "
+                "Заголовки, env, единственный воркспейс и active не заменяют аргумент. "
+                "Поле active — только отметка оператора в админке.",
     }
 
 
