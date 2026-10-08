@@ -1057,6 +1057,9 @@ local-embeddings = [
     { name = "sentence-transformers" },
     { name = "torch" },
 ]
+wiki = [
+    { name = "httpx" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1067,6 +1070,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", marker = "extra == 'wiki'", specifier = ">=0.27" },
     { name = "lxml", specifier = ">=5.2" },
     { name = "mcp", specifier = ">=1.9.0,<2" },
     { name = "neo4j", specifier = ">=5.26" },
@@ -1081,7 +1085,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12" },
     { name = "voyageai", marker = "extra == 'cloud-embeddings'", specifier = ">=0.3" },
 ]
-provides-extras = ["local-embeddings", "cloud-embeddings", "ingest", "bsl"]
+provides-extras = ["local-embeddings", "cloud-embeddings", "ingest", "wiki", "bsl"]
 
 [package.metadata.requires-dev]
 dev = [

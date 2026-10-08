@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Python 3.12 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTHONUTF8: "1"
+      # Confine any pre-fixture state to the ephemeral runner, too.
+      ONEC_LITE_STATE: ${{ runner.temp }}/onec-lite/config.json
+      ONEC_LITE_FTS_DIR: ${{ runner.temp }}/onec-lite/fts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.0"
+          python-version: "3.12"
+          enable-cache: false
+      - name: Install locked test dependencies (no GPU extras)
+        run: uv sync --locked --extra ingest --extra wiki
+      - name: Run full test suite
+        run: uv run --no-sync python -m pytest tests/ -ra
