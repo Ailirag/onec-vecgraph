@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "MCP server for vectorizing 1C:Enterprise configurations (Configurator XML dump) and building dependency + BSL call graphs in Neo4j."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-license = { text = "Proprietary" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "GrandTrade" }]
 dependencies = [
     # The upper bound is load-bearing: mcp 2.0 dropped `mcp.server.fastmcp`, which all four
@@ -42,7 +43,7 @@ onec-vecgraph = "onec_vecgraph.cli:app"
 onec-lite = "onec_vecgraph.lite.launcher:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
