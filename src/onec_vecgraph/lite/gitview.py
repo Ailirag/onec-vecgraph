@@ -116,7 +116,7 @@ def _status_files(repo: Path) -> tuple[list[tuple[str, str]], str | None]:
     """(status, repo-relative path) for worktree+index changes incl. untracked."""
     # -uall обязателен: без него git сворачивает НОВЫЙ каталог в одну запись, и новый модуль
     # целиком выпадал из ревью незакоммиченной работы (ref="") без каких-либо флагов.
-    code, out = _git(["status", "--porcelain", "-uall"], repo)
+    code, out = _git(["status", "--porcelain", "--no-renames", "-uall"], repo)
     if code != 0:
         return [], out.strip()
     rows: list[tuple[str, str]] = []
@@ -137,12 +137,12 @@ def _diff_files(repo: Path, ref: str, *, untracked: bool = False) -> tuple[list[
     «что изменилось относительно ref» обычно не нужен, поэтому по умолчанию выключен; когда
     он запрошен — идёт параллельно диффу (стена = максимум, а не сумма)."""
     if not untracked:
-        code, out = _git(["diff", "--name-status", "--find-renames", ref, "--", "."], repo)
+        code, out = _git(["diff", "--name-status", "--no-renames", ref, "--", "."], repo)
         code2, out2 = 1, ""
     else:
         with ThreadPoolExecutor(max_workers=2) as pool:
             fut_diff = pool.submit(
-                _git, ["diff", "--name-status", "--find-renames", ref, "--", "."], repo)
+                _git, ["diff", "--name-status", "--no-renames", ref, "--", "."], repo)
             fut_new = pool.submit(_git, ["ls-files", "--others", "--exclude-standard"], repo)
             code, out = fut_diff.result()
             code2, out2 = fut_new.result()
@@ -253,7 +253,7 @@ def _touched_ranges_bulk(repo: Path, ref: str) -> dict[str, list[tuple[int, int]
 
     Раньше review_set делал отдельный git-процесс на каждый изменённый файл (13 файлов ≈ 0.9 с
     только на запуск процессов); один общий дифф отдаёт то же за ~0.45 с."""
-    code, out = _git(["diff", "-U0", ref or "HEAD", "--", "."], repo)
+    code, out = _git(["diff", "-U0", "--no-renames", ref or "HEAD", "--", "."], repo)
     if code != 0:
         return None
     per_file: dict[str, list[tuple[int, int]]] = {}

@@ -42,3 +42,13 @@ certs/*.crt
 
 # черновые выхлопы замеров
 probe_out.json
+
+# Служебное состояние развёрнутого сервера (корпуса, состояние, локи, токены, бэкапы).
+corpora/
+state/
+pull.lock
+reindex.lock
+index-admin-tokens.env
+tenant-tokens.env
+*.bak-*
+.local-orchestrator-*

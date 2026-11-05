@@ -322,3 +322,17 @@ def test_committed_pull_is_visible_in_declarations_and_overrides(git_ws: Workspa
     overrides = code_intel.find_overrides(wider, max_results=50)
     rows = overrides.get("overrides") or overrides.get("rows") or []
     assert any(r.get("routine") == "Расш_ПроверитьКод" for r in rows), overrides
+
+
+def test_renamed_object_keeps_both_sides(git_ws: Workspace) -> None:
+    """Переименование/перенос модуля: без --no-renames git отдаёт одну запись R old -> new,
+    и старый объект молча выпадал из changed_objects/review_set."""
+    root = git_ws.root
+    src = Path("conf") / "src" / "CommonModules"
+    _git(["mv", str(src / "Проверки"), str(src / "ПроверкиНовые")], root)
+    for ref in ("", "HEAD"):
+        gitview._FILE_LISTS.clear()
+        res = gitview.changed_objects(git_ws, ref=ref)
+        statuses = {o["object"]: {c["status"] for c in o["changes"]} for o in res["objects"]}
+        assert "D" in statuses.get("CommonModule.Проверки", set()), (ref, statuses)
+        assert "CommonModule.ПроверкиНовые" in statuses, (ref, statuses)
