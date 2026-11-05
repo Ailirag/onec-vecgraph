@@ -117,4 +117,51 @@ class FreshnessTests(unittest.TestCase):
                 self.assertFalse(r)
 
 
+def _alias_of(path: Path) -> Path | None:
+    """Другая форма пути к тому же каталогу: 8.3-имя на Windows, symlink на POSIX."""
+    if os.name == "nt":
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        if ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, 1024) and buf.value != str(path):
+            return Path(buf.value)
+        return None
+    link = path.parent / (path.name + "-alias")
+    try:
+        link.symlink_to(path, target_is_directory=True)
+    except OSError:
+        return None
+    return link
+
+
+class AliasedRootTests(unittest.TestCase):
+    """git отдаёт канонический путь репозитория; источник может быть задан иначе."""
+
+    def test_git_delta_applies_when_root_differs_from_git_toplevel(self):
+        with tempfile.TemporaryDirectory() as tmp,                 patch.dict(os.environ, {"ONEC_LITE_REQUIRE_FRESH_INDEX": "0"}):
+            real = Path(tmp).resolve() / "long-directory-name-for-alias" / "repo"
+            real.mkdir(parents=True)
+            alias = _alias_of(real)
+            if alias is None:
+                self.skipTest("no alternative path form available on this filesystem")
+            git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                                             "-c", "safe.directory=*", "-C", str(real), *a],
+                                            check=True, capture_output=True)
+            git("init", "-q")
+            (real / "Configuration.xml").write_text(
+                '<?xml version="1.0" encoding="UTF-8"?><MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">'
+                '<Configuration uuid="00000000-0000-0000-0000-000000000002"><Properties><Name>A</Name>'
+                '</Properties></Configuration></MetaDataObject>')
+            mod = real / "CommonModules" / "M" / "Ext" / "Module.bsl"
+            mod.parent.mkdir(parents=True)
+            mod.write_text('Процедура A() Экспорт\n Сообщить("OldAlias");\nКонецПроцедуры\n', encoding="utf-8")
+            git("add", "."); git("commit", "-qm", "1")
+            index = FtsIndex(Workspace(alias))
+            index.build(wait=1)
+            mod.write_text('Процедура B() Экспорт\n Сообщить("NewAlias");\nКонецПроцедуры\n', encoding="utf-8")
+            git("add", "."); git("commit", "-qm", "2")
+            index.build(wait=1)
+            self.assertGreater(index.search("NewAlias")["total_matches"], 0)
+            self.assertEqual(index.search("OldAlias")["total_matches"], 0)
+
+
 if __name__=='__main__':unittest.main(verbosity=2)

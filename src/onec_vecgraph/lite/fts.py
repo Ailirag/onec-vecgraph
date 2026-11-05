@@ -902,17 +902,37 @@ class FtsIndex:
         except (TypeError, ValueError):
             return False
 
+    def _delta_keys(self, delta: set[str]) -> dict[str, LiteSource]:
+        """Пути от git -> ключи индекса в той форме, в какой их пишет обход источника.
+
+        git отдаёт пути от СВОЕГО корня репозитория (канонический путь), а индекс хранит их
+        от files_root источника, как он задан в конфигурации. Если формы различаются
+        (8.3-имена Windows вроде RUNNER~1, junction/symlink, subst-диск, регистр букв),
+        сравнение строк по префиксу молча отбрасывало правку как «вне источников»: heads
+        записывались новые, а файл оставался в индексе старым (или удалённым — живым).
+        Поэтому сравниваем канонические пути, а ключ строим от files_root источника.
+        При вложенных корнях побеждает самый глубокий."""
+        roots = sorted(((s.files_root.resolve(), s) for s in self.ws.fts_sources),
+                       key=lambda item: len(item[0].parts), reverse=True)
+        out: dict[str, LiteSource] = {}
+        for raw in delta:
+            canon = Path(raw).resolve()
+            for root, src in roots:
+                try:
+                    rel = canon.relative_to(root)
+                except ValueError:
+                    continue
+                out[str(src.files_root / rel)] = src
+                break                           # иначе путь вне индексируемых источников
+        return out
+
     def _apply_delta(self, con: sqlite3.Connection, delta: set[str],
                      known: dict[str, float], reindex) -> dict:
         """Переиндексировать ТОЛЬКО перечисленные git'ом пути. Обхода ФС нет."""
         added = updated = removed = units_written = 0
-        by_source = {str(s.files_root): s for s in self.ws.fts_sources}
         listings: dict[str, dict[str, tuple]] = {}
-        for key in sorted(delta):
+        for key, src in sorted(self._delta_keys(delta).items()):
             path = Path(key)
-            src = next((s for root, s in by_source.items() if key.startswith(root)), None)
-            if src is None:
-                continue                        # путь вне индексируемых источников
             if not path.is_file():
                 if key in known:
                     self._forget(con, key)
