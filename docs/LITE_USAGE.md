@@ -117,6 +117,8 @@ claude mcp add onec-lite --scope user -- uv run --directory "D:\путь\к\ре
 | `ONEC_LITE_STATE` | файл состояния (`~/.onec-lite/config.json`) |
 | `ONEC_LITE_PROFILE` | состав публикуемых инструментов: `lean` (по умолчанию) / `full` / `review` — см. ниже |
 | `ONEC_LITE_DISABLED_TOOLS` | точечно убрать инструменты (список через запятую/пробел), поверх профиля |
+| `ONEC_LITE_REQUIRE_FRESH_INDEX` | `true` = `fts_search` отвечает только индексом, собранным на ТЕКУЩИХ коммитах источников; иначе явная ошибка `stale`/`updating` без отката на rg. Для серверов с внешним рефрешем из Git (тот держит `freshness.write_lock` на время публикации файлов) |
+| `ONEC_LITE_REFRESH_LOCKS` | каталог межпроцессных локов рефреша (`~/.onec-lite/refresh-locks`) |
 
 ### Состав инструментов: профили
 

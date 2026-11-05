@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 from ..chunking import search_tokens
+from . import freshness
 from . import admin as lite_admin
 from . import code_intel, text_search
 from .workspace import LiteSource, Workspace, read_text
@@ -596,6 +597,24 @@ class FtsIndex:
         except OSError:
             return False
 
+    def freshness(self) -> dict:
+        """Commit identity is authoritative; an old build date alone is not stale."""
+        heads = _repo_heads(self.ws)
+        indexed = {}
+        meta = {}
+        try:
+            # Read-only: checking freshness must never create or migrate an index.
+            with sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=2) as con:
+                if con.execute("PRAGMA user_version").fetchone()[0] != _SCHEMA_VERSION:
+                    return {"state": "stale", "reason": "schema_outdated", "fresh": False}
+                meta = dict(con.execute("SELECT key,value FROM meta WHERE key IN ('heads','sources','built_at')"))
+            indexed = json.loads(meta.get("heads") or "{}")
+        except (sqlite3.Error, ValueError, OSError):
+            return {"state": "unknown", "reason": "index_unreadable", "fresh": False}
+        fresh = bool(heads) and heads == indexed and not self._sources_changed(meta)
+        return {"state": "current" if fresh else "stale", "fresh": fresh,
+                "source_heads": heads, "indexed_heads": indexed, "built_at": meta.get("built_at")}
+
     def status(self) -> dict:
         """Состояние индекса, включая идущую сборку в ДРУГОМ процессе.
 
@@ -649,6 +668,9 @@ class FtsIndex:
             out["note"] = ("Индекс пуст: сборка идёт" if out["building"]
                            else "Индекс пуст: сборка не завершена — запустите её заново "
                                 "(кнопка в админке или serve-lite --build-fts).")
+        if freshness.required():
+            with freshness.read_lock(self.ws.root) as acquired:
+                out["freshness"] = self.freshness() if acquired else {"state": "updating", "fresh": False}
         return out
 
     # -- build / refresh ------------------------------------------------------
@@ -727,6 +749,14 @@ class FtsIndex:
                 self._building = False
 
     def _build_locked(self, *, wait: float = 0.0) -> dict:
+        if not freshness.required():
+            return self._build_locked_current(wait=wait)
+        with freshness.read_lock(self.ws.root) as acquired:
+            if not acquired:
+                return {"status": "building", "note": "Source refresh is in progress."}
+            return self._build_locked_current(wait=wait)
+
+    def _build_locked_current(self, *, wait: float = 0.0) -> dict:
         """Единственный писатель В ЭТОМ процессе гарантирован флагом _building; плюс
         МЕЖПРОЦЕССНЫЙ лок (файл `<db>.building`): если индекс строит другой процесс (общий
         каталог ~/.onec-lite/fts), не деремся за один файл БД (иначе блокировки SQLite /
@@ -990,6 +1020,32 @@ class FtsIndex:
 
     def search(self, query: str, *, limit: int = 20, unit: str = "", source: str = "",
                 offset: int = 0) -> dict:
+        if not freshness.required():
+            return self._search_current(query, limit=limit, unit=unit, source=source, offset=offset)
+        def unavailable(state):
+            # Explicit error suppresses the server's automatic rg fallback: it must not
+            # hide an incomplete index or race a source publication.
+            return {"query": query, "ready": False, "stale": True,
+                    "degraded": "fts_index_" + state["state"], "freshness": state,
+                    "error": "Search index is updating or does not match the source commit; retry after refresh."}
+        with freshness.read_lock(self.ws.root) as acquired:
+            if not acquired:
+                return unavailable({"state": "updating", "fresh": False})
+            before = self.freshness()
+            if not before["fresh"]:
+                # Keep normal lazy recovery as a second line of defence. The scheduled
+                # refresh performs the primary, verified rebuild.
+                self.ensure_background()
+                return unavailable(before)
+            result = self._search_current(query, limit=limit, unit=unit, source=source, offset=offset)
+            after = self.freshness()
+            if not after["fresh"] or after.get("source_heads") != before.get("source_heads"):
+                return unavailable(after)
+            result["freshness"] = after
+            return result
+
+    def _search_current(self, query: str, *, limit: int = 20, unit: str = "", source: str = "",
+                        offset: int = 0) -> dict:
         if not fts_available():
             return {"error": "FTS5 недоступен в этой сборке Python (sqlite3 без fts5).",
                     "fts_available": False, "ready": False}
