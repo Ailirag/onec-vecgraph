@@ -14,12 +14,14 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from . import __version__, queries, tenancy
 from .config import get_settings
+from .sources.its import ItsSource
 from .sources.wiki import WikiSource
 from .storage import Neo4jStore
 
 # Тег корпуса вики. Берётся из адаптера, а не строкой: переименование корпуса не должно
 # тихо превратить wiki_semantic_search в поиск по пустоте.
 WIKI_CORPUS = WikiSource.source
+ITS_CORPUS = ItsSource.source
 
 settings = get_settings()
 
@@ -95,7 +97,10 @@ WHICH TOOL (by need):
   find_callers / find_callees / call_path (BSL call graph), find_overrides (how extensions alter
   a borrowed object's BSL via &Вместо/&Перед/&После/&ИзменениеИКонтроль), get_routine_source
   (full source of a method + its extension overrides, as agent context).
-• Documentation → search with source=['its'|'artifact'] (1C ITS / project docs, if ingested).
+• Official CONFIGURATION documentation from 1C:ITS → its_config_search, then
+  its_get_document for the selected full article. It is pinned to the caller's tenant and cannot
+  mix another configuration into the answer. Generic documentation search remains available via
+  search with source=['its'|'artifact'] (1C ITS / project docs, if ingested).
   ITS docs linked to an object → its_find_related_docs; full ITS doc by fqn → its_get_document.
   Project artifacts linked to an object → artifact_find_related_docs; full artifact by fqn →
   artifact_get_document. Search hits carry a 'corpus' field; filter by source to keep config and docs separate.
@@ -135,7 +140,9 @@ onec-lite for those needs. This server publishes only what lite cannot do:
   carry routine_fqn.
 • 1C development STANDARDS («как писать по стандартам 1С», v8std) → dev_standards_search, then
   dev_standards_get(<number>) for one standard's full text. Always available (shared corpus).
-• Documentation linked to a config object → its_find_related_docs / its_get_document (1C ITS),
+• Official CONFIGURATION documentation from 1C:ITS → its_config_search, then
+  its_get_document for the selected full article. Documentation linked to a config object →
+  its_find_related_docs / its_get_document,
   artifact_find_related_docs / artifact_get_document (project docs) — if those corpora were ingested.
 • Graph-wide analysis → impact_analysis (who breaks if this object changes: incoming references,
   subsystems, roles, subscriptions), call_path (shortest BSL call chain between two routines).
@@ -311,6 +318,34 @@ def find_type_usages(ctx: Context, query: str) -> dict[str, Any]:
 
 # ── ITS documentation (1C ITS knowledge base) ─────────────────────────
 @_tool
+def its_config_search(
+    ctx: Context, query: str, top_k: int = 8, expand: bool = False,
+) -> dict[str, Any]:
+    """Search the official 1C:ITS documentation for the caller's CONFIGURATION.
+
+    Use this for standard product behaviour, functional options, business-process steps and
+    documented user scenarios. The server pins the search to source=ITS and doc_topic=config, so
+    this tool cannot accidentally mix current configuration code, project artifacts, Wiki pages or
+    platform-wide development standards into the answer. Tenant authorization selects the product
+    corpus (UT, BP, ZUP, DO, ...); the model cannot select another tenant.
+
+    This is an indexed snapshot, not the live ITS portal. Results include the document fqn, title,
+    corpus version and source URL. Feed a selected fqn to its_get_document for the full text. Treat
+    ITS as the standard baseline and verify claims about the company's current implementation with
+    onec-lite/current code.
+    """
+    from .embeddings.runtime import provider, reranker
+
+    with Neo4jStore.from_settings(settings) as store:
+        t = _tenant(ctx)
+        return queries.hybrid_search(
+            store, t, query, provider(settings), top_k, reranker=reranker(settings),
+            source=[ITS_CORPUS], doc_topic="config", expand=expand,
+            shared_tenant_id=_shared(t),
+        )
+
+
+@_tool
 def its_find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
     """1C ITS documentation linked to an object (by fqn or name) via MENTIONS (explicit/scanned
     fqns) or RELATES_TO (semantic, with confidence). Answers 'what ITS docs cover this object'.
@@ -321,13 +356,14 @@ def its_find_related_docs(ctx: Context, query: str) -> dict[str, Any]:
 
 
 @_tool
-def its_get_document(ctx: Context, fqn: str) -> dict[str, Any]:
+def its_get_document(ctx: Context, fqn: str, corpus_version: str | None = None) -> dict[str, Any]:
     """Full ITS document by owner fqn ('its:<id>', e.g. from a search hit's fqn): metadata, full
     text (chunks rejoined) and the config objects it links to. Resolves in the caller tenant and
-    the shared public tenant."""
+    the shared public tenant. Explicit corpus_version pins an ITS configuration edition
+    in the caller tenant only and returns owner provenance with the chunks."""
     with Neo4jStore.from_settings(settings) as store:
         t = _tenant(ctx)
-        return queries.get_document(store, t, fqn, shared_tenant_id=_shared(t), source="its")
+        return queries.get_document(store, t, fqn, shared_tenant_id=_shared(t), source="its", corpus_version=corpus_version)
 
 
 # ── project artifacts (task docs / repo artifacts) ────────────────────

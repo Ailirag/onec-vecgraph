@@ -98,5 +98,5 @@ MCP — в проверенности и полноте. Поэтому проф
 
 ## Прочее
 - Тесты: `uv run pytest tests/` (bare `pytest` соберёт 0 — нет testpaths).
-- Как роли-потребители читают данные (read-only API из 29 инструментов) — [docs/MCP_USAGE.md](docs/MCP_USAGE.md).
+- Как роли-потребители читают данные (read-only API из 31 инструмента) — [docs/MCP_USAGE.md](docs/MCP_USAGE.md).
 - Снимок состояния проекта и инварианты — [docs/STATE.md](docs/STATE.md).

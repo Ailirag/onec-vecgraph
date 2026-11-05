@@ -64,9 +64,10 @@ onec-vecgraph serve --transport stdio
 `get_object_properties`, `get_dependencies`, `find_type_usages`, `find_callers`, `find_callees`,
 `call_graph`, `find_handlers`, `find_overrides`, `get_routine_source`, `metrics`, `platform_docinfo`,
 `platform_get_document`, `platform_versions`. Роль видит каждую способность один раз: структура/код/
-граф вызовов/справка платформы — из onec-lite; здесь остаётся уникальное (14):
+граф вызовов/справка платформы — из onec-lite; здесь остаётся уникальное (16):
 
-- поиск по смыслу: `hybrid_search`, `semantic_search`;
+- поиск по смыслу: `hybrid_search`, `semantic_search`, `wiki_semantic_search`;
+- официальная документация конфигурации 1С:ИТС: `its_config_search`, `its_get_document`;
 - знания: `dev_standards_search`/`dev_standards_get`, `its_*`, `artifact_*`;
 - анализ поверх глобального графа: `impact_analysis`, `call_path` (кратчайший путь вызовов — у lite его нет);
 - состояние БЗ: `list_configurations` (+ блок `layers`), `whoami`, `ping`, `neo4j_health`.
@@ -74,7 +75,7 @@ onec-vecgraph serve --transport stdio
 Настройка исключений: `PEER_LITE_KEEP="metrics,…"` — оставить конкретные из скрываемых;
 `DISABLED_TOOLS="…"` — скрыть произвольные инструменты в любом режиме (сильнее KEEP).
 Инструкции сервера (`initialize`) в этом режиме прямо направляют структурные вопросы в onec-lite.
-Standalone-развёртывание (без lite) ничего не меняет: `PEER_LITE=false` (по умолчанию) публикует все 29.
+Standalone-развёртывание (без lite) ничего не меняет: `PEER_LITE=false` (по умолчанию) публикует весь набор.
 
 ---
 
@@ -173,7 +174,7 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 
 ---
 
-## 4. Карта инструментов по потребности (29; в peer-lite — 14)
+## 4. Карта инструментов по потребности (31; в peer-lite — 16)
 
 ### Здоровье / контекст
 - **`ping`** — живость сервера (имя/версия).
@@ -213,6 +214,13 @@ ExchangePlan, DocumentJournal, DefinedType, CommonForm, … (полный спи
 
 ### Документация по объекту (нужен ingest корпусов ИТС/артефактов)
 Инструменты разделены по источнику — ИТС (`its_`), проектные артефакты (`artifact_`), справка платформы (`platform_`).
+- **`its_config_search(query, top_k=8, expand=False)`** — гибридный поиск по официальной
+  документации конфигурации 1С. Корпус жёстко ограничен `source=its`, `doc_topic=config`,
+  а конфигурация выбирается tenant-токеном сервера. После поиска читайте выбранную
+  статью через `its_get_document`.
+  Существенно разные редакции одной конфигурации размещаются в разных tenant и exact-route:
+  например, ДО КОРП 3.0 (`do30`) и ДО КОРП 2.1 (`do21`) нельзя объединять в один
+  поисковый разрез, иначе семантическая выдача смешивает несовместимые инструкции.
 - **`its_find_related_docs(query)`** — доки **ИТС**, связанные с объектом через `MENTIONS`
   (явные/сканированные fqn) или `RELATES_TO` (семантика, с `confidence`). «Какие ИТС-доки покрывают объект».
 - **`its_get_document(fqn)`** — ИТС-документ по fqn-владельца (`its:<id>`, напр. из `fqn` хита):

@@ -611,11 +611,42 @@ def find_related_docs(store, tenant_id: str, q: str, source: str | None = None) 
 
 
 def get_document(store, tenant_id: str, fqn: str, shared_tenant_id: str | None = None,
-                 source: str | None = None) -> dict[str, Any]:
+                 source: str | None = None, *, corpus_version: str | None = None) -> dict[str, Any]:
     """Full document by owner fqn (e.g. 'its:art-1' / 'platform_help:8.3.27|Массив.Найти'):
     metadata, full text (chunks rejoined), and the config objects it links to. Resolves in the
     caller tenant + the shared public tenant (so platform/BSP help docs are reachable).
     Optional `source` ('its' | 'artifact' | 'platform_help') guards the lookup to one corpus."""
+    if corpus_version is not None:
+        # Explicit edition reads never fall back to the shared tenant. Metadata,
+        # chunks and links come from the same matched owner in one read statement.
+        # This does not assert snapshot isolation across concurrent corpus ingestion.
+        if (source != "its" or not isinstance(corpus_version, str)
+                or not corpus_version.startswith("config:") or not 8 <= len(corpus_version) <= 256):
+            raise ValueError("Scoped ITS reads require an explicit configuration edition")
+        rows = store.read(
+            "MATCH (d:Document {tenant_id: $t, fqn: $fqn}) "
+            "WHERE d.source = 'its' AND d.doc_topic = 'config' AND d.corpus_version = $cv "
+            "WITH d LIMIT 1 "
+            "CALL { WITH d MATCH (d)-[:HAS_CHUNK]->(c:Chunk) "
+            "WHERE c.tenant_id = d.tenant_id "
+            "WITH c ORDER BY c.fqn RETURN collect(c.text) AS texts } "
+            "CALL { WITH d MATCH (d)-[r:MENTIONS|RELATES_TO]->(o:Object) "
+            "WHERE o.tenant_id = d.tenant_id "
+            "WITH r, o ORDER BY type(r), o.fqn "
+            "RETURN collect({rel:type(r), object:o.fqn, confidence:r.confidence}) AS links } "
+            "RETURN properties(d) AS props, texts, links",
+            t=tenant_id, fqn=fqn, cv=corpus_version,
+        )
+        if not rows:
+            return {"found": False, "fqn": fqn, "read_protocol": "its-owner-scoped-v1"}
+        row = rows[0]; props = row["props"]
+        return {"found": True, "fqn": props["fqn"], "label": "Document",
+                "source": props.get("source"), "tenant": props.get("tenant_id"),
+                "corpus_version": props.get("corpus_version"), "doc_topic": props.get("doc_topic"),
+                "version_hash": props.get("version_hash"), "title": props.get("title"),
+                "section_path": props.get("section_path"), "source_url": props.get("source_url"),
+                "text": "\n\n".join(row["texts"]), "links": row["links"],
+                "read_protocol": "its-owner-scoped-v1", "text_assembly": "stored-chunks"}
     tenants = [tenant_id] + ([shared_tenant_id] if shared_tenant_id and shared_tenant_id != tenant_id else [])
     rows = store.read(
         "MATCH (d {fqn: $fqn}) WHERE d.tenant_id IN $tenants AND (d:Document OR d:Artifact) "

@@ -34,7 +34,7 @@ MCP-сервер, который векторизует конфигурации
 - `server.py` — FastMCP-сервер (23 read-only инструмента + `instructions`); `cli.py` — CLI.
 - `config.py` — настройки; `tenancy.py` — резолв арендатора; `progress.py` — лог прогресса (скорость/%/ETA).
 
-## MCP умеет (read-only, 29 инструментов; детально — [MCP_USAGE.md](MCP_USAGE.md))
+## MCP умеет (read-only, 31 инструмент; детально — [MCP_USAGE.md](MCP_USAGE.md))
 здоровье/контекст (`ping`/`neo4j_health`/`whoami`) · поиск (`hybrid_search`/`semantic_search`) ·
 структура (`list_configurations`/`list_metadata`/`get_object`/`get_object_properties`) · зависимости (`get_dependencies`/
 `impact_analysis`/`find_type_usages`) · код (`find_handlers`/`find_callers`/`find_callees`/`call_path`/`find_overrides`/`get_routine_source`) ·

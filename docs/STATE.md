@@ -269,7 +269,7 @@ MCP-сервер: **векторизация конфигураций 1С (из 
   deps, usages, vectorize, search (+`--kind/--chunk-kind/--subsystem/--source/--expand`), **handlers**,
   **metrics**, **ingest**, **index-overlay**, callgraph, callers, callees, path, snapshot, snapshot-diff.
   `_flush_exit()`=os._exit (см. гочи).
-- `server.py` — FastMCP read-only, 29 инструментов (см. п.8), stateless_http; **условная публикация**:
+- `server.py` — FastMCP read-only, 31 инструмент (см. п.8), stateless_http; **условная публикация**:
   декоратор `@_tool` + гейт `_published` (env `PEER_LITE`/`PEER_LITE_KEEP`/`DISABLED_TOOLS`,
   набор `LITE_COVERED_TOOLS`), instructions per-режим (`INSTRUCTIONS`/`PEER_LITE_INSTRUCTIONS`).
 - `write_server.py` — FastMCP overlay-WRITE (opt-in, :8001), единств. тул `index_overlay`; `overlay.py`/
