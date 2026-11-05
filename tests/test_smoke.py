@@ -1,4 +1,5 @@
 import math
+from importlib.metadata import version
 
 from onec_vecgraph import __version__
 from onec_vecgraph.config import Settings
@@ -7,7 +8,7 @@ from onec_vecgraph.tenancy import TenantContext, context_from_headers
 
 
 def test_version() -> None:
-    assert __version__ == "0.1.0"
+    assert __version__ == version("onec-vecgraph")
 
 
 def test_hashing_embeddings_are_deterministic_and_normalized() -> None:

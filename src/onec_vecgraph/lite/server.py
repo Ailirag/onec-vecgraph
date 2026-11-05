@@ -151,7 +151,7 @@ _REDUNDANT_WITH_SHELL = frozenset({
 # значимости (в т.ч. чтобы найти обработчик сеанса среди десятков одноимённых методов).
 # Минимум под задачу код-ревью: «что я сломал» и проверка объекта.
 _REVIEW_PROFILE = frozenset({
-    "review_set", "find_callers", "find_overrides", "get_object", "read_routine",
+    "review_set", "find_callers", "find_overrides", "get_object", "get_metadata_indexes", "read_routine",
     "writes_to", "find_handlers", "overview", "list_workspaces",
     # Инструкции сервера советуют эти два по имени, значит они обязаны быть в любом профиле:
     # расхождение «текст советует — тула нет» само по себе повод не доверять ответу.
@@ -792,6 +792,64 @@ def _object_payload(ws: Workspace, obj: MetaObject, detail: bool) -> dict:
     elif obj.details:
         out["details_available"] = len(obj.details)
     return out
+
+
+@_tool
+def get_metadata_indexes(kind: str, name: str, source: str = "", workspace: str = "",
+                         table: str = "", field: str = "", include_unindexed: bool = False,
+                         offset: int = 0, max_results: int = 100) -> dict:
+    """Признаки индексации БД в метаданных, НЕ состояние FTS/поискового индекса.
+
+    Indexing у реквизитов/измерений/ресурсов/колонок/ТЧ, настройки регистра и отдельные
+    дополнительные индексы (порядок ключей, включённые поля, таблица). XML и EDT.
+    База и расширения возвращаются раздельно с source и путём; source сужает выбор.
+    table/field — подстроки без учёта регистра; include_unindexed добавляет DontIndex
+    и поля без явного свойства. Отсутствие флага НЕ доказывает отсутствие SQL-индекса.
+    Автоматические индексы: правила/контекст, не догадка о физической схеме прода.
+    """
+    from lxml import etree
+    from .metadata_indexes import indexing_rules, read_index_declarations
+
+    if err := _kind_ok(kind):
+        return _err(err)
+    if offset < 0 or not 1 <= max_results <= 500:
+        return _err("offset >= 0; max_results от 1 до 500")
+    ws = _ws(workspace)
+    found, error = ws.find_objects(kind, name, source)
+    if error:
+        return _err(error)
+    rows, sources, errors = [], [], []
+    for src, ref in found:
+        try:
+            declaration = read_index_declarations(ref[1], ref[2], kind, ref[0].split(".", 1)[1])
+        except (ValueError, OSError, etree.XMLSyntaxError) as exc:
+            errors.append({"source": src.name, "error": str(exc)})
+            continue
+        for row in declaration.pop("entries"):
+            row["source"] = src.name
+            if table.casefold() not in row["table"].casefold():
+                continue
+            fields = ([row["field"]] if row["entry_type"] == "field"
+                      else row["key_fields"] + row["included_fields"])
+            if field and not any(field.casefold() in f.casefold() for f in fields):
+                continue
+            relevant_flag = any(k.lower() != "fulltextsearch" and v.lower() == "true"
+                                for k, v in row.get("settings", {}).items())
+            if (not include_unindexed and row["entry_type"] == "field"
+                    and row["index_request"] in {"not_requested", "unspecified"}
+                    and not relevant_flag):
+                continue
+            rows.append(row)
+        sources.append({"source": src.name, "is_extension": src.is_extension,
+                        "metadata_file": str(ref[1]), **declaration})
+    return {"kind": kind, "name": name, "rules": indexing_rules(kind),
+            "sources": sources, "entries": rows[offset:offset + max_results],
+            "total": len(rows), "offset": offset, "truncated": offset + max_results < len(rows),
+            "next_offset": offset + max_results if offset + max_results < len(rows) else None,
+            "complete": not errors, "errors": errors,
+            "warning": "Декларации базы и расширений не являются полной физической схемой SQL. "
+                       "Пустой список не означает отсутствие автоматических индексов."}
+
 
 
 @_tool

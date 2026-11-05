@@ -85,7 +85,7 @@ def test_discovery_has_no_mcp_default(strict_server):
     assert "a" in {w["name"] for w in result["workspaces"]}
 
 
-@pytest.mark.parametrize("profile,count", [("lean", 23), ("full", 32), ("review", 11)])
+@pytest.mark.parametrize("profile,count", [("lean", 24), ("full", 33), ("review", 12)])
 def test_profiles_publish_same_tools_with_required_selection(strict_server, monkeypatch, profile, count):
     monkeypatch.setenv("ONEC_LITE_PROFILE", profile)
     importlib.reload(strict_server)
@@ -136,7 +136,7 @@ def test_real_http_dispatcher_rejects_every_tool_before_effects(strict_server, m
         })
         assert init["result"]["serverInfo"]["name"] == "onec-lite"
         tools = http_rpc(client, "tools/list", {})["result"]["tools"]
-        assert len(tools) == 32
+        assert len(tools) == 33
         discovery = http_rpc(client, "tools/call", {"name": "list_workspaces", "arguments": {}})
         assert not discovery["result"].get("isError", False)
         for tool in tools:

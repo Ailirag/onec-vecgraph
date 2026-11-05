@@ -1,6 +1,6 @@
 [project]
 name = "onec-vecgraph"
-version = "0.1.0"
+version = "0.2.1"
 description = "MCP server for vectorizing 1C:Enterprise configurations (Configurator XML dump) and building dependency + BSL call graphs in Neo4j."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
