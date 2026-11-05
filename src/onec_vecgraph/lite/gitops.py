@@ -39,6 +39,9 @@ def run_git(args: list[str], cwd: Path | None, timeout: int = _TIMEOUT) -> tuple
             # git отказывает на ЛЮБОЙ команде с "dubious ownership".
             ["git", "-c", "core.quotepath=off", "-c", "safe.directory=*", *args],
             cwd=str(cwd) if cwd is not None else None,
+            # см. gitview._git: наследовать stdin MCP-сервера нельзя — overlapped-хэндл
+            # подвешивает синхронный IO в дочернем git навсегда.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",

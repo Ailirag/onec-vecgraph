@@ -134,6 +134,7 @@ def rg_stream(
     args += ["-e", pattern, "--", *dirs]
     proc = subprocess.Popen(
         args,
+        stdin=subprocess.DEVNULL,  # не наследовать stdin сервера: см. gitview._git
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -233,6 +234,7 @@ def count_total(
     try:
         proc = subprocess.run(
             args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL,  # не наследовать stdin сервера: см. gitview._git
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=120,
         )
     except (OSError, subprocess.TimeoutExpired):

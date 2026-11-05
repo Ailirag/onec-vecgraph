@@ -39,6 +39,11 @@ def _git(args: list[str], cwd: Path) -> tuple[int, str]:
             # здесь только читающие, репозиторий доверенный (примонтирован оператором).
             ["git", "-c", "core.quotepath=off", "-c", "safe.directory=*", *args],
             cwd=str(cwd),
+            # stdin=DEVNULL обязателен: унаследованный хэндл stdin (MCP stdio-пайп,
+            # переведённый anyio/Proactor в overlapped-режим) делает синхронный IO
+            # в дочернем процессе вечным — git зависает до main() (проверено дампами:
+            # процесс живёт на 0 CPU, trace2 не пишется). Без наследования — 0.2 c.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",
